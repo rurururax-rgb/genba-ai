@@ -1,77 +1,171 @@
 @import "tailwindcss";
-@import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));
 
+/* ================================================================
+   shadcn/ui ベース変数（現場AI ブランドに更新）
+   ================================================================ */
+
 :root {
-  --background: 0 0% 100%;
-  --foreground: 222.2 84% 4.9%;
-  --card: 0 0% 100%;
-  --card-foreground: 222.2 84% 4.9%;
-  --popover: 0 0% 100%;
-  --popover-foreground: 222.2 84% 4.9%;
-  --primary: 222.2 47.4% 11.2%;
-  --primary-foreground: 210 40% 98%;
-  --secondary: 210 40% 96.1%;
-  --secondary-foreground: 222.2 47.4% 11.2%;
-  --muted: 210 40% 96.1%;
-  --muted-foreground: 215.4 16.3% 46.9%;
-  --accent: 210 40% 96.1%;
-  --accent-foreground: 222.2 47.4% 11.2%;
-  --destructive: 0 84.2% 60.2%;
-  --destructive-foreground: 210 40% 98%;
-  --border: 214.3 31.8% 91.4%;
-  --input: 214.3 31.8% 91.4%;
-  --ring: 222.2 84% 4.9%;
-  --radius: 0.5rem;
+  /* 背景: ウォームグレー (#F5F7FA) でカードを浮かせる */
+  --background:         210 33% 97%;
+  --foreground:         220 13% 7%;
+
+  --card:               0 0% 100%;
+  --card-foreground:    220 13% 7%;
+  --popover:            0 0% 100%;
+  --popover-foreground: 220 13% 7%;
+
+  /* Primary = インタラクティブブルー (#0A84FF) */
+  --primary:            210 100% 52%;
+  --primary-foreground: 0 0% 100%;
+
+  --secondary:          210 20% 95%;
+  --secondary-foreground: 214 53% 23%;
+
+  --muted:              210 20% 96%;
+  --muted-foreground:   215 14% 44%;
+
+  --accent:             210 100% 52%;
+  --accent-foreground:  0 0% 100%;
+
+  --destructive:        0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+
+  --border:             215 20% 91%;
+  --input:              215 20% 91%;
+  --ring:               210 100% 52%;
+  --radius:             0.5rem;
 }
 
 .dark {
-  --background: 222.2 84% 4.9%;
-  --foreground: 210 40% 98%;
-  --card: 222.2 84% 4.9%;
-  --card-foreground: 210 40% 98%;
-  --popover: 222.2 84% 4.9%;
+  --background:         214 53% 10%;
+  --foreground:         210 40% 98%;
+  --card:               214 53% 13%;
+  --card-foreground:    210 40% 98%;
+  --popover:            214 53% 13%;
   --popover-foreground: 210 40% 98%;
-  --primary: 210 40% 98%;
-  --primary-foreground: 222.2 47.4% 11.2%;
-  --secondary: 217.2 32.6% 17.5%;
+  --primary:            210 100% 55%;
+  --primary-foreground: 0 0% 100%;
+  --secondary:          214 30% 20%;
   --secondary-foreground: 210 40% 98%;
-  --muted: 217.2 32.6% 17.5%;
-  --muted-foreground: 215 20.2% 65.1%;
-  --accent: 217.2 32.6% 17.5%;
-  --accent-foreground: 210 40% 98%;
-  --destructive: 0 62.8% 30.6%;
-  --destructive-foreground: 210 40% 98%;
-  --border: 217.2 32.6% 17.5%;
-  --input: 217.2 32.6% 17.5%;
-  --ring: 212.7 26.8% 83.9%;
+  --muted:              214 30% 18%;
+  --muted-foreground:   215 14% 60%;
+  --accent:             210 100% 55%;
+  --accent-foreground:  0 0% 100%;
+  --destructive:        0 62% 45%;
+  --destructive-foreground: 0 0% 100%;
+  --border:             214 30% 22%;
+  --input:              214 30% 22%;
+  --ring:               210 100% 55%;
 }
 
+/* ================================================================
+   現場AI デザイントークン（Tailwind v4 @theme）
+   ================================================================ */
+
 @theme inline {
-  --color-background: hsl(var(--background));
-  --color-foreground: hsl(var(--foreground));
-  --color-card: hsl(var(--card));
-  --color-card-foreground: hsl(var(--card-foreground));
-  --color-popover: hsl(var(--popover));
+  /* shadcn 連携 */
+  --color-background:         hsl(var(--background));
+  --color-foreground:         hsl(var(--foreground));
+  --color-card:               hsl(var(--card));
+  --color-card-foreground:    hsl(var(--card-foreground));
+  --color-popover:            hsl(var(--popover));
   --color-popover-foreground: hsl(var(--popover-foreground));
-  --color-primary: hsl(var(--primary));
+  --color-primary:            hsl(var(--primary));
   --color-primary-foreground: hsl(var(--primary-foreground));
-  --color-secondary: hsl(var(--secondary));
+  --color-secondary:          hsl(var(--secondary));
   --color-secondary-foreground: hsl(var(--secondary-foreground));
-  --color-muted: hsl(var(--muted));
-  --color-muted-foreground: hsl(var(--muted-foreground));
-  --color-accent: hsl(var(--accent));
-  --color-accent-foreground: hsl(var(--accent-foreground));
-  --color-destructive: hsl(var(--destructive));
+  --color-muted:              hsl(var(--muted));
+  --color-muted-foreground:   hsl(var(--muted-foreground));
+  --color-accent:             hsl(var(--accent));
+  --color-accent-foreground:  hsl(var(--accent-foreground));
+  --color-destructive:        hsl(var(--destructive));
   --color-destructive-foreground: hsl(var(--destructive-foreground));
-  --color-border: hsl(var(--border));
-  --color-input: hsl(var(--input));
-  --color-ring: hsl(var(--ring));
-  --radius: var(--radius);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-border:             hsl(var(--border));
+  --color-input:              hsl(var(--input));
+  --color-ring:               hsl(var(--ring));
+  --radius:                   var(--radius);
+  --font-sans:                var(--font-geist-sans);
+  --font-mono:                var(--font-geist-mono);
+
+  /* ── ブランドカラー ──────────────────────────────── */
+  --color-navy:               #1B3659;
+  --color-navy-dark:          #0D2540;
+  --color-interactive:        #0A84FF;
+
+  /* ── サーフェス ──────────────────────────────────── */
+  --color-surface:            #FFFFFF;
+  --color-page:               #F5F7FA;
+  --color-border-subtle:      #E4E8EE;
+  --color-border-strong:      #C9D0DC;
+
+  /* ── テキスト ────────────────────────────────────── */
+  --color-ink:                #0D1117;
+  --color-ink-2:              #6B7280;
+  --color-ink-3:              #9CA3AF;
+
+  /* ── ステータスバッジ（案件カード用） ────────────── */
+  --color-s-gray-bg:          #F3F4F6;
+  --color-s-gray-tx:          #374151;
+  --color-s-amber-bg:         #FFFBEB;
+  --color-s-amber-tx:         #92400E;
+  --color-s-orange-bg:        #FFF7ED;
+  --color-s-orange-tx:        #9A3412;
+  --color-s-blue-bg:          #EFF6FF;
+  --color-s-blue-tx:          #1E40AF;
+  --color-s-green-bg:         #F0FDF4;
+  --color-s-green-tx:         #166534;
+
+  /* ── 機能別アクセント ────────────────────────────── */
+  --color-ai-bg:              #EEF2FF;
+  --color-ai-tx:              #4F46E5;
+  --color-note-bg:            #FFFBEB;
+  --color-note-tx:            #92400E;
+  --color-warn-bg:            #FEF2F2;
+  --color-warn-tx:            #DC2626;
+  --color-ok-bg:              #F0FDF4;
+  --color-ok-tx:              #16A34A;
+
+  /* ── タイポグラフィ ───────────────────────────────── */
+  --text-display: 28px;
+  --text-h1:      20px;
+  --text-h2:      17px;
+  --text-body:    15px;
+  --text-sm:      13px;
+  --text-label:   11px;
+  --text-micro:   10px;
+
+  /* ── 角丸 ────────────────────────────────────────── */
+  --radius-card:  16px;
+  --radius-inner: 10px;
+  --radius-chip:  6px;
+  --radius-pill:  28px;
+
+  /* ── シャドウ ─────────────────────────────────────── */
+  --shadow-card:  0 2px 8px rgba(0,0,0,0.07), 0 0 0 1px rgba(0,0,0,0.04);
+  --shadow-float: 0 4px 16px rgba(0,0,0,0.10), 0 0 0 1px rgba(0,0,0,0.05);
+  --shadow-modal: 0 20px 60px rgba(0,0,0,0.25);
 }
+
+/* ================================================================
+   レイアウト変数（CSS-only レスポンシブで使用）
+   ================================================================ */
+
+:root {
+  /* モバイル下タブ分のオフセット（fixed要素の bottom に使う） */
+  --bottom-safe: calc(49px + env(safe-area-inset-bottom));
+}
+
+@media (min-width: 1024px) {
+  :root {
+    --bottom-safe: 0px;
+  }
+}
+
+/* ================================================================
+   ベーススタイル
+   ================================================================ */
 
 * {
   border-color: hsl(var(--border));
@@ -80,4 +174,26 @@
 body {
   background-color: hsl(var(--background));
   color: hsl(var(--foreground));
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ================================================================
+   ユーティリティ（Tailwind では表現しにくい複合スタイル）
+   ================================================================ */
+
+/* カードの共通シャドウ */
+.card-shadow {
+  box-shadow: var(--shadow-card);
+}
+
+/* ステータスバッジの共通形状 */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: var(--radius-chip);
+  font-size: var(--text-label);
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
 }
