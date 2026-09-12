@@ -6,8 +6,9 @@ import { SpecImportTab } from './SpecImportTab'
 import { CostLedgerTab } from './CostLedgerTab'
 import { ProjectInfoPanel } from './ProjectInfoPanel'
 import { InvoiceTab } from './InvoiceTab'
+import { ScheduleTab } from './ScheduleTab'
 
-type Tab = 'estimate' | 'spec-import' | 'cost-ledger' | 'info' | 'invoice'
+type Tab = 'estimate' | 'spec-import' | 'cost-ledger' | 'info' | 'invoice' | 'schedule'
 
 type ProjectInfo = {
   id: string
@@ -120,6 +121,7 @@ export function ProjectTabs({
       {tab === 'invoice'     && <InvoiceTab projectId={projectId} projectInfo={projectInfo} />}
       {tab === 'spec-import' && <SpecImportTab projectId={projectId} />}
       {tab === 'cost-ledger' && <CostLedgerTab projectId={projectId} />}
+      {tab === 'schedule'    && <ScheduleTab projectId={projectId} />}
     </>
   )
 
