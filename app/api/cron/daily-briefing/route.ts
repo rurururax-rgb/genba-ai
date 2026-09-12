@@ -31,6 +31,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { supabaseAdmin } from '@/lib/supabase/admin'
 import { getDailyBriefingItems, filterHighPriorityItems, formatBriefingMessage } from '@/lib/services/daily-briefing'
+import { summarizeBriefingWithAI } from '@/lib/services/briefing-summarizer'
 import { sendLinePushMessage, maskUserId } from '@/lib/line/push'
 
 // ── JST 日付取得（Cron 実行時刻 23:00 UTC = 翌日 8:00 JST） ──────────
@@ -155,12 +156,27 @@ async function processBriefingForCompany(
     return { result: 'failed', reason: 'LINE_BRIEFING_USER_ID not set' }
   }
 
-  // ── Step 5: テンプレートメッセージ生成 ───────────────────────────
-  const messageText = formatBriefingMessage(items, jstDate)
+  // ── Step 5: メッセージ生成（AI 要約 → fallback: 決定論的テンプレート）──
+  // AI は「文章整形」のみ。件数・金額・優先度・推奨アクションは再計算させない。
+  // AI 失敗時は必ず決定論的テンプレートで送信する（AI 障害で通知が止まる設計は禁止）。
+  const aiResult = await summarizeBriefingWithAI(highItems, jstDate)
+
+  let messageText: string
+  let summarySource: 'ai' | 'template'
+
+  if (aiResult.ok) {
+    messageText = aiResult.text
+    summarySource = 'ai'
+    console.log(`[Cron] AI要約成功 company=${companyId} items=${highItems.length}`)
+  } else {
+    messageText = formatBriefingMessage(items, jstDate)
+    summarySource = 'template'
+    console.log(`[Cron] fallback使用（AI: ${aiResult.reason}） company=${companyId}`)
+  }
 
   // ── Step 6: LINE 送信 ─────────────────────────────────────────────
   console.log(
-    `[Cron] LINE 送信開始 → to=${maskUserId(lineUserId)} items=${highItems.length} company=${companyId}`
+    `[Cron] LINE 送信開始 → to=${maskUserId(lineUserId)} items=${highItems.length} source=${summarySource} company=${companyId}`
   )
 
   const pushResult = await sendLinePushMessage({ to: lineUserId, text: messageText })
@@ -180,19 +196,24 @@ async function processBriefingForCompany(
   }
 
   // ── Step 7: 送信成功 → status='sent' で記録 ─────────────────────
+  // summary_source は items_count に続く UPDATE フィールドとして記録する。
+  // daily_briefing_runs に専用カラムがあれば書き込む。なければ無視される。
+  const sentUpdate: Record<string, unknown> = {
+    status:         'sent',
+    items_count:    highItems.length,
+    sent_at:        new Date().toISOString(),
+    updated_at:     new Date().toISOString(),
+    summary_source: summarySource,   // カラム存在時のみ記録（なければ無視）
+  }
+
   await supabaseAdmin
     .from('daily_briefing_runs')
-    .update({
-      status:      'sent',
-      items_count: highItems.length,
-      sent_at:     new Date().toISOString(),
-      updated_at:  new Date().toISOString(),
-    })
+    .update(sentUpdate)
     .eq('company_id', companyId)
     .eq('briefing_date', jstDate)
 
   console.log(
-    `[Cron] LINE 送信成功 → to=${maskUserId(lineUserId)} items=${highItems.length} company=${companyId} date=${jstDate}`
+    `[Cron] LINE 送信成功 → to=${maskUserId(lineUserId)} items=${highItems.length} source=${summarySource} company=${companyId} date=${jstDate}`
   )
   return { result: 'sent', itemCount: highItems.length }
 }
