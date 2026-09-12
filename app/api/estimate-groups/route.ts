@@ -40,7 +40,7 @@ export async function POST(req: NextRequest) {
 
   const { data, error } = await supabase
     .from('estimate_groups')
-    .insert({ project_id, company_id: membership.company_id, label, sort_order })
+    .insert({ project_id, company_id: membership.company_id, label, sort_order, display_mode: 'detailed' })
     .select('id, label, display_mode, sort_order')
     .single()
 

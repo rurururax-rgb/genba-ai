@@ -50,28 +50,47 @@ export async function DELETE(
   return NextResponse.json({ ok: true, reflected_cleared, line_event_id: item.line_event_id })
 }
 
-// PATCH: quantity / selling_price を更新（amount は GENERATED ALWAYS AS で DB が自動再計算）
+// PATCH: 項目フィールドを更新（amount は GENERATED ALWAYS AS で DB が自動再計算）
 export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ id: string }> },
 ) {
   const { id } = await params
-  const body = (await req.json()) as { quantity?: number; selling_price?: number | null }
+  const body = (await req.json()) as {
+    quantity?:      number
+    selling_price?: number | null
+    retail_price?:  number | null
+    name?:          string
+    unit?:          string
+    memo?:          string | null
+    cost_price?:    number | null
+    vendor_name?:   string | null
+    category?:      string | null
+    row_type?:      'item' | 'header' | 'note'
+  }
   const supabase = await getServerClient()
 
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
   const patch: Record<string, unknown> = { updated_at: new Date().toISOString() }
-  if (body.quantity    !== undefined) patch.quantity     = body.quantity
+  if (body.quantity      !== undefined) patch.quantity      = body.quantity
   if (body.selling_price !== undefined) patch.selling_price = body.selling_price
+  if (body.retail_price  !== undefined) patch.retail_price  = body.retail_price
+  if (body.name          !== undefined) patch.name          = body.name
+  if (body.unit          !== undefined) patch.unit          = body.unit
+  if (body.memo          !== undefined) patch.memo          = body.memo
+  if (body.cost_price    !== undefined) patch.cost_price    = body.cost_price
+  if (body.vendor_name   !== undefined) patch.vendor_name   = body.vendor_name
+  if (body.category      !== undefined) patch.category      = body.category
+  if (body.row_type      !== undefined) patch.row_type      = body.row_type
 
   const { data, error } = await supabase
     .from('estimate_items')
     .update(patch)
     .eq('id', id)
     .is('deleted_at', null)
-    .select('id, name, quantity, unit, selling_price, amount, category, source, line_event_id')
+    .select('id, name, quantity, unit, selling_price, amount, retail_price, cost_price, vendor_name, category, source, line_event_id, memo, row_type')
     .single()
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })

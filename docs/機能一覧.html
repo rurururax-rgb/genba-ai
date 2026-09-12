@@ -1,0 +1,414 @@
+<title>現場AI 機能一覧</title>
+<style>
+  :root {
+    --navy:      #1E3A5F;
+    --navy-mid:  #2D5080;
+    --green:     #3D7A55;
+    --green-lt:  #EAF3DE;
+    --new:       #1D4ED8;
+    --new-lt:    #EFF6FF;
+    --amber:     #92400E;
+    --amber-lt:  #FEF3C7;
+    --muted:     #6B7280;
+    --muted-lt:  #F3F4F6;
+    --border:    #E5E7EB;
+    --bg:        #F8F9FA;
+    --white:     #FFFFFF;
+    --text:      #111827;
+    --text-sec:  #4B5563;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-size: 14px;
+    line-height: 1.6;
+  }
+
+  /* ── Header ── */
+  .hd {
+    background: linear-gradient(135deg, var(--navy) 0%, var(--navy-mid) 100%);
+    color: #fff;
+    padding: 28px 32px 24px;
+  }
+  .hd-top { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; margin-bottom: 6px; }
+  .hd h1 { font-size: 22px; font-weight: 800; letter-spacing: .04em; }
+  .hd-date { font-size: 12px; opacity: .65; }
+  .hd-sub { font-size: 13px; opacity: .8; }
+
+  /* ── Today banner ── */
+  .today-banner {
+    background: var(--new-lt);
+    border-left: 4px solid var(--new);
+    padding: 14px 24px;
+    margin: 20px 24px;
+    border-radius: 0 8px 8px 0;
+  }
+  .today-banner h2 { font-size: 13px; font-weight: 800; color: var(--new); letter-spacing: .06em; margin-bottom: 8px; }
+  .today-items { display: flex; flex-wrap: wrap; gap: 8px; }
+  .today-chip {
+    background: var(--new); color: #fff;
+    font-size: 12px; font-weight: 700;
+    padding: 4px 12px; border-radius: 20px;
+  }
+
+  /* ── Section ── */
+  .section { padding: 0 24px 24px; }
+  .section-title {
+    font-size: 11px; font-weight: 800; letter-spacing: .1em;
+    color: var(--muted); text-transform: uppercase;
+    padding: 20px 0 10px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 14px;
+  }
+
+  /* ── Feature grid ── */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+  }
+  .card {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  .card-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+  .card h3 { font-size: 14px; font-weight: 700; color: var(--text); line-height: 1.4; }
+  .card p  { font-size: 12px; color: var(--text-sec); line-height: 1.7; }
+  .card ul { padding-left: 14px; }
+  .card li { font-size: 12px; color: var(--text-sec); line-height: 1.8; }
+
+  /* ── Badge ── */
+  .badge {
+    font-size: 10px; font-weight: 800; padding: 2px 8px;
+    border-radius: 4px; white-space: nowrap; flex-shrink: 0;
+    letter-spacing: .02em;
+  }
+  .badge-done  { background: var(--green-lt); color: var(--green); }
+  .badge-new   { background: var(--new-lt);   color: var(--new);   }
+  .badge-later { background: var(--muted-lt); color: var(--muted); }
+  .badge-defer { background: var(--amber-lt); color: var(--amber); }
+
+  /* ── Talking points ── */
+  .points { background: var(--white); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+  .points h3 { font-size: 13px; font-weight: 800; color: var(--navy); margin-bottom: 12px; }
+  .point { display: flex; gap: 10px; margin-bottom: 12px; align-items: flex-start; }
+  .point-icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
+  .point-body strong { font-size: 13px; font-weight: 700; display: block; margin-bottom: 2px; }
+  .point-body span   { font-size: 12px; color: var(--text-sec); line-height: 1.7; }
+
+  /* ── Roadmap ── */
+  .roadmap { display: flex; flex-wrap: wrap; gap: 8px; }
+  .road-item {
+    background: var(--white); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 14px;
+    font-size: 12px; color: var(--muted);
+  }
+  .road-item strong { font-size: 13px; font-weight: 700; color: var(--text-sec); display: block; }
+
+  @media print {
+    body { background: white; }
+    .hd { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .today-banner, .badge-new { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  }
+  @media (max-width: 600px) {
+    .hd { padding: 20px 16px; }
+    .section { padding: 0 16px 20px; }
+    .today-banner { margin: 14px 16px; }
+  }
+</style>
+
+<!-- ── Header ── -->
+<div class="hd">
+  <div class="hd-top">
+    <h1>現場AI　機能一覧</h1>
+    <span class="hd-date">2026年8月28日 時点</span>
+  </div>
+  <div class="hd-sub">工務店向け業務補助ツール ／ 現場情報 → AI整理 → 見積・書類作成まで一気通貫</div>
+</div>
+
+<!-- ── Today banner ── -->
+<div class="today-banner">
+  <h2>🆕 本日追加した機能</h2>
+  <div class="today-items">
+    <span class="today-chip">挨拶回り文書（ロゴ・QR付き）</span>
+    <span class="today-chip">AIチャット 過去実績参照</span>
+    <span class="today-chip">見積への単価自動補完</span>
+    <span class="today-chip">「実績」バッジ表示</span>
+    <span class="today-chip">案件完了 → マスター自動還元</span>
+  </div>
+</div>
+
+<!-- ── 案件管理 ── -->
+<div class="section">
+  <div class="section-title">案件管理</div>
+  <div class="grid">
+
+    <div class="card">
+      <div class="card-top">
+        <h3>案件一覧</h3>
+        <span class="badge badge-done">✓ 完成</span>
+      </div>
+      <ul>
+        <li>カード形式でサムネイル・ステータスを表示</li>
+        <li>進行中 / 完了でセクション分け</li>
+        <li>ステータスバッジで色分け（収集中〜完了）</li>
+        <li>新規案件の作成</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="card-top">
+        <h3>案件詳細　基本情報タブ</h3>
+        <span class="badge badge-done">✓ 完成</span>
+      </div>
+      <ul>
+        <li>顧客名・工事場所・担当者・工期</li>
+        <li>見積有効期限・支払条件・支払割合（契約/着工/完工）</li>
+        <li>工事概要・備考</li>
+        <li>挨拶回り文書の出力ボタン</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="card-top">
+        <h3>挨拶回り文書</h3>
+        <span class="badge badge-new">🆕 本日</span>
+      </div>
+      <ul>
+        <li>Excelフォーマットを忠実にWeb再現</li>
+        <li>会社ロゴ・QRコード埋め込み済み</li>
+        <li>テキストをクリックして直接編集できる</li>
+        <li>印刷ボタンでそのままA4出力</li>
+      </ul>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── AIチャット ── -->
+<div class="section">
+  <div class="section-title">AIチャット（案件ごとのAI相棒）</div>
+  <div class="grid">
+
+    <div class="card">
+      <div class="card-top">
+        <h3>過去実績コンテキスト参照</h3>
+        <span class="badge badge-new">🆕 本日</span>
+      </div>
+      <p>チャットを開くたびに自社の過去実績データ（品名・単価・使用回数）を自動で読み込む。<br>「システムバスはいくら？」→「過去実績では¥551,700です（8回使用）」のように根拠付きで回答。<strong>データが増えるほど賢くなる。</strong></p>
+    </div>
+
+    <div class="card">
+      <div class="card-top">
+        <h3>見積・カタログ検索</h3>
+        <span class="badge badge-done">✓ 完成</span>
+      </div>
+      <ul>
+        <li>この案件の見積項目を自然言語で検索</li>
+        <li>自社カタログ（過去実績品目）を検索</li>
+        <li>カタログから見積に直接追加</li>
+        <li>あいまいな質問には候補ボタンで確認</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="card-top">
+        <h3>原価・Web検索</h3>
+        <span class="badge badge-done">✓ 完成</span>
+      </div>
+      <ul>
+        <li>原価台帳をチャットで検索・確認</li>
+        <li>建材・資材をWebで参考価格・型番検索（カタラボ）</li>
+        <li>資材マスターへの新規登録（確認フロー付き）</li>
+        <li>内部情報（原価・業者名）は回答に含めない設計</li>
+      </ul>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── 見積 ── -->
+<div class="section">
+  <div class="section-title">見積</div>
+  <div class="grid">
+
+    <div class="card">
+      <div class="card-top">
+        <h3>見積エディタ</h3>
+        <span class="badge badge-done">✓ 完成</span>
+      </div>
+      <ul>
+        <li>Excel風のスプレッドシート形式</li>
+        <li>工種グループ・見出し行で整理</li>
+        <li>数量×単価で金額を自動計算</li>
+        <li>諸経費（小計×8%）・端数値引きの自動計算</li>
+        <li>原価・粗利率のリアルタイム表示</li>
+        <li>変更履歴（Rev確定）機能</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="card-top">
+        <h3>単価の過去実績自動補完</h3>
+        <span class="badge badge-new">🆕 本日</span>
+      </div>
+      <p>AIチャットや仕様書取り込みから「見積に追加」したとき、自社の過去実績から同名品目の単価を自動で入力。<br>自動入力された単価には <strong style="color:#1D4ED8">「実績」</strong> バッジを表示し、手動で上書きも可能。</p>
+    </div>
+
+    <div class="card">
+      <div class="card-top">
+        <h3>見積書ドキュメント</h3>
+        <span class="badge badge-done">✓ 完成</span>
+      </div>
+      <ul>
+        <li>顧客提出用の正式書類フォーマット</li>
+        <li>見積番号・発行日・有効期限・特記事項</li>
+        <li>Excelファイル出力</li>
+        <li>PDFとして印刷出力</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="card-top">
+        <h3>仕様書の取り込み</h3>
+        <span class="badge badge-done">✓ 完成</span>
+      </div>
+      <ul>
+        <li>AIが音声メモ・テキストから工事内容を抽出</li>
+        <li>部屋ごと・箇所ごとの仕様を整理</li>
+        <li>抽出結果を見積エディタに転記</li>
+        <li>現場メモの保存・一覧表示</li>
+      </ul>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── 原価・請求 ── -->
+<div class="section">
+  <div class="section-title">原価・請求</div>
+  <div class="grid">
+
+    <div class="card">
+      <div class="card-top">
+        <h3>原価台帳</h3>
+        <span class="badge badge-done">✓ 完成</span>
+      </div>
+      <ul>
+        <li>発注先・品目・原価・支払予定日を管理</li>
+        <li>見積金額との対比・粗利確認</li>
+        <li>Excelインポート対応</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <div class="card-top">
+        <h3>請求書</h3>
+        <span class="badge badge-done">✓ 完成</span>
+      </div>
+      <ul>
+        <li>見積情報から自動生成</li>
+        <li>請求番号・請求日・支払期日の管理</li>
+        <li>PDF出力</li>
+      </ul>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── 自動学習 ── -->
+<div class="section">
+  <div class="section-title">使えば使うほど賢くなる仕組み</div>
+  <div class="grid">
+
+    <div class="card" style="border-color: #BFDBFE;">
+      <div class="card-top">
+        <h3>案件完了 → マスター自動還元</h3>
+        <span class="badge badge-new">🆕 本日</span>
+      </div>
+      <p>案件ステータスを「完了」にした瞬間、その案件で使った<strong>品名・単価・単位</strong>が自社マスターデータに自動で書き込まれる。<br>同じ品目を使うたびに使用回数も蓄積。データが育つほどAIの回答精度が上がる。</p>
+    </div>
+
+    <div class="card" style="border-color: #BFDBFE;">
+      <div class="card-top">
+        <h3>自社マスターデータ（蓄積型）</h3>
+        <span class="badge badge-done">✓ 完成</span>
+      </div>
+      <ul>
+        <li>過去に使った品名・単価・使用回数を蓄積</li>
+        <li>使用頻度の高い品目が上位に来る</li>
+        <li>AIチャットの単価回答・自動補完の精度に直結</li>
+        <li>Excelからのマスターデータ取り込みも対応</li>
+      </ul>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── 商談ポイント ── -->
+<div class="section">
+  <div class="section-title">商談で伝えるポイント</div>
+  <div class="points">
+
+    <div class="point">
+      <div class="point-icon">🤖</div>
+      <div class="point-body">
+        <strong>AIは「整理係」、判断するのは社長</strong>
+        <span>金額の確定・発注・通知はAIが自動では行わない。候補や下書きを出すだけで、最終判断は常に担当者。だから安心して使える。</span>
+      </div>
+    </div>
+
+    <div class="point">
+      <div class="point-icon">📈</div>
+      <div class="point-body">
+        <strong>使えば使うほど賢くなる</strong>
+        <span>案件を完了にするたびに単価データが蓄積。AIチャットへの「この品目いくら？」という質問への回答精度が、案件を重ねるごとに上がっていく。</span>
+      </div>
+    </div>
+
+    <div class="point">
+      <div class="point-icon">💬</div>
+      <div class="point-body">
+        <strong>社長の相棒として話しかけられる</strong>
+        <span>「システムバスの相場は？」「水回りで抜けてる項目は？」を自然な日本語で聞ける。自社の過去実績をもとに根拠付きで答える。</span>
+      </div>
+    </div>
+
+    <div class="point">
+      <div class="point-icon">📄</div>
+      <div class="point-body">
+        <strong>見積から挨拶状まで書類が揃う</strong>
+        <span>見積エディタ → 見積書 → 請求書 → 挨拶回り文書まで、案件に紐づいた書類を一か所で管理・出力できる。</span>
+      </div>
+    </div>
+
+    <div class="point">
+      <div class="point-icon">🔒</div>
+      <div class="point-body">
+        <strong>原価・粗利は外に出さない設計</strong>
+        <span>AIチャットの回答・顧客向け書類には原価・業者名が含まれない。セキュリティの考え方を最初から設計に組み込んでいる。</span>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── 今後のロードマップ ── -->
+<div class="section">
+  <div class="section-title">今後の実装予定（ロードマップ）</div>
+  <div class="roadmap">
+    <div class="road-item"><strong>写真アップロード UI</strong>現場写真の取り込み・場所・工程分類</div>
+    <div class="road-item"><strong>LINE 連携</strong>現場からの写真・音声を LINE で受信</div>
+    <div class="road-item"><strong>坪単価・面積管理</strong>延床面積を入力→坪単価の自動算出と相場比較</div>
+    <div class="road-item"><strong>図面読み込み</strong>PDF図面から面積・間取り情報をAIで抽出</div>
+    <div class="road-item"><strong>工程表</strong>工事スケジュールの作成・管理</div>
+    <div class="road-item"><strong>職人向け共有リンク</strong>施工情報を職人へ安全に共有</div>
+    <div class="road-item"><strong>設定画面</strong>会社情報・通知・LINE Webhook URL 管理</div>
+    <div class="road-item"><strong>見積の抜け漏れチェック</strong>過去パターンと比較して抜けを指摘</div>
+  </div>
+  <p style="font-size:12px; color:#6B7280; margin-top:14px;">※ 工程表は次フェーズで着手予定</p>
+</div>

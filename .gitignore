@@ -39,3 +39,25 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Claude Code local settings (local only)
+.claude/
+
+# Supabase CLI temp files (contains project ref, not secrets but local config)
+supabase/.temp/
+
+# Local Excel test / reference files
+*.xlsx
+~$*.xlsx
+
+# UI reference materials / design docs (local only)
+UI参考/
+design-system/
+アーキリンク・コンクルー資料/
+
+# Customer real data (never commit)
+お客様提出見積り/
+下請けからの見積書/
+見積り内訳書/
+見積書参考/
+議事録/

@@ -1,24 +1,27 @@
 /**
  * lib/excel/fill-template-v2.ts
  *
- * 自由グループ化・自由並び替えに対応した見積内訳書 Excel 出力（v2）。
+ * ブロック構造を保持した見積内訳書 Excel 出力（v2）。
  *
- * ■ 方針
- *   テンプレートから「シード行」(行62=グループ見出し, 行63=明細) を抽出し、
- *   必要な行数だけ複製してデータセクション（行62〜344）を丸ごと差し替える。
- *   複製した行の数式ノードは全て除去し、静的値を直書きする。
- *   他シート（見積表紙・ロゴ画像等）は JSZip 方式で一切変更しない。
+ * ■ テンプレート構造（確認済み）
+ *   データセクション: 行62〜344（283行 = 11ブロック）
+ *     ブロック0〜9: 各26行（ヘッダー1 + 明細19 + SUM1 + 区切り5）
+ *     ブロック10: 23行（ヘッダー1 + 明細19 + SUM1 + 区切り2）
+ *     ※ ブロック10の区切り行3〜5（345〜347）はフッター保持エリアに含まれる
+ *   フッター保持エリア: 行345〜（replaceDataSectionNodesで保持）
  *
  * ■ 書き込み列（K列以降は絶対に書き込まない）
  *   明細行 → C:名称  E:数量  F:単位  G:単価  H:金額  J:備考
  *   見出し行 → B:グループ名  H:グループ合計
  *
- * ■ 制約
- *   MAX_DATA_ROWS(283行) を超える場合はエラー
- *   グループ数が SUMMARY_ROW_COUNT(10) を超える場合は警告のみ（超過分はスキップ）
+ * ■ グループ上限
+ *   MAX 11グループ（NUM_BLOCKS）
+ *   1グループあたり MAX 19項目（ITEMS_PER_BLOCK）
+ *   ※ 超過分は警告を出してスキップ
  */
 
 import JSZip from 'jszip'
+import { XMLParser, XMLBuilder } from 'fast-xml-parser'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { extractMemoContent } from '@/lib/estimate/memo-utils'
@@ -31,20 +34,24 @@ const TEMPLATE_FILENAME  = 'estimate-template.xlsx'
 const SHEET_PATH         = 'xl/worksheets/sheet1.xml'
 const CALC_CHAIN_PATH    = 'xl/calcChain.xml'
 
-// データセクション（この範囲の行を丸ごと生成した行で置き換える）
-const SEED_HEADER_ROW    = 62    // グループ見出し行のひな形
-const SEED_ITEM_ROW      = 63    // 明細行のひな形
+const SEED_HEADER_ROW    = 62   // ブロック0のヘッダー行（全ブロックの基準）
 const DATA_SECTION_START = 62
-const FOOTER_START_ROW   = 345   // この行以降はフッター（変更しない）
-const MAX_DATA_ROWS      = FOOTER_START_ROW - DATA_SECTION_START  // 283行
+const FOOTER_START_ROW   = 345  // 行345以降をフッターとして保持
 
-// 集計表エリア（B37〜B46 / H37〜H46）
+const NUM_BLOCKS         = 11   // 10完全ブロック + 1部分ブロック
+const ITEMS_PER_BLOCK    = 19   // 明細スロット数/ブロック
+const BLOCK_INTERVAL     = 26   // 1ブロックの行数（完全ブロック）
+const SUM_OFFSET         = 20   // ヘッダー行からSUM行までのオフセット（1+19=20）
+const SEP_COUNT          = 5    // 区切り行数（完全ブロック）
+
 const SUMMARY_ROW_START  = 37
 const SUMMARY_ROW_COUNT  = 10
 
 // ──────────────────────────────────────────────────────────
 // 型定義
 // ──────────────────────────────────────────────────────────
+
+type XNode = Record<string, unknown>
 
 export type FillItemV2 = {
   name:          string
@@ -59,18 +66,26 @@ export type FillGroupV2 = {
   label:        string
   display_mode: 'detailed' | 'lump_sum'
   sort_order:   number
-  items:        FillItemV2[]   // sort_order 昇順で渡すこと
+  items:        FillItemV2[]
 }
 
 export type FillInputV2 = {
   groups:    FillGroupV2[]
   ungrouped: (FillItemV2 & { sort_order: number })[]
-  tax_rate:  number            // 例: 0.10
+  tax_rate:  number
 }
 
 export type FillResultV2 = {
   buffer:   Buffer
   warnings: string[]
+}
+
+// ブロックに書き込むデータ（グループまたはグループ外項目の集まり）
+type BlockData = {
+  label:        string
+  display_mode: 'detailed' | 'lump_sum'
+  items:        FillItemV2[]
+  total:        number
 }
 
 // ──────────────────────────────────────────────────────────
@@ -80,20 +95,27 @@ export type FillResultV2 = {
 export function validateFillInputV2(input: FillInputV2): string[] {
   const warnings: string[] = []
 
-  let totalRows = 0
+  // 必要なブロック数を計算（19項目超えの場合は繰り越しブロック分を含む）
+  let totalBlocks = 0
   for (const g of input.groups) {
-    totalRows++   // グループ見出し行
-    if (g.display_mode === 'detailed') totalRows += g.items.length
+    if (g.display_mode === 'lump_sum' || g.items.length === 0) {
+      totalBlocks++
+    } else {
+      totalBlocks += Math.ceil(g.items.length / ITEMS_PER_BLOCK)
+    }
   }
-  totalRows += input.ungrouped.length
+  if (input.ungrouped.length > 0) {
+    totalBlocks += Math.ceil(input.ungrouped.length / ITEMS_PER_BLOCK)
+  }
 
-  if (totalRows > MAX_DATA_ROWS) {
+  if (totalBlocks > NUM_BLOCKS) {
     throw new Error(
-      `出力行数(${totalRows}行)が上限(${MAX_DATA_ROWS}行)を超えています。` +
-      `グループ数または項目数を減らしてください。`,
+      `必要なブロック数(${totalBlocks})がテンプレートの上限(${NUM_BLOCKS})を超えています。` +
+      `項目数を削減するかグループを分割してください。`,
     )
   }
 
+  // 集計表の上限チェック（警告のみ）
   if (input.groups.length > SUMMARY_ROW_COUNT) {
     warnings.push(
       `グループ数(${input.groups.length}件)が集計表の上限(${SUMMARY_ROW_COUNT}件)を超えています。` +
@@ -105,75 +127,52 @@ export function validateFillInputV2(input: FillInputV2): string[] {
 }
 
 // ──────────────────────────────────────────────────────────
-// XML ユーティリティ（fill-template.ts と同パターン）
+// XML パーサー / ビルダー
 // ──────────────────────────────────────────────────────────
 
-function escapeXml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-}
-
-/**
- * セル要素を書き換える共通ロジック。
- * 自己終了タグと内容ありタグを別々に処理する（fill-template.ts と同実装）。
- */
-function replaceCell(
-  xml:     string,
-  cellRef: string,
-  builder: (attrs: string) => string,
-): string {
-  // ① 自己終了 <c r="X" s="..."/> — [^/]* で / の手前で停止
-  xml = xml.replace(
-    new RegExp(`<c r="${cellRef}"([^/]*)/>`, 'g'),
-    (_m, attrs: string) => builder(attrs),
-  )
-  // ② コンテンツあり <c r="X" s="...">...</c>
-  xml = xml.replace(
-    new RegExp(`<c r="${cellRef}"([^>]*)>.*?</c>`, 'gs'),
-    (_m, attrs: string) => builder(attrs),
-  )
-  return xml
-}
-
-function writeCellInlineStr(xml: string, cellRef: string, value: string): string {
-  const escaped = escapeXml(value)
-  return replaceCell(xml, cellRef, (attrs) => {
-    const clean = attrs.replace(/\s+t="[^"]*"/, '')
-    return `<c r="${cellRef}"${clean} t="inlineStr"><is><t xml:space="preserve">${escaped}</t></is></c>`
+function createParser(): XMLParser {
+  return new XMLParser({
+    ignoreAttributes:       false,
+    attributeNamePrefix:    '@_',
+    preserveOrder:          true,
+    allowBooleanAttributes: true,
+    parseTagValue:          false,
+    parseAttributeValue:    false,
+    trimValues:             false,
   })
 }
 
-function writeCellNumber(xml: string, cellRef: string, value: number): string {
-  return replaceCell(xml, cellRef, (attrs) => {
-    const clean = attrs.replace(/\s+t="[^"]*"/, '')
-    return `<c r="${cellRef}"${clean}><v>${value}</v></c>`
+function createBuilder(): XMLBuilder {
+  return new XMLBuilder({
+    ignoreAttributes:          false,
+    attributeNamePrefix:       '@_',
+    preserveOrder:             true,
+    suppressBooleanAttributes: false,
+    suppressEmptyNode:         true,
+    format:                    false,
   })
 }
 
-/**
- * H列専用: <f>...</f> 式ノードを除去して amount 値を直書き（fill-template.ts 互換）。
- */
-function writeCellAmountReplaceFormula(xml: string, cellRef: string, amount: number): string {
-  return xml.replace(
-    new RegExp(`<c r="${cellRef}"([^>]*)>.*?</c>`, 'gs'),
-    (_m, attrs: string) => {
-      const clean = attrs.replace(/\s+t="[^"]*"/, '')
-      return `<c r="${cellRef}"${clean}><v>${amount}</v></c>`
-    },
-  )
+// ──────────────────────────────────────────────────────────
+// ナビゲーション
+// ──────────────────────────────────────────────────────────
+
+function getSheetDataWrapper(doc: XNode[]): XNode {
+  const ws = doc.find(n => 'worksheet' in n) as XNode | undefined
+  if (!ws) throw new Error('worksheet 要素が見つかりません')
+  const sd = (ws.worksheet as XNode[]).find(n => 'sheetData' in n) as XNode | undefined
+  if (!sd) throw new Error('sheetData 要素が見つかりません')
+  return sd
 }
 
-// ──────────────────────────────────────────────────────────
-// シード行の抽出
-// ──────────────────────────────────────────────────────────
+function findRowWrapper(rows: XNode[], rowNum: number): XNode | undefined {
+  return rows.find(n => 'row' in n && (n[':@'] as XNode)['@_r'] === String(rowNum))
+}
 
-function extractRow(xml: string, rowNum: number): string {
-  const m = xml.match(new RegExp(`<row r="${rowNum}"[\\s\\S]*?<\\/row>`))
-  if (!m) throw new Error(`テンプレートに行${rowNum}が見つかりません`)
-  return m[0]
+function findCellWrapper(rowWrapper: XNode, cellRef: string): XNode | undefined {
+  return (rowWrapper.row as XNode[]).find(
+    n => 'c' in n && (n[':@'] as XNode)['@_r'] === cellRef,
+  )
 }
 
 // ──────────────────────────────────────────────────────────
@@ -181,131 +180,145 @@ function extractRow(xml: string, rowNum: number): string {
 // ──────────────────────────────────────────────────────────
 
 /**
- * シード行 XML の行番号を toRow に書き換え、全数式ノードを除去する。
- *
- * 数式除去の理由:
- *   - クローン行は静的値のみを持つ。数式参照が壊れても問題ない。
- *   - shared formula のマスター行も同時に削除されるため、参照行との不整合を防ぐ。
+ * シード行を深複製して行番号を書き換え、全数式ノードを除去する。
+ * fast-xml-parser の構造では <f> は子ノードのキーが 'f' であるため、
+ * filter(child => !('f' in child)) で shared/通常を問わず一括除去できる。
  */
-function cloneRow(seedXml: string, fromRow: number, toRow: number): string {
-  let xml = seedXml
-  // ① <row r="N"> の行番号
-  xml = xml.replace(new RegExp(`(<row r=")${fromRow}(")`), `$1${toRow}$2`)
-  // ② <c r="COLfromRow"> のセル参照（列はA〜最大3文字）
-  xml = xml.replace(new RegExp(`(r=")([A-Z]{1,3})${fromRow}(")`, 'g'), `$1$2${toRow}$3`)
-  // ③ 自己終了数式ノード <f .../> ← [^/]* で / の手前で停止
-  xml = xml.replace(/<f([^/]*)\/>/g, '')
-  // ④ コンテンツあり数式ノード <f ...>...</f>
-  xml = xml.replace(/<f([^>]*)>[\s\S]*?<\/f>/g, '')
-  return xml
-}
+function cloneRowNode(rowWrapper: XNode, toRow: number): XNode {
+  const cloned = structuredClone(rowWrapper) as XNode
 
-// ──────────────────────────────────────────────────────────
-// クローン行へのセル書き込み
-// ──────────────────────────────────────────────────────────
+  // ① 行番号を更新
+  ;(cloned[':@'] as XNode)['@_r'] = String(toRow)
 
-function setStr(rowXml: string, col: string, row: number, value: string): string {
-  return writeCellInlineStr(rowXml, `${col}${row}`, value)
-}
-
-function setNum(rowXml: string, col: string, row: number, value: number): string {
-  return writeCellNumber(rowXml, `${col}${row}`, value)
-}
-
-function clearCell(rowXml: string, col: string, row: number): string {
-  const ref = `${col}${row}`
-  return replaceCell(rowXml, ref, (attrs) => {
-    const clean = attrs.replace(/\s+t="[^"]*"/, '')
-    return `<c r="${ref}"${clean}/>`
-  })
-}
-
-// ──────────────────────────────────────────────────────────
-// 行生成
-// ──────────────────────────────────────────────────────────
-
-function buildItemRow(
-  seedItemXml: string,
-  targetRow:   number,
-  item:        FillItemV2,
-): string {
-  let row = cloneRow(seedItemXml, SEED_ITEM_ROW, targetRow)
-  row = setStr(row, 'C', targetRow, item.name)
-  row = setNum(row, 'E', targetRow, item.quantity)
-  row = setStr(row, 'F', targetRow, item.unit)
-  if (item.selling_price != null) {
-    row = setNum(row, 'G', targetRow, item.selling_price)
-  } else {
-    row = clearCell(row, 'G', targetRow)
+  // ② 各セルのセル参照を更新し、数式ノードを除去
+  for (const cellWrapper of cloned.row as XNode[]) {
+    if (!('c' in cellWrapper)) continue
+    const attrs = cellWrapper[':@'] as XNode
+    const oldRef = attrs['@_r'] as string
+    attrs['@_r'] = oldRef.replace(/\d+$/, String(toRow))
+    cellWrapper.c = (cellWrapper.c as XNode[]).filter(child => !('f' in child))
   }
-  row = setNum(row, 'H', targetRow, item.amount ?? 0)
-  const memo = extractMemoContent(item.memo)
-  if (memo) row = setStr(row, 'J', targetRow, memo)
-  else       row = clearCell(row, 'J', targetRow)
-  return row
-}
-
-function buildGroupHeaderRow(
-  seedHeaderXml: string,
-  targetRow:     number,
-  label:         string,
-  total:         number,
-): string {
-  let row = cloneRow(seedHeaderXml, SEED_HEADER_ROW, targetRow)
-  row = clearCell(row, 'A', targetRow)  // ブロック番号欄をクリア
-  row = setStr(row, 'B', targetRow, label)
-  row = setNum(row, 'H', targetRow, total)
-  return row
+  return cloned
 }
 
 // ──────────────────────────────────────────────────────────
-// トップレベル要素の混合ソート
+// セル書き込み
 // ──────────────────────────────────────────────────────────
 
-type TopElement =
-  | { kind: 'group'; group: FillGroupV2; order: number }
-  | { kind: 'item';  item: FillItemV2 & { sort_order: number }; order: number }
+function setCellString(rowWrapper: XNode, col: string, rowNum: number, value: string): void {
+  const cell = findCellWrapper(rowWrapper, `${col}${rowNum}`)
+  if (!cell) return
+  const attrs = cell[':@'] as XNode
+  attrs['@_t'] = 'inlineStr'
+  cell.c = [{ is: [{ t: [{ '#text': value }], ':@': { '@_xml:space': 'preserve' } }] }]
+}
 
-function buildTopElements(input: FillInputV2): TopElement[] {
-  return [
-    ...input.groups.map(g => ({ kind: 'group' as const, group: g, order: g.sort_order })),
-    ...input.ungrouped.map(i => ({ kind: 'item' as const, item: i, order: i.sort_order })),
-  ].sort((a, b) => a.order - b.order)
+function setCellNumber(rowWrapper: XNode, col: string, rowNum: number, value: number): void {
+  const cell = findCellWrapper(rowWrapper, `${col}${rowNum}`)
+  if (!cell) return
+  const attrs = cell[':@'] as XNode
+  delete attrs['@_t']
+  cell.c = [{ v: [{ '#text': String(value) }] }]
+}
+
+function clearCellNode(rowWrapper: XNode, col: string, rowNum: number): void {
+  const cell = findCellWrapper(rowWrapper, `${col}${rowNum}`)
+  if (!cell) return
+  const attrs = cell[':@'] as XNode
+  delete attrs['@_t']
+  cell.c = []
+}
+
+// フッター・集計表用: f・v を含む既存子ノードを全て破棄して静的値を書き込む
+function setFormulaCell(rowWrapper: XNode, col: string, rowNum: number, value: number): void {
+  const cell = findCellWrapper(rowWrapper, `${col}${rowNum}`)
+  if (!cell) return
+  delete (cell[':@'] as XNode)['@_t']
+  cell.c = [{ v: [{ '#text': String(value) }] }]
 }
 
 // ──────────────────────────────────────────────────────────
-// データセクションの置換
+// データセクション置換
 // ──────────────────────────────────────────────────────────
 
-function replaceDataSection(xml: string, dataRows: string[]): string {
-  // "行62" の開始位置
-  const dataStart = xml.indexOf(`<row r="${DATA_SECTION_START}" `)
-  if (dataStart === -1) {
-    throw new Error(`テンプレートにデータセクション開始行(${DATA_SECTION_START})が見つかりません`)
+function replaceDataSectionNodes(rows: XNode[], newRows: XNode[]): XNode[] {
+  const before = rows.filter(
+    n => !('row' in n) || Number((n[':@'] as XNode)['@_r']) < DATA_SECTION_START,
+  )
+  const after = rows.filter(
+    n => 'row' in n && Number((n[':@'] as XNode)['@_r']) >= FOOTER_START_ROW,
+  )
+  return [...before, ...newRows, ...after]
+}
+
+// ──────────────────────────────────────────────────────────
+// 孤立した共有数式子セルの除去
+// ──────────────────────────────────────────────────────────
+
+function stripOrphanedSharedFormulaChildren(rows: XNode[]): number {
+  const rowWrappers = rows.filter(n => 'row' in n)
+
+  const masterSis = new Set<string>()
+  for (const rowWrapper of rowWrappers) {
+    for (const cellWrapper of rowWrapper.row as XNode[]) {
+      if (!('c' in cellWrapper)) continue
+      for (const child of cellWrapper.c as XNode[]) {
+        if (!('f' in child)) continue
+        const fAttrs = (child[':@'] ?? {}) as XNode
+        if (fAttrs['@_ref'] && fAttrs['@_si'] != null) {
+          masterSis.add(String(fAttrs['@_si']))
+        }
+      }
+    }
   }
-  // "行345" の開始位置（フッター先頭）
-  const footerStart = xml.indexOf(`<row r="${FOOTER_START_ROW}" `)
-  if (footerStart === -1) {
-    throw new Error(`テンプレートにフッター開始行(${FOOTER_START_ROW})が見つかりません`)
+
+  let removed = 0
+  for (const rowWrapper of rowWrappers) {
+    for (const cellWrapper of rowWrapper.row as XNode[]) {
+      if (!('c' in cellWrapper)) continue
+      const before = (cellWrapper.c as XNode[]).length
+      cellWrapper.c = (cellWrapper.c as XNode[]).filter(child => {
+        if (!('f' in child)) return true
+        const fAttrs = (child[':@'] ?? {}) as XNode
+        if (fAttrs['@_ref']) return true
+        const si = fAttrs['@_si']
+        if (si == null) return true
+        return masterSis.has(String(si))
+      })
+      removed += before - (cellWrapper.c as XNode[]).length
+    }
   }
-  const before = xml.substring(0, dataStart)
-  const after  = xml.substring(footerStart)
-  return before + dataRows.join('') + after
+  return removed
 }
 
 // ──────────────────────────────────────────────────────────
-// 合計・消費税・総合計の静的値書き込み（H54 / H55 / H57）
-//
-// テンプレートのセル構造（確認済み）:
-//   H54 = shared formula SUM(H37:H53)  ← 合計
-//   H55 = formula H54*10%              ← 消費税
-//   H57 = formula SUM(H54:H56)         ← 総合計
-//
-// calcChain.xml 削除後に Excel が再計算するが、
-// 静的値を書き込むことで再計算なしでも正しい値を表示する。
+// グループ集計表（B37〜B46 / H37〜H46）
 // ──────────────────────────────────────────────────────────
 
-function fillFooterTotals(xml: string, input: FillInputV2): string {
+function fillGroupSummaryNodes(rows: XNode[], input: FillInputV2): void {
+  const groups = input.groups.slice(0, SUMMARY_ROW_COUNT)
+
+  for (let i = 0; i < SUMMARY_ROW_COUNT; i++) {
+    const summaryRow = SUMMARY_ROW_START + i
+    const rowWrapper = findRowWrapper(rows, summaryRow)
+    if (!rowWrapper) continue
+
+    if (i < groups.length) {
+      const total = groups[i].items.reduce((s, it) => s + (it.amount ?? 0), 0)
+      setCellString(rowWrapper, 'B', summaryRow, groups[i].label)
+      setFormulaCell(rowWrapper, 'H', summaryRow, total)
+    } else {
+      setCellString(rowWrapper, 'B', summaryRow, '')
+      setFormulaCell(rowWrapper, 'H', summaryRow, 0)
+    }
+  }
+}
+
+// ──────────────────────────────────────────────────────────
+// フッター合計（H54 / H55 / H57）
+// ──────────────────────────────────────────────────────────
+
+function fillFooterTotalsNodes(rows: XNode[], input: FillInputV2): void {
   const subtotal = [
     ...input.groups.flatMap(g => g.items),
     ...input.ungrouped,
@@ -314,32 +327,144 @@ function fillFooterTotals(xml: string, input: FillInputV2): string {
   const tax        = Math.round(subtotal * input.tax_rate)
   const grandTotal = subtotal + tax
 
-  xml = writeCellAmountReplaceFormula(xml, 'H54', subtotal)
-  xml = writeCellAmountReplaceFormula(xml, 'H55', tax)
-  xml = writeCellAmountReplaceFormula(xml, 'H57', grandTotal)
-
-  return xml
+  for (const [rowNum, value] of [[54, subtotal], [55, tax], [57, grandTotal]] as [number, number][]) {
+    const rowWrapper = findRowWrapper(rows, rowNum)
+    if (rowWrapper) setFormulaCell(rowWrapper, 'H', rowNum, value)
+  }
 }
 
 // ──────────────────────────────────────────────────────────
-// グループ集計表エリア（B37〜B46 / H37〜H46）
+// ブロックデータ構築
 // ──────────────────────────────────────────────────────────
 
-function fillGroupSummary(xml: string, input: FillInputV2): string {
-  const groups = input.groups.slice(0, SUMMARY_ROW_COUNT)
+function buildBlocksWithOverflow(input: FillInputV2): BlockData[] {
+  const blocks: BlockData[] = []
+  const sortedGroups = [...input.groups].sort((a, b) => a.sort_order - b.sort_order)
 
-  for (let i = 0; i < SUMMARY_ROW_COUNT; i++) {
-    const summaryRow = SUMMARY_ROW_START + i  // 37〜46
-    if (i < groups.length) {
-      const total = groups[i].items.reduce((s, it) => s + (it.amount ?? 0), 0)
-      xml = writeCellInlineStr(xml, `B${summaryRow}`, groups[i].label)
-      xml = writeCellAmountReplaceFormula(xml, `H${summaryRow}`, total)
+  for (const g of sortedGroups) {
+    if (g.display_mode === 'lump_sum') {
+      blocks.push({
+        label:        g.label,
+        display_mode: 'lump_sum',
+        items:        [],
+        total:        g.items.reduce((s, it) => s + (it.amount ?? 0), 0),
+      })
+    } else if (g.items.length === 0) {
+      blocks.push({ label: g.label, display_mode: 'detailed', items: [], total: 0 })
     } else {
-      xml = writeCellInlineStr(xml, `B${summaryRow}`, '')
-      xml = writeCellAmountReplaceFormula(xml, `H${summaryRow}`, 0)
+      for (let offset = 0; offset < g.items.length; offset += ITEMS_PER_BLOCK) {
+        const chunk = g.items.slice(offset, offset + ITEMS_PER_BLOCK)
+        blocks.push({
+          label:        offset === 0 ? g.label : `${g.label}（続き）`,
+          display_mode: 'detailed',
+          items:        chunk,
+          total:        chunk.reduce((s, it) => s + (it.amount ?? 0), 0),
+        })
+      }
     }
   }
-  return xml
+
+  if (input.ungrouped.length > 0) {
+    const sorted = [...input.ungrouped].sort((a, b) => a.sort_order - b.sort_order)
+    for (let offset = 0; offset < sorted.length; offset += ITEMS_PER_BLOCK) {
+      const chunk = sorted.slice(offset, offset + ITEMS_PER_BLOCK)
+      blocks.push({
+        label:        offset === 0 ? '' : '（続き）',
+        display_mode: 'detailed',
+        items:        chunk,
+        total:        chunk.reduce((s, it) => s + (it.amount ?? 0), 0),
+      })
+    }
+  }
+
+  return blocks
+}
+
+// ──────────────────────────────────────────────────────────
+// 生成 XML の検証
+// ──────────────────────────────────────────────────────────
+
+export function validateGeneratedXml(xml: string): void {
+  const doc = createParser().parse(xml) as XNode[]
+  const sdWrapper = getSheetDataWrapper(doc)
+  const rows = sdWrapper.sheetData as XNode[]
+  const rowWrappers = rows.filter(n => 'row' in n)
+
+  // ① 行番号の重複チェック
+  const rowNums = rowWrappers.map(n => (n[':@'] as XNode)['@_r'] as string)
+  const dupes = rowNums.filter((n, i) => rowNums.indexOf(n) !== i)
+  if (dupes.length > 0) {
+    throw new Error(`[validate] 行番号重複: ${dupes.join(', ')}`)
+  }
+
+  // ② データセクションの欠損行チェック（行62〜344が全て存在するか）
+  const rowNumSet = new Set(rowNums.map(Number))
+  const missingRows: number[] = []
+  for (let r = DATA_SECTION_START; r < FOOTER_START_ROW; r++) {
+    if (!rowNumSet.has(r)) missingRows.push(r)
+  }
+  if (missingRows.length > 0) {
+    const first = missingRows[0]
+    const last  = missingRows[missingRows.length - 1]
+    const sample = missingRows.slice(0, 5).join(', ')
+    throw new Error(
+      `[validate] データセクションに欠損行があります: ${missingRows.length}行 ` +
+      `(${first}〜${last}, 例: ${sample}${missingRows.length > 5 ? '...' : ''})`,
+    )
+  }
+
+  // ③・④ 全行に対して: 数式残存（データ行のみ）・<v> 二重を一括チェック
+  // ⑤ 共有数式整合性チェック用データ収集
+  const sharedMasterSis = new Map<string, string>()
+  const sharedChildSis  = new Map<string, string[]>()
+
+  for (const rowWrapper of rowWrappers) {
+    const rowNum  = (rowWrapper[':@'] as XNode)['@_r'] as string
+    const rowN    = Number(rowNum)
+    const isDataRow = rowN >= DATA_SECTION_START && rowN < FOOTER_START_ROW
+
+    for (const cellWrapper of rowWrapper.row as XNode[]) {
+      if (!('c' in cellWrapper)) continue
+      const children = cellWrapper.c as XNode[]
+      const cellRef  = (cellWrapper[':@'] as XNode)['@_r'] as string
+
+      if (isDataRow && children.some(ch => 'f' in ch)) {
+        throw new Error(`[validate] 数式が残っています: 行${rowNum} セル${cellRef}`)
+      }
+
+      const vCount = children.filter(ch => 'v' in ch).length
+      if (vCount > 1) {
+        throw new Error(`[validate] <v> ノード二重: 行${rowNum} セル${cellRef} (${vCount}個)`)
+      }
+
+      for (const child of children) {
+        if (!('f' in child)) continue
+        const fAttrs = (child[':@'] ?? {}) as XNode
+        const si = String(fAttrs['@_si'] ?? '')
+        if (!si) continue
+        if (fAttrs['@_ref']) {
+          sharedMasterSis.set(si, cellRef)
+        } else {
+          if (!sharedChildSis.has(si)) sharedChildSis.set(si, [])
+          sharedChildSis.get(si)!.push(cellRef)
+        }
+      }
+    }
+  }
+
+  // ⑤ 孤立した共有数式子セルの検出
+  const orphanSis: string[] = []
+  for (const [si, childCells] of sharedChildSis) {
+    if (!sharedMasterSis.has(si)) {
+      orphanSis.push(`si=${si}(${childCells.length}件, 例:${childCells[0]})`)
+    }
+  }
+  if (orphanSis.length > 0) {
+    throw new Error(
+      `[validate] 孤立した共有数式子セル（マスターなし）: ${orphanSis.slice(0, 5).join(', ')}` +
+      (orphanSis.length > 5 ? ` ... 他${orphanSis.length - 5}種類` : ''),
+    )
+  }
 }
 
 // ──────────────────────────────────────────────────────────
@@ -355,48 +480,132 @@ export async function fillTemplateV2(input: FillInputV2): Promise<FillResultV2> 
 
   const sheetEntry = zip.file(SHEET_PATH)
   if (!sheetEntry) throw new Error(`${SHEET_PATH} が見つかりません`)
-  let xml = await sheetEntry.async('string')
+  const xmlString = await sheetEntry.async('string')
 
-  // シード行をデータセクション置換前に抽出する
-  const seedHeaderXml = extractRow(xml, SEED_HEADER_ROW)
-  const seedItemXml   = extractRow(xml, SEED_ITEM_ROW)
+  // ① パース（1回だけ）
+  const doc = createParser().parse(xmlString) as XNode[]
 
-  // データ行を生成
-  const topElements = buildTopElements(input)
-  const dataRows: string[] = []
-  let currentRow = DATA_SECTION_START
+  const wsWrapper = doc.find(n => 'worksheet' in n) as XNode
+  const sdWrapper = (wsWrapper.worksheet as XNode[]).find(n => 'sheetData' in n) as XNode
 
-  for (const el of topElements) {
-    if (el.kind === 'group') {
-      const total = el.group.items.reduce((s, it) => s + (it.amount ?? 0), 0)
-      dataRows.push(buildGroupHeaderRow(seedHeaderXml, currentRow, el.group.label, total))
-      currentRow++
+  // ② テンプレート行一覧を取得
+  const allRows: XNode[] = sdWrapper.sheetData as XNode[]
 
-      if (el.group.display_mode === 'detailed') {
-        for (const item of el.group.items) {
-          dataRows.push(buildItemRow(seedItemXml, currentRow, item))
-          currentRow++
-        }
-      }
+  // ③ ブロック0のSUM行・区切り行シードを取得
+  const seedSumRowNum = SEED_HEADER_ROW + SUM_OFFSET  // row 82
+  const seedSumWrapper = findRowWrapper(allRows, seedSumRowNum)
+  if (!seedSumWrapper) throw new Error(`テンプレートにSUM行(${seedSumRowNum})が見つかりません`)
+
+  const seedSepWrappers: XNode[] = []
+  for (let si = 0; si < SEP_COUNT; si++) {
+    const r = seedSumRowNum + 1 + si  // rows 83〜87
+    const w = findRowWrapper(allRows, r)
+    if (!w) throw new Error(`テンプレートに区切り行(${r})が見つかりません`)
+    seedSepWrappers.push(w)
+  }
+
+  // ④ ブロック別データを構築（19項目超えは次ブロックへ繰り越し）
+  const blockDataList = buildBlocksWithOverflow(input)
+
+  // ⑤ データセクション全行を生成（行62〜344 = 283行）
+  //    ブロック0〜9: 各26行（ヘッダー1 + 明細19 + SUM1 + 区切り5）
+  //    ブロック10: 23行（ヘッダー1 + 明細19 + SUM1 + 区切り2）
+  const newRows: XNode[] = []
+
+  for (let blockN = 0; blockN < NUM_BLOCKS; blockN++) {
+    const blockBase    = SEED_HEADER_ROW + blockN * BLOCK_INTERVAL  // 62 + N*26
+    const blockSumRow  = blockBase + SUM_OFFSET                     // 82 + N*26
+    const blockSepBase = blockSumRow + 1                            // 83 + N*26
+    const blockData    = blockDataList[blockN] ?? null
+
+    // ─ ヘッダー行 ─
+    const templateHeader = findRowWrapper(allRows, blockBase)
+    if (!templateHeader) throw new Error(`テンプレートにブロック${blockN}のヘッダー行(${blockBase})が見つかりません`)
+    const headerNode = cloneRowNode(templateHeader, blockBase)
+    clearCellNode(headerNode, 'A', blockBase)
+    if (blockData) {
+      setCellString(headerNode, 'B', blockBase, blockData.label)
+      // 参考準拠：グループ見出し行には合計を表示しない
+      clearCellNode(headerNode, 'H', blockBase)
     } else {
-      dataRows.push(buildItemRow(seedItemXml, currentRow, el.item))
-      currentRow++
+      clearCellNode(headerNode, 'B', blockBase)
+      clearCellNode(headerNode, 'H', blockBase)
+    }
+    newRows.push(headerNode)
+
+    // ─ 明細行（19スロット）─
+    const items = blockData?.display_mode === 'detailed' ? blockData.items : []
+    for (let slot = 0; slot < ITEMS_PER_BLOCK; slot++) {
+      const rowNum = blockBase + 1 + slot
+      const templateItem = findRowWrapper(allRows, rowNum)
+      if (!templateItem) throw new Error(`テンプレートに明細行(${rowNum})が見つかりません`)
+      const itemNode = cloneRowNode(templateItem, rowNum)
+
+      if (slot < items.length) {
+        const item = items[slot]
+        setCellString(itemNode, 'C', rowNum, item.name)
+        setCellNumber(itemNode, 'E', rowNum, item.quantity)
+        setCellString(itemNode, 'F', rowNum, item.unit)
+        // 参考準拠：数量=1のとき単価欄は空白（金額と同じ値になるため不要）
+        if (item.selling_price != null && item.quantity > 1) {
+          setCellNumber(itemNode, 'G', rowNum, item.selling_price)
+        } else {
+          clearCellNode(itemNode, 'G', rowNum)
+        }
+        setCellNumber(itemNode, 'H', rowNum, item.amount ?? 0)
+        const memo = extractMemoContent(item.memo)
+        if (memo) setCellString(itemNode, 'J', rowNum, memo)
+        else       clearCellNode(itemNode, 'J', rowNum)
+      } else {
+        // 未使用スロット: 表示列をクリア
+        clearCellNode(itemNode, 'C', rowNum)
+        clearCellNode(itemNode, 'E', rowNum)
+        clearCellNode(itemNode, 'F', rowNum)
+        clearCellNode(itemNode, 'G', rowNum)
+        clearCellNode(itemNode, 'H', rowNum)
+        clearCellNode(itemNode, 'J', rowNum)
+      }
+      newRows.push(itemNode)
+    }
+
+    // ─ SUM行（ブロック0のシードを使用、数式は除去済み）─
+    // H列のSUM数式は除去されるため、グループ合計を静的値として書き込む
+    const sumNode = cloneRowNode(seedSumWrapper, blockSumRow)
+    setCellNumber(sumNode, 'H', blockSumRow, blockData ? blockData.total : 0)
+    newRows.push(sumNode)
+
+    // ─ 区切り行（完全ブロック: 5行、ブロック10: 2行）─
+    for (let si = 0; si < SEP_COUNT; si++) {
+      const sepRowNum = blockSepBase + si
+      if (sepRowNum >= FOOTER_START_ROW) break  // ブロック10の3〜5行目はフッター保持エリア
+      const sepNode = cloneRowNode(seedSepWrappers[si], sepRowNum)
+      newRows.push(sepNode)
     }
   }
 
-  // データセクションを置換
-  xml = replaceDataSection(xml, dataRows)
+  // ⑥ データセクションを置換してドキュメントに反映
+  sdWrapper.sheetData = replaceDataSectionNodes(allRows, newRows)
+  const updatedRows = sdWrapper.sheetData as XNode[]
 
-  // グループ集計表エリアを書き込む（B37〜B46 / H37〜H46）
-  xml = fillGroupSummary(xml, input)
+  // ⑦ 孤立した共有数式子セルを除去
+  //    テンプレートのマスターが削除された後もフッター側の子セルが残るケースを対処
+  stripOrphanedSharedFormulaChildren(updatedRows)
 
-  // フッター合計行を静的値で書き込む（H54:合計 / H55:消費税 / H57:総合計）
-  xml = fillFooterTotals(xml, input)
+  // ⑧ グループ集計表（B37〜B46 / H37〜H46）
+  fillGroupSummaryNodes(updatedRows, input)
 
-  // 数式を静的値に置き換えたため calcChain を削除（Excel 起動時に自動再構築）
+  // ⑨ フッター合計（H54 / H55 / H57）
+  fillFooterTotalsNodes(updatedRows, input)
+
+  // ⑩ シリアライズ（1回だけ）
+  const newXml = createBuilder().build(doc)
+
+  // ⑪ 構造検証
+  validateGeneratedXml(newXml)
+
+  // ⑫ ZIP に書き戻し
   zip.remove(CALC_CHAIN_PATH)
-
-  zip.file(SHEET_PATH, xml)
+  zip.file(SHEET_PATH, newXml)
   const buffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }) as Buffer
 
   return { buffer, warnings }

@@ -186,6 +186,12 @@ body {
   box-shadow: var(--shadow-card);
 }
 
+/* ローディングスピナー（Auth コールバック画面で使用） */
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
 /* ステータスバッジの共通形状 */
 .status-badge {
   display: inline-flex;

@@ -1,21 +1,25 @@
 import { getServerClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
 import { ProjectTabs } from '@/components/projects/ProjectTabs'
+import { ProjectHeader } from '@/components/projects/ProjectHeader'
+import { ChatPanel } from '@/components/projects/ChatPanel'
 
-const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; dot: string }> = {
-  collecting: { label: '情報収集中', bg: '#F3F4F6', text: '#374151', dot: '#9CA3AF' },
-  reviewing:  { label: '確認中',     bg: '#FFFBEB', text: '#92400E', dot: '#D97706' },
-  estimating: { label: '見積作成中', bg: '#FFF7ED', text: '#9A3412', dot: '#EA580C' },
-  scheduled:  { label: '工程作成済', bg: '#EFF6FF', text: '#1E40AF', dot: '#2563EB' },
-  done:       { label: '完了',       bg: '#F0FDF4', text: '#166534', dot: '#16A34A' },
+const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
+  collecting: { label: '情報収集中', color: '#6B7280', bg: '#F3F4F6' },
+  reviewing:  { label: '確認中',     color: '#92400E', bg: '#FEF3C7' },
+  estimating: { label: '見積作成中', color: '#9A3412', bg: '#FFEDD5' },
+  scheduled:  { label: '工程作成済', color: '#1E40AF', bg: '#DBEAFE' },
+  done:       { label: '完了',       color: '#166534', bg: '#DCFCE7' },
 }
 
 type Props = {
   params: Promise<{ id: string }>
+  searchParams: Promise<{ tab?: string }>
 }
 
-export default async function ProjectDetailPage({ params }: Props) {
+export default async function ProjectDetailPage({ params, searchParams }: Props) {
   const { id: projectId } = await params
+  const { tab: defaultTab } = await searchParams
   const supabase = await getServerClient()
 
   const { data: { user } } = await supabase.auth.getUser()
@@ -23,120 +27,146 @@ export default async function ProjectDetailPage({ params }: Props) {
 
   const { data: project } = await supabase
     .from('projects')
-    .select('id, name, customer_name, site_address, status')
+    .select('id, name, customer_name, site_address, status, person_in_charge, construction_period, payment_terms, estimate_valid_from, estimate_valid_months, construction_overview, project_memo, payment_contract_pct, payment_start_pct, payment_completion_pct')
     .eq('id', projectId)
     .is('deleted_at', null)
     .single()
 
   if (!project) redirect('/projects')
 
-  const cfg = STATUS_CONFIG[project.status] ?? {
-    label: project.status, bg: '#F3F4F6', text: '#6B7280', dot: '#9CA3AF',
+  // 請求書・見積データから実績ステータスを導出
+  const [{ data: invoices }, { data: estimates }] = await Promise.all([
+    supabase
+      .from('invoice_documents')
+      .select('status, printed_at')
+      .eq('project_id', projectId)
+      .order('updated_at', { ascending: false })
+      .limit(1),
+    supabase
+      .from('estimate_items')
+      .select('id')
+      .eq('project_id', projectId)
+      .is('deleted_at', null)
+      .limit(1),
+  ])
+
+  const latestInv = invoices?.[0]
+  const hasEstimate = (estimates?.length ?? 0) > 0
+
+  let cfg: { label: string; color: string; bg: string }
+  if (latestInv?.printed_at) {
+    cfg = { label: '請求書出力済み', color: '#5B21B6', bg: '#EDE9FE' }
+  } else if (latestInv?.status === 'paid') {
+    cfg = { label: '入金済み',       color: '#166534', bg: '#DCFCE7' }
+  } else if (latestInv?.status === 'issued') {
+    cfg = { label: '請求書発行済み', color: '#1E40AF', bg: '#DBEAFE' }
+  } else if (latestInv) {
+    cfg = { label: '請求書作成中',   color: '#92400E', bg: '#FEF3C7' }
+  } else if (hasEstimate) {
+    cfg = { label: '見積作成中',     color: '#9A3412', bg: '#FFEDD5' }
+  } else {
+    cfg = STATUS_CONFIG[project.status] ?? { label: project.status, color: '#6B7280', bg: '#F3F4F6' }
   }
 
-  // 住所・顧客名のどちらかを副情報として表示
-  const subInfo = project.site_address ?? project.customer_name
-
   return (
-    <div style={{ maxWidth: 720, margin: '0 auto' }}>
+    <div style={{ background: '#F3F7F4', minHeight: '100vh' }}>
 
-      {/* ── ヘッダー（3段構成） ── */}
-      <div style={headerStyle}>
+      {/* ── ヘッダー ── */}
+      <ProjectHeader
+        projectName={project.name}
+        badgeLabel={cfg.label}
+        badgeColor={cfg.color}
+        badgeBg={cfg.bg}
+        customerName={project.customer_name}
+        siteAddress={project.site_address}
+      />
 
-        {/* 1段目: 戻るリンク */}
-        <a href="/projects" style={backLinkStyle}>
-          <svg width="7" height="12" viewBox="0 0 7 12" fill="none" style={{ marginRight: 4, flexShrink: 0 }}>
-            <path d="M6 1L1 6l5 5" stroke="#0A84FF" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"/>
-          </svg>
-          案件一覧
-        </a>
+      {/* ── タブコンテンツ ── */}
+      <ProjectTabs
+        projectId={projectId}
+        projectInfo={{
+          id: project.id,
+          name: project.name,
+          customer_name: project.customer_name,
+          site_address: project.site_address,
+          person_in_charge: (project as Record<string, unknown>).person_in_charge as string | null ?? null,
+          construction_period: (project as Record<string, unknown>).construction_period as string | null ?? null,
+          payment_terms: (project as Record<string, unknown>).payment_terms as string | null ?? null,
+          estimate_valid_from: (project as Record<string, unknown>).estimate_valid_from as string | null ?? null,
+          estimate_valid_months: (project as Record<string, unknown>).estimate_valid_months as number | null ?? null,
+          construction_overview: (project as Record<string, unknown>).construction_overview as string | null ?? null,
+          project_memo: (project as Record<string, unknown>).project_memo as string | null ?? null,
+          payment_contract_pct: (project as Record<string, unknown>).payment_contract_pct as number | null ?? null,
+          payment_start_pct: (project as Record<string, unknown>).payment_start_pct as number | null ?? null,
+          payment_completion_pct: (project as Record<string, unknown>).payment_completion_pct as number | null ?? null,
+        }}
+        defaultTab={defaultTab}
+      />
 
-        {/* 2段目: 案件名 */}
-        <h1 style={titleStyle}>{project.name}</h1>
+      {/* ── AIチャットパネル（固定FAB） ── */}
+      <ChatPanel projectId={projectId} />
 
-        {/* 3段目: ステータスバッジ + 住所 */}
-        <div style={metaRowStyle}>
-          {/* カラードット + バッジ */}
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-            <span style={{
-              width: 6, height: 6, borderRadius: '50%',
-              background: cfg.dot, flexShrink: 0,
-              display: 'inline-block',
-            }} />
-            <span style={{
-              display: 'inline-flex', alignItems: 'center',
-              padding: '2px 7px', borderRadius: 5,
-              fontSize: 11, fontWeight: 600, lineHeight: 1.4,
-              background: cfg.bg, color: cfg.text,
-              whiteSpace: 'nowrap' as const,
-            }}>
-              {cfg.label}
-            </span>
-          </span>
-
-          {/* 住所 or 顧客名 */}
-          {subInfo && (
-            <span style={subInfoStyle}>
-              <svg width="9" height="11" viewBox="0 0 9 11" fill="none" style={{ flexShrink: 0 }}>
-                <path
-                  d="M4.5 0C2.57 0 1 1.57 1 3.5c0 2.625 3.5 7 3.5 7S8 6.125 8 3.5C8 1.57 6.43 0 4.5 0zm0 4.75a1.25 1.25 0 110-2.5 1.25 1.25 0 010 2.5z"
-                  fill="#C9D0DC"
-                />
-              </svg>
-              {subInfo}
-            </span>
-          )}
-        </div>
-
-      </div>
-
-      {/* ── タブ（Client Component） ── */}
-      <ProjectTabs projectId={projectId} />
     </div>
   )
 }
 
 // ── スタイル ───────────────────────────────────────────────
 
-const headerStyle: React.CSSProperties = {
-  padding: '12px 16px 14px',
-  background: '#FFFFFF',
-  borderBottom: '1px solid #E4E8EE',
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 5,
-}
+const hdr = {
+  wrap: {
+    background: '#FFFFFF',
+    padding: '16px 20px 20px',
+    borderBottom: '1px solid #E8ECF6',
+    display: 'flex',
+    flexDirection: 'column' as const,
+    gap: 10,
+  },
 
-const backLinkStyle: React.CSSProperties = {
-  fontSize: 14,
-  color: '#0A84FF',
-  textDecoration: 'none',
-  display: 'inline-flex',
-  alignItems: 'center',
-  fontWeight: 500,
-  marginBottom: 2,
-}
+  back: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 32,
+    height: 32,
+    borderRadius: 8,
+    background: '#E3EFE7',
+    textDecoration: 'none',
+  } as React.CSSProperties,
 
-const titleStyle: React.CSSProperties = {
-  fontSize: 20,
-  fontWeight: 700,
-  color: '#0D1117',
-  letterSpacing: '-0.4px',
-  margin: 0,
-  lineHeight: 1.25,
-}
+  badge: {
+    display: 'inline-flex',
+    alignSelf: 'flex-start',
+    fontSize: 11,
+    fontWeight: 700,
+    padding: '3px 10px',
+    borderRadius: 20,
+    letterSpacing: '0.02em',
+  } as React.CSSProperties,
 
-const metaRowStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 10,
-  flexWrap: 'wrap' as const,
-}
+  title: {
+    fontSize: 22,
+    fontWeight: 800,
+    color: '#0F172A',
+    letterSpacing: '-0.4px',
+    margin: 0,
+    lineHeight: 1.3,
+  } as React.CSSProperties,
 
-const subInfoStyle: React.CSSProperties = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: 4,
-  fontSize: 12,
-  color: '#9CA3AF',
+  meta: {
+    display: 'flex',
+    flexWrap: 'wrap' as const,
+    gap: 12,
+    marginTop: 2,
+  },
+
+  metaRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 5,
+  } as React.CSSProperties,
+
+  metaText: {
+    fontSize: 13,
+    color: '#94A3B8',
+  } as React.CSSProperties,
 }
