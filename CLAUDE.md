@@ -30,10 +30,11 @@ Claude Code が実装時に必ず参照する設計指示書。
 ### セキュリティ（絶対厳守）
 - `service_role` key は `lib/supabase/admin.ts` のみに記述
 - `NEXT_PUBLIC_` の変数名に秘密鍵を置かない
-- `admin.ts` を import できるファイルは以下の3箇所のみ：
+- `admin.ts` を import できるファイルは以下の4箇所のみ：
   - `app/api/webhook/line/route.ts`
   - `app/api/share/[token]/route.ts`
   - `app/api/pdf/route.ts`（必要時のみ）
+  - `app/api/cron/daily-briefing/route.ts`（Phase 3 追加・全会社横断処理のため承認済み）
 - それ以外は必ず `getServerClient()`（RLS有効）を使う
 - Storage バケットは private
 - signed URL をDBに保存しない（`storage_path` のみ保存）
@@ -163,6 +164,7 @@ genba-ai/
 │       ├── webhook/line/route.ts     ← ★admin.ts使用①
 │       ├── share/[token]/route.ts    ← ★admin.ts使用②
 │       ├── pdf/route.ts              ← ★admin.ts使用③（必要時のみ）
+│       ├── cron/daily-briefing/route.ts ← ★admin.ts使用④（Phase 3 承認済み）
 │       ├── ai/summarize/route.ts     ← AI整理（server.ts）
 │       ├── ai/estimate/route.ts      ← 見積叩き台生成（server.ts）
 │       ├── ai/schedule/route.ts      ← 工程叩き台生成（server.ts）

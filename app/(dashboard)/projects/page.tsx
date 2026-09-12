@@ -1,31 +1,21 @@
 import { getServerClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
-import Link from 'next/link'
+import { ProjectListClient } from '@/components/projects/ProjectListClient'
+import { DashboardSummarySection } from '@/components/projects/DashboardSummarySection'
+import { getCompanyProjectSummary } from '@/lib/services/company-summary'
+import { getDailyBriefingItems } from '@/lib/services/daily-briefing'
 
 // ── ステータス定義 ──────────────────────────────────────────
 
-const STATUS_CONFIG: Record<string, { label: string; bg: string; text: string; dot: string }> = {
-  collecting: { label: '情報収集中', bg: '#F3F4F6', text: '#374151', dot: '#9CA3AF' },
-  reviewing:  { label: '確認中',     bg: '#FFFBEB', text: '#92400E', dot: '#D97706' },
-  estimating: { label: '見積作成中', bg: '#FFF7ED', text: '#9A3412', dot: '#EA580C' },
-  scheduled:  { label: '工程作成済', bg: '#EFF6FF', text: '#1E40AF', dot: '#2563EB' },
-  done:       { label: '完了',       bg: '#F0FDF4', text: '#166534', dot: '#16A34A' },
+export const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
+  collecting: { label: '情報収集中', color: '#6B7280', bg: '#F3F4F6' },
+  reviewing:  { label: '確認中',     color: '#92400E', bg: '#FEF3C7' },
+  estimating: { label: '見積作成中', color: '#9A3412', bg: '#FFEDD5' },
+  scheduled:  { label: '工程作成済', color: '#1E40AF', bg: '#DBEAFE' },
+  done:       { label: '完了',       color: '#166534', bg: '#DCFCE7' },
 }
 
-function StatusBadge({ status }: { status: string }) {
-  const cfg = STATUS_CONFIG[status] ?? { label: status, bg: '#F3F4F6', text: '#6B7280', dot: '#9CA3AF' }
-  return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center',
-      padding: '2px 8px', borderRadius: 6,
-      fontSize: 11, fontWeight: 600, lineHeight: 1.4,
-      background: cfg.bg, color: cfg.text,
-      whiteSpace: 'nowrap' as const,
-    }}>
-      {cfg.label}
-    </span>
-  )
-}
+type BadgeInfo = { label: string; color: string; bg: string; border: string }
 
 // ── ページ ─────────────────────────────────────────────────
 
@@ -35,182 +25,134 @@ export default async function ProjectsPage() {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) redirect('/login')
 
-  const { data: projects } = await supabase
-    .from('projects')
-    .select('id, name, customer_name, site_address, status, updated_at')
-    .is('deleted_at', null)
-    .order('updated_at', { ascending: false })
-
-  // 各案件の最初の写真サムネイルを取得
-  const projectIds = projects?.map(p => p.id) ?? []
-  const thumbMap: Record<string, string> = {}
-
-  if (projectIds.length > 0) {
-    const { data: photos } = await supabase
-      .from('project_files')
-      .select('project_id, thumb_path')
-      .in('project_id', projectIds)
-      .eq('file_type', 'photo')
-      .not('thumb_path', 'is', null)
+  // 会社全体サマリー・今日やること・案件一覧を並列取得
+  const [summaryResult, actionItemsResult, projectsResult] = await Promise.all([
+    getCompanyProjectSummary(supabase),
+    getDailyBriefingItems(supabase),
+    supabase
+      .from('projects')
+      .select('id, name, customer_name, site_address, status, updated_at')
       .is('deleted_at', null)
-      .order('created_at', { ascending: true })
+      .order('updated_at', { ascending: false }),
+  ])
 
-    // project_id ごとに最初の1枚だけ抽出
-    const firstPhotos = new Map<string, string>()
-    for (const f of photos ?? []) {
-      if (!firstPhotos.has(f.project_id) && f.thumb_path) {
-        firstPhotos.set(f.project_id, f.thumb_path)
-      }
+  const summary     = summaryResult
+  const actionItems = actionItemsResult
+
+  // 案件一覧
+  const { data: projects } = projectsResult
+
+  const projectIds = projects?.map(p => p.id) ?? []
+
+  // ── サムネイル・請求書・見積 を並列取得 ─────────────────
+
+  const [photosRes, invoicesRes, estimatesRes] = await Promise.all([
+    projectIds.length > 0
+      ? supabase
+          .from('project_files')
+          .select('project_id, thumb_path')
+          .in('project_id', projectIds)
+          .eq('file_type', 'photo')
+          .not('thumb_path', 'is', null)
+          .is('deleted_at', null)
+          .order('created_at', { ascending: true })
+      : Promise.resolve({ data: [] }),
+
+    projectIds.length > 0
+      ? supabase
+          .from('invoice_documents')
+          .select('project_id, status, printed_at')
+          .in('project_id', projectIds)
+          .order('updated_at', { ascending: false })
+      : Promise.resolve({ data: [] }),
+
+    projectIds.length > 0
+      ? supabase
+          .from('estimate_items')
+          .select('project_id')
+          .in('project_id', projectIds)
+          .is('deleted_at', null)
+          .limit(1000)
+      : Promise.resolve({ data: [] }),
+  ])
+
+  // ── サムネイル signed URL ──────────────────────────────
+
+  const thumbMap: Record<string, string> = {}
+  const firstPhotos = new Map<string, string>()
+  for (const f of photosRes.data ?? []) {
+    if (!firstPhotos.has(f.project_id) && f.thumb_path) {
+      firstPhotos.set(f.project_id, f.thumb_path)
     }
+  }
+  await Promise.all([...firstPhotos.entries()].map(async ([pid, path]) => {
+    const { data } = await supabase.storage.from('genba-ai').createSignedUrl(path, 300)
+    if (data?.signedUrl) thumbMap[pid] = data.signedUrl
+  }))
 
-    // signed URL を並列生成（5分有効）
-    await Promise.all([...firstPhotos.entries()].map(async ([pid, path]) => {
-      const { data } = await supabase.storage.from('genba-ai').createSignedUrl(path, 300)
-      if (data?.signedUrl) thumbMap[pid] = data.signedUrl
-    }))
+  // ── 請求書マップ（案件ごとに最新1件） ─────────────────
+
+  const invoiceMap: Record<string, { status: string; printed_at: string | null }> = {}
+  for (const inv of invoicesRes.data ?? []) {
+    if (!invoiceMap[inv.project_id]) {
+      invoiceMap[inv.project_id] = { status: inv.status, printed_at: inv.printed_at }
+    }
   }
 
-  const active   = projects?.filter(p => p.status !== 'done') ?? []
-  const finished = projects?.filter(p => p.status === 'done') ?? []
+  // ── 見積あり案件セット ─────────────────────────────────
+
+  const hasEstimate = new Set((estimatesRes.data ?? []).map((e: { project_id: string }) => e.project_id))
+
+  // ── 実績ステータス導出 ─────────────────────────────────
+  // projects.status は手動設定のため、実際の作業データから自動導出する。
+  // フォールバック時のみ projects.status を使う。
+
+  const derivedBadgeMap: Record<string, BadgeInfo> = {}
+
+  for (const pid of projectIds) {
+    const inv = invoiceMap[pid]
+    if (inv) {
+      if (inv.printed_at) {
+        derivedBadgeMap[pid] = { label: '請求書出力済み', color: '#5B21B6', bg: '#EDE9FE', border: '#8B5CF6' }
+      } else if (inv.status === 'paid') {
+        derivedBadgeMap[pid] = { label: '入金済み',       color: '#166534', bg: '#DCFCE7', border: '#22C55E' }
+      } else if (inv.status === 'issued') {
+        derivedBadgeMap[pid] = { label: '請求書発行済み', color: '#1E40AF', bg: '#DBEAFE', border: '#3B82F6' }
+      } else {
+        derivedBadgeMap[pid] = { label: '請求書作成中',   color: '#92400E', bg: '#FEF3C7', border: '#F59E0B' }
+      }
+    } else if (hasEstimate.has(pid)) {
+      derivedBadgeMap[pid] = { label: '見積作成中',       color: '#9A3412', bg: '#FFEDD5', border: '#FB923C' }
+    }
+    // それ以外は ProjectListClient 側で projects.status を使う
+  }
 
   return (
-    <div style={page.container}>
+    <div style={{ background: '#F3F7F4', minHeight: '100vh' }}>
+      <div style={page.inner}>
 
-      {/* ── ページヘッダー ── */}
-      <div style={page.header}>
-        <h1 style={page.title}>案件一覧</h1>
-        <LogoutForm />
-      </div>
-
-      {/* ── 案件リスト ── */}
-      {!projects?.length ? (
-        <div style={page.emptyWrap}>
-          <div style={{ fontSize: 40, marginBottom: 12 }}>🏗</div>
-          <p style={page.emptyText}>案件がありません</p>
-          <p style={page.emptySubtext}>
-            LINEから現場情報を送ると、ここに案件が表示されます
-          </p>
+        {/* ── ページヘッダー ── */}
+        <div style={page.header}>
+          <div>
+            <p style={page.eyebrow}>DASHBOARD</p>
+            <h1 style={page.title}>案件一覧</h1>
+          </div>
+          <LogoutForm />
         </div>
-      ) : (
-        <>
-          {/* 進行中 */}
-          {active.length > 0 && (
-            <section>
-              <div style={page.sectionLabel}>進行中 ({active.length})</div>
-              <div style={page.list}>
-                {active.map(p => <ProjectCard key={p.id} project={p} thumbUrl={thumbMap[p.id]} />)}
-              </div>
-            </section>
-          )}
 
-          {/* 完了 */}
-          {finished.length > 0 && (
-            <section style={{ marginTop: 24 }}>
-              <div style={page.sectionLabel}>完了 ({finished.length})</div>
-              <div style={page.list}>
-                {finished.map(p => <ProjectCard key={p.id} project={p} thumbUrl={thumbMap[p.id]} />)}
-              </div>
-            </section>
-          )}
-        </>
-      )}
+        {/* ── 今日やること（決定論的判定。AIに生成させない） ── */}
+        <DashboardSummarySection summary={summary} actionItems={actionItems} />
+
+        {/* ── クライアントリスト ── */}
+        <ProjectListClient
+          projects={projects ?? []}
+          thumbMap={thumbMap}
+          statusConfig={STATUS_CONFIG}
+          derivedBadgeMap={derivedBadgeMap}
+        />
+
+      </div>
     </div>
-  )
-}
-
-// ── カードコンポーネント ────────────────────────────────────
-
-type Project = {
-  id: string
-  name: string
-  customer_name: string | null
-  site_address: string | null
-  status: string
-  updated_at: string
-}
-
-function relativeDate(iso: string): string {
-  const diff = Date.now() - new Date(iso).getTime()
-  const days = Math.floor(diff / 86_400_000)
-  if (days === 0) return '今日'
-  if (days === 1) return '昨日'
-  if (days < 7)  return `${days}日前`
-  return new Date(iso).toLocaleDateString('ja-JP', { month: 'numeric', day: 'numeric' })
-}
-
-/* eslint-disable @next/next/no-img-element */
-function ProjectCard({ project: p, thumbUrl }: { project: Project; thumbUrl?: string }) {
-  const cfg = STATUS_CONFIG[p.status] ?? { label: p.status, bg: '#F3F4F6', text: '#6B7280', dot: '#9CA3AF' }
-
-  return (
-    <Link href={`/projects/${p.id}`} style={card.root}>
-      {/* 左: サムネイル or アイコン */}
-      <div style={card.icon}>
-        {thumbUrl ? (
-          <img
-            src={thumbUrl}
-            alt=""
-            style={{ width: '100%', height: '100%', objectFit: 'cover', borderRadius: 12 }}
-          />
-        ) : (
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
-            stroke="#9CA3AF" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"
-          >
-            <rect x="3" y="3" width="18" height="18" rx="2" />
-            <path d="M3 9h18M9 21V9" />
-          </svg>
-        )}
-      </div>
-
-      {/* 中: 情報 */}
-      <div style={card.body}>
-        <div style={card.name}>{p.name}</div>
-
-        {/* 住所（1行目） */}
-        {p.site_address && (
-          <div style={card.subRow}>
-            <svg width="8" height="10" viewBox="0 0 8 10" fill="none" style={{ flexShrink: 0, marginTop: 1 }}>
-              <path d="M4 0C2.07 0 .5 1.57.5 3.5c0 2.625 3.5 6.5 3.5 6.5s3.5-3.875 3.5-6.5C7.5 1.57 5.93 0 4 0zm0 4.75a1.25 1.25 0 110-2.5 1.25 1.25 0 010 2.5z" fill="#C9D0DC"/>
-            </svg>
-            <span style={card.sub}>{p.site_address}</span>
-          </div>
-        )}
-
-        {/* 顧客名（住所がない場合のみ2行目に表示） */}
-        {!p.site_address && p.customer_name && (
-          <div style={card.subRow}>
-            <span style={card.sub}>{p.customer_name}</span>
-          </div>
-        )}
-
-        {/* ステータス + 更新日 */}
-        <div style={card.meta}>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-            <span style={{
-              width: 6, height: 6, borderRadius: '50%',
-              background: cfg.dot, flexShrink: 0, display: 'inline-block',
-            }} />
-            <span style={{
-              display: 'inline-flex', alignItems: 'center',
-              padding: '2px 6px', borderRadius: 5,
-              fontSize: 11, fontWeight: 600, lineHeight: 1.4,
-              background: cfg.bg, color: cfg.text,
-              whiteSpace: 'nowrap' as const,
-            }}>
-              {cfg.label}
-            </span>
-          </span>
-          <span style={card.date}>{relativeDate(p.updated_at)}</span>
-        </div>
-      </div>
-
-      {/* 右: シェブロン */}
-      <div style={card.chevron}>
-        <svg width="7" height="12" viewBox="0 0 7 12" fill="none">
-          <path d="M1 1l5 5-5 5" stroke="#C9D0DC" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"/>
-        </svg>
-      </div>
-    </Link>
   )
 }
 
@@ -233,58 +175,34 @@ function LogoutForm() {
 // ── スタイル ───────────────────────────────────────────────
 
 const page = {
-  container:    { maxWidth: 680, margin: '0 auto', padding: '0 0 32px' },
+  inner: { maxWidth: 1100, margin: '0 auto', padding: '0 0 80px' },
   header: {
-    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-    padding: '20px 16px 16px',
+    display: 'flex',
+    alignItems: 'flex-end',
+    justifyContent: 'space-between',
+    padding: '40px 32px 28px',
+  },
+  eyebrow: {
+    fontSize: 10,
+    fontWeight: 700,
+    color: '#6CB382',
+    letterSpacing: '0.12em',
+    textTransform: 'uppercase' as const,
+    margin: '0 0 4px',
   },
   title: {
-    fontSize: 22, fontWeight: 700, color: '#0D1117',
-    letterSpacing: '-0.5px', margin: 0,
+    fontSize: 28,
+    fontWeight: 900,
+    color: '#192C1F',
+    letterSpacing: '-0.6px',
+    margin: 0,
   },
   logoutBtn: {
-    fontSize: 13, color: '#9CA3AF', background: 'none',
-    border: 'none', cursor: 'pointer', padding: '4px 0',
+    fontSize: 13,
+    color: '#8AA491',
+    background: 'none',
+    border: 'none',
+    cursor: 'pointer',
+    padding: '4px 0',
   },
-  sectionLabel: {
-    fontSize: 11, fontWeight: 500, textTransform: 'uppercase' as const,
-    letterSpacing: '0.5px', color: '#9CA3AF',
-    padding: '0 16px', marginBottom: 8,
-  },
-  list:         { display: 'flex', flexDirection: 'column' as const, gap: 8, padding: '0 16px' },
-  emptyWrap:    { padding: '60px 16px', textAlign: 'center' as const },
-  emptyText:    { margin: 0, color: '#6B7280', fontSize: 15 },
-  emptySubtext: { margin: '8px 0 0', color: '#9CA3AF', fontSize: 13 },
-} as const
-
-const card = {
-  root: {
-    display: 'flex', alignItems: 'center', gap: 12,
-    padding: '14px 16px',
-    background: '#FFFFFF', borderRadius: 16,
-    boxShadow: '0 2px 8px rgba(0,0,0,0.07), 0 0 0 1px rgba(0,0,0,0.04)',
-    textDecoration: 'none',
-  },
-  icon: {
-    width: 44, height: 44, borderRadius: 12,
-    background: '#F5F7FA',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-    flexShrink: 0,
-  },
-  body:  { flex: 1, minWidth: 0 },
-  name:  {
-    fontSize: 15, fontWeight: 600, color: '#0D1117',
-    letterSpacing: '-0.2px', marginBottom: 3,
-    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const,
-  },
-  subRow: {
-    display: 'flex', alignItems: 'flex-start', gap: 4, marginBottom: 5,
-  },
-  sub:   {
-    fontSize: 12, color: '#9CA3AF',
-    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const,
-  },
-  meta:  { display: 'flex', alignItems: 'center', gap: 8 },
-  date:  { fontSize: 11, color: '#C9D0DC' },
-  chevron: { flexShrink: 0, paddingLeft: 4 },
 } as const
