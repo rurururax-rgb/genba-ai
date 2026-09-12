@@ -27,6 +27,8 @@ export async function PATCH(request: NextRequest, { params }: Params) {
     assignee?:          string | null
     start_date?:        string | null
     end_date?:          string | null
+    start_period?:      'am' | 'pm'
+    end_period?:        'am' | 'pm'
     status?:            string
     memo?:              string | null
     estimate_group_id?: string | null
@@ -40,6 +42,8 @@ export async function PATCH(request: NextRequest, { params }: Params) {
       assignee:          body.assignee,
       start_date:        body.start_date,
       end_date:          body.end_date,
+      start_period:      body.start_period,
+      end_period:        body.end_period,
       status:            body.status as 'planned' | 'confirmed' | 'in_progress' | 'done' | 'delayed' | undefined,
       memo:              body.memo,
       estimate_group_id: body.estimate_group_id,

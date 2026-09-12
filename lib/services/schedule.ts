@@ -14,6 +14,8 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 
 export type ScheduleStatus = 'planned' | 'confirmed' | 'in_progress' | 'done' | 'delayed'
 
+export type SchedulePeriod = 'am' | 'pm'
+
 export type ScheduleItem = {
   id:                string
   project_id:        string
@@ -24,6 +26,8 @@ export type ScheduleItem = {
   assignee:          string | null
   start_date:        string | null  // YYYY-MM-DD
   end_date:          string | null  // YYYY-MM-DD
+  start_period:      SchedulePeriod
+  end_period:        SchedulePeriod
   status:            ScheduleStatus
   memo:              string | null
   sort_order:        number
@@ -51,7 +55,7 @@ export async function getProjectSchedule(
 ): Promise<ScheduleItem[]> {
   const { data, error } = await supabase
     .from('schedule_items')
-    .select('id, project_id, company_id, name, category, vendor_name, assignee, start_date, end_date, status, memo, sort_order, source, estimate_group_id, created_at, updated_at')
+    .select('id, project_id, company_id, name, category, vendor_name, assignee, start_date, end_date, start_period, end_period, status, memo, sort_order, source, estimate_group_id, created_at, updated_at')
     .eq('project_id', projectId)
     .is('deleted_at', null)
     .order('sort_order', { ascending: true })
@@ -69,6 +73,8 @@ export type CreateScheduleItemInput = {
   assignee?:         string | null
   start_date?:       string | null
   end_date?:         string | null
+  start_period?:     SchedulePeriod
+  end_period?:       SchedulePeriod
   status?:           ScheduleStatus
   memo?:             string | null
   estimate_group_id?: string | null
@@ -105,13 +111,15 @@ export async function createScheduleItem(
       assignee:          input.assignee ?? null,
       start_date:        input.start_date ?? null,
       end_date:          input.end_date ?? null,
+      start_period:      input.start_period ?? 'am',
+      end_period:        input.end_period ?? 'pm',
       status:            input.status ?? 'planned',
       memo:              input.memo ?? null,
       estimate_group_id: input.estimate_group_id ?? null,
       sort_order:        sortOrder,
       source:            'manual',
     })
-    .select('id, project_id, company_id, name, category, vendor_name, assignee, start_date, end_date, status, memo, sort_order, source, estimate_group_id, created_at, updated_at')
+    .select('id, project_id, company_id, name, category, vendor_name, assignee, start_date, end_date, start_period, end_period, status, memo, sort_order, source, estimate_group_id, created_at, updated_at')
     .single()
 
   if (error) throw new Error(`createScheduleItem: ${error.message}`)
@@ -129,14 +137,16 @@ export async function updateScheduleItem(
 ): Promise<ScheduleItem> {
   const patch: Record<string, unknown> = { updated_at: new Date().toISOString() }
 
-  if (input.name          !== undefined) patch.name          = input.name?.trim()
-  if (input.category      !== undefined) patch.category      = input.category
-  if (input.vendor_name   !== undefined) patch.vendor_name   = input.vendor_name
-  if (input.assignee      !== undefined) patch.assignee      = input.assignee
-  if (input.start_date    !== undefined) patch.start_date    = input.start_date
-  if (input.end_date      !== undefined) patch.end_date      = input.end_date
-  if (input.status        !== undefined) patch.status        = input.status
-  if (input.memo          !== undefined) patch.memo          = input.memo
+  if (input.name              !== undefined) patch.name              = input.name?.trim()
+  if (input.category          !== undefined) patch.category          = input.category
+  if (input.vendor_name       !== undefined) patch.vendor_name       = input.vendor_name
+  if (input.assignee          !== undefined) patch.assignee          = input.assignee
+  if (input.start_date        !== undefined) patch.start_date        = input.start_date
+  if (input.end_date          !== undefined) patch.end_date          = input.end_date
+  if (input.start_period      !== undefined) patch.start_period      = input.start_period
+  if (input.end_period        !== undefined) patch.end_period        = input.end_period
+  if (input.status            !== undefined) patch.status            = input.status
+  if (input.memo              !== undefined) patch.memo              = input.memo
   if (input.estimate_group_id !== undefined) patch.estimate_group_id = input.estimate_group_id
 
   const { data, error } = await supabase
@@ -144,7 +154,7 @@ export async function updateScheduleItem(
     .update(patch)
     .eq('id', itemId)
     .is('deleted_at', null)
-    .select('id, project_id, company_id, name, category, vendor_name, assignee, start_date, end_date, status, memo, sort_order, source, estimate_group_id, created_at, updated_at')
+    .select('id, project_id, company_id, name, category, vendor_name, assignee, start_date, end_date, start_period, end_period, status, memo, sort_order, source, estimate_group_id, created_at, updated_at')
     .single()
 
   if (error) throw new Error(`updateScheduleItem: ${error.message}`)

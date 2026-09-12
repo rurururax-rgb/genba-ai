@@ -42,6 +42,8 @@ export async function POST(request: NextRequest) {
     assignee?:         string | null
     start_date?:       string | null
     end_date?:         string | null
+    start_period?:     'am' | 'pm'
+    end_period?:       'am' | 'pm'
     status?:           string
     memo?:             string | null
     estimate_group_id?: string | null
@@ -77,6 +79,8 @@ export async function POST(request: NextRequest) {
       assignee:          body.assignee,
       start_date:        body.start_date,
       end_date:          body.end_date,
+      start_period:      body.start_period ?? 'am',
+      end_period:        body.end_period ?? 'pm',
       status:            (body.status ?? 'planned') as 'planned' | 'confirmed' | 'in_progress' | 'done' | 'delayed',
       memo:              body.memo,
       estimate_group_id: body.estimate_group_id,
