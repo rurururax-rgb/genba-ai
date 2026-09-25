@@ -354,12 +354,6 @@ export function Sidebar() {
           </>
         )}
 
-        <IconBtn
-          icon={Icons.settings}
-          label="設定"
-          active={pathname === '/settings'}
-          href="/settings"
-        />
       </nav>
 
       {/* ── ステータスドット ── */}
