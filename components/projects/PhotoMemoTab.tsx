@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import { getClient } from '@/lib/supabase/client'
+import { Textarea } from '@/components/ui/textarea'
 import { CATEGORY_COLORS } from '@/lib/estimate/categories'
 
 // ──────────────────────────────────────────────────────────
@@ -139,6 +140,30 @@ export function PhotoMemoTab({ projectId }: { projectId: string }) {
   const [menuOpenIdx,   setMenuOpenIdx]   = useState<number | null>(null)
   const [deletingGridId, setDeletingGridId] = useState<string | null>(null)
 
+  async function fetchSignedUrl(eventId: string, storagePath: string) {
+    try {
+      const res = await fetch('/api/files/signed-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ storage_path: storagePath }),
+      })
+      const { url } = (await res.json()) as { url?: string }
+      if (url) setUrlMap(p => ({ ...p, [eventId]: url }))
+    } catch { /* サイレント */ }
+  }
+
+  async function fetchNoteSignedUrl(noteId: string, storagePath: string) {
+    try {
+      const res = await fetch('/api/files/signed-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ storage_path: storagePath }),
+      })
+      const { url } = (await res.json()) as { url?: string }
+      if (url) setNoteUrlMap(p => ({ ...p, [noteId]: url }))
+    } catch { /* サイレント */ }
+  }
+
   useEffect(() => {
     async function load() {
       const [r1, r2] = await Promise.all([
@@ -183,30 +208,6 @@ export function PhotoMemoTab({ projectId }: { projectId: string }) {
     }
     load()
   }, [projectId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  async function fetchSignedUrl(eventId: string, storagePath: string) {
-    try {
-      const res = await fetch('/api/files/signed-url', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ storage_path: storagePath }),
-      })
-      const { url } = (await res.json()) as { url?: string }
-      if (url) setUrlMap(p => ({ ...p, [eventId]: url }))
-    } catch { /* サイレント */ }
-  }
-
-  async function fetchNoteSignedUrl(noteId: string, storagePath: string) {
-    try {
-      const res = await fetch('/api/files/signed-url', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ storage_path: storagePath }),
-      })
-      const { url } = (await res.json()) as { url?: string }
-      if (url) setNoteUrlMap(p => ({ ...p, [noteId]: url }))
-    } catch { /* サイレント */ }
-  }
 
   function handleNoteAdded(note: LineEventNote, photoUrl?: string) {
     setNotes(prev => [...prev, note])
@@ -897,12 +898,13 @@ function GroupDetailModal({
         <div style={ms.footer}>
           <div style={ms.footerLabel}>追記を書き足す</div>
           <div style={ms.appendRow}>
-            <textarea
+            <Textarea
               ref={textareaRef}
+              inputSize="compact"
+              className="resize-none"
               value={appendText}
               onChange={e => setAppendText(e.target.value)}
               placeholder="テキストメモを書き足す..."
-              style={ms.appendTextarea}
               rows={2}
               disabled={appending}
             />
@@ -1337,13 +1339,6 @@ const ms = {
   },
   footerLabel: { fontSize: 12, fontWeight: 600, color: '#8E8E93' },
   appendRow:   { display: 'flex', gap: 8, alignItems: 'flex-end' },
-  appendTextarea: {
-    flex: 1, padding: '8px 10px', borderRadius: 10,
-    border: '1px solid #D1D5DB', fontSize: 14,
-    resize: 'none' as const, minHeight: 60,
-    fontFamily: 'inherit', lineHeight: 1.5,
-    background: '#FFFFFF',
-  },
   sendBtn: {
     padding: '0 16px', height: 44, borderRadius: 10,
     background: '#1e3a5f', color: '#FFFFFF',

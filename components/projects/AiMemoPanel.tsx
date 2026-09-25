@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { getClient } from '@/lib/supabase/client'
 import { CATEGORY_COLORS } from '@/lib/estimate/categories'
+import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
 
 // ──────────────────────────────────────────────────────────
 // 型定義
@@ -203,6 +205,17 @@ export function AiMemoPanel({ projectId }: { projectId: string }) {
 
   const totalSelected = Object.keys(selected).length
 
+  async function fetchSignedUrl(eventId: string, storagePath: string) {
+    try {
+      const res = await fetch('/api/files/signed-url', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ storage_path: storagePath }),
+      })
+      const { url } = (await res.json()) as { url?: string }
+      if (url) setUrlMap(p => ({ ...p, [eventId]: url }))
+    } catch { /* サイレント */ }
+  }
+
   useEffect(() => {
     async function load() {
       const [r1, r2] = await Promise.all([
@@ -225,17 +238,6 @@ export function AiMemoPanel({ projectId }: { projectId: string }) {
     }
     load()
   }, [projectId]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  async function fetchSignedUrl(eventId: string, storagePath: string) {
-    try {
-      const res = await fetch('/api/files/signed-url', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ storage_path: storagePath }),
-      })
-      const { url } = (await res.json()) as { url?: string }
-      if (url) setUrlMap(p => ({ ...p, [eventId]: url }))
-    } catch { /* サイレント */ }
-  }
 
   function updateEvent(eventId: string, patch: Partial<LineEvent>) {
     const apply = (arr: LineEvent[]) => arr.map(e => e.id === eventId ? { ...e, ...patch } : e)
@@ -406,13 +408,15 @@ export function AiMemoPanel({ projectId }: { projectId: string }) {
       {totalSelected > 0 && (
         <div style={s.stickyFooter}>
           <div style={s.stickyFooterInner}>
-            <button
-              onClick={handleAddAll}
+            <Button
+              variant="primary"
+              size="lg"
               disabled={globalAdding}
-              style={globalAdding ? { ...s.ctaButton, opacity: 0.6, cursor: 'not-allowed' } : s.ctaButton}
+              onClick={handleAddAll}
+              className="w-full"
             >
               {globalAdding ? '追加中...' : `選択した ${totalSelected} 件を見積に追加`}
-            </button>
+            </Button>
           </div>
         </div>
       )}
@@ -617,25 +621,33 @@ function CandidatePanel({
               {event.event_type === 'audio' && (
                 <span style={p.transcriptionLabel}>文字起こし（編集中）</span>
               )}
-              <textarea
+              <Textarea
+                inputSize="compact"
                 value={editText}
                 onChange={e => onEditChange(event.id, e.target.value)}
-                style={p.editTextarea}
                 rows={3}
                 autoFocus
                 disabled={isReprocessing}
               />
               <div style={{ display: 'flex', gap: 8 }}>
-                <button onClick={() => onEditCancel(event.id)} disabled={isReprocessing} style={p.cancelBtn}>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  disabled={isReprocessing}
+                  onClick={() => onEditCancel(event.id)}
+                  className="flex-1"
+                >
                   キャンセル
-                </button>
-                <button
-                  onClick={() => onReprocess(event)}
+                </Button>
+                <Button
+                  type="button"
+                  variant="primary"
                   disabled={!editText.trim() || isReprocessing}
-                  style={{ ...p.researchBtn, opacity: !editText.trim() || isReprocessing ? 0.5 : 1 }}
+                  onClick={() => onReprocess(event)}
+                  className="flex-[2]"
                 >
                   {isReprocessing ? '再検索中...' : 'この内容で再検索'}
-                </button>
+                </Button>
               </div>
             </div>
           )}
@@ -886,12 +898,6 @@ const s = {
     maxWidth: 480,
     margin: '0 auto',
   },
-  ctaButton: {
-    width: '100%', height: 52, borderRadius: 16, border: 'none',
-    background: 'linear-gradient(135deg, #1B3659, #0A84FF)',
-    color: '#FFFFFF', fontSize: 16, fontWeight: 700, cursor: 'pointer',
-    letterSpacing: '-0.2px',
-  },
 } as const
 
 // CandidatePanel 専用スタイル
@@ -921,22 +927,6 @@ const p = {
   },
   transcriptionLabel: { fontSize: 11, color: '#9CA3AF', marginRight: 4 },
 
-  editTextarea: {
-    width: '100%', padding: '8px 10px', borderRadius: 10,
-    border: '1.5px solid #0A84FF', fontSize: 14, color: '#0D1117',
-    lineHeight: 1.5, resize: 'vertical' as const, fontFamily: 'inherit',
-    boxSizing: 'border-box' as const,
-  },
-  cancelBtn: {
-    flex: 1, height: 44, borderRadius: 10, border: '1.5px solid #E4E8EE',
-    background: '#F5F7FA', color: '#6B7280', fontSize: 14, cursor: 'pointer',
-  },
-  researchBtn: {
-    flex: 2, height: 44, borderRadius: 10, border: 'none',
-    background: 'linear-gradient(135deg, #1B3659, #0A84FF)',
-    color: '#FFFFFF', fontSize: 14, fontWeight: 600, cursor: 'pointer',
-    transition: 'opacity 0.15s',
-  },
 
   gridLabel: {
     fontSize: 11, fontWeight: 600, color: '#9CA3AF',

@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { VendorInvoiceImportTab } from './VendorInvoiceImportTab'
+import { Button } from '@/components/ui/button'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -64,22 +65,22 @@ type EditingCell = {
   value: string
 }
 
-// ── デザイントークン（ブルー基調） ─────────────────────────
+// ── デザイントークン（RAGZ Green系） ──────────────────────
 
 const C = {
-  pageBg:      '#F8F9FB',
+  pageBg:      '#F3F7F4',
   bg:          '#FFFFFF',
   border:      '#E5E7EB',
-  borderLight: '#F0F2F5',
-  hover:       '#F5F7FA',
-  selected:    '#EBF1FF',
-  accent:      '#2D6FF6',
-  accentLight: '#EBF1FF',
-  text:        '#0E1729',
-  textSub:     '#3A4668',
-  textMuted:   '#6B7A99',
-  groupBg:     '#F4F5F7',
-  invBg:       '#F8F9FB',
+  borderLight: '#E8F0EA',
+  hover:       '#F0F6F2',
+  selected:    '#EAF3DE',
+  accent:      '#2B5E40',
+  accentLight: '#EAF3DE',
+  text:        '#1A2E24',
+  textSub:     '#2D4A38',
+  textMuted:   '#7A9185',
+  groupBg:     '#F0F6F2',
+  invBg:       '#F3F7F4',
   invBorder:   '#E5E7EB',
   red:         '#C0392B',
   redBg:       '#FDF2F2',
@@ -221,11 +222,12 @@ function InvoicePanel({
               {editId === inv.id ? (
                 <input
                   autoFocus
+                  className="cl-edit-input"
                   value={editAmt}
                   onChange={e => setEditAmt(e.target.value)}
                   onBlur={() => handleAmountEdit(inv)}
                   onKeyDown={e => { if (e.key === 'Enter') handleAmountEdit(inv); if (e.key === 'Escape') setEditId(null) }}
-                  style={{ ...ps.cell, flex: 1.2, border: `1.5px solid ${C.accent}`, borderRadius: 4, padding: '2px 6px', fontSize: 12, outline: 'none', background: '#fff' }}
+                  style={{ ...ps.cell, flex: 1.2, border: `1.5px solid ${C.accent}`, borderRadius: 6, padding: '2px 6px', fontSize: 12, outline: 'none', background: '#fff' }}
                 />
               ) : (
                 <span
@@ -472,11 +474,11 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
   }
 
   const load = useCallback(async () => {
-    setLoading(true)
-    setLoadError(null)
     try {
-      const res = await fetch(`/api/cost-ledger?project_id=${projectId}`)
-      if (res.ok) {
+      const res = await fetch(`/api/cost-ledger?project_id=${projectId}`).catch(() => null as Response | null)
+      if (!res) {
+        setLoadError('ネットワークエラーが発生しました')
+      } else if (res.ok) {
         const d = await res.json()
         setItems(d.items ?? [])
         setVendorSelling(d.vendorSelling ?? {})
@@ -492,8 +494,6 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
         setLoadError(err.error ?? `データ取得に失敗しました（HTTP ${res.status}）`)
         setSummary(EMPTY_SUMMARY)
       }
-    } catch (e) {
-      setLoadError('ネットワークエラーが発生しました')
     } finally {
       setLoading(false)
     }
@@ -514,7 +514,6 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
 
   // ── 請求・入金情報ロード ──────────────────────────────────
   const loadBilling = useCallback(async () => {
-    setBillingLoading(true)
     try {
       const res = await fetch(`/api/project-billing?project_id=${projectId}`)
       if (res.ok) setBillingMilestones(await res.json())
@@ -763,7 +762,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
           </span>
         </p>
         <button
-          onClick={load}
+          onClick={() => { setLoading(true); setLoadError(null); void load() }}
           style={{ padding: '8px 20px', borderRadius: 8, background: C.accent, color: '#fff', border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}
         >
           再読み込み
@@ -807,6 +806,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
             <p style={{ fontSize: 14, fontWeight: 700, color: C.text, marginBottom: 12 }}>追加金額{editingAdditional.idx + 1}を編集</p>
             <input
               ref={billingEditRef}
+              className="cl-edit-input"
               type="number"
               value={editingAdditional.value}
               onChange={e => setEditingAdditional(p => p ? { ...p, value: e.target.value } : p)}
@@ -818,8 +818,8 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
               style={{ width: '100%', padding: '8px 12px', borderRadius: 8, border: `1.5px solid ${C.accent}`, fontSize: 14, outline: 'none', boxSizing: 'border-box' }}
             />
             <div style={{ display: 'flex', gap: 8, marginTop: 16, justifyContent: 'flex-end' }}>
-              <button onClick={() => setEditingAdditional(null)} style={{ padding: '7px 16px', borderRadius: 8, border: `1px solid ${C.border}`, background: 'transparent', cursor: 'pointer', fontSize: 13 }}>キャンセル</button>
-              <button onClick={() => saveAdditionalAmount(editingAdditional.idx, editingAdditional.value)} style={{ padding: '7px 16px', borderRadius: 8, background: C.accent, color: '#fff', border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>保存</button>
+              <Button type="button" variant="secondary" onClick={() => setEditingAdditional(null)}>キャンセル</Button>
+              <Button type="button" variant="primary" onClick={() => saveAdditionalAmount(editingAdditional.idx, editingAdditional.value)}>保存</Button>
             </div>
           </div>
         </div>
@@ -1009,7 +1009,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                   const isRow    = checked[item.id]
                   const rowBg    = isRow
                     ? C.selected
-                    : idx % 2 === 0 ? C.bg : '#FAFBFD'
+                    : idx % 2 === 0 ? C.bg : '#FAFCFA'
                   const isOpen   = expandedIds[item.id]
                   const invs     = invoicesMap[item.id] ?? []
                   const hasInvoices = invs.length > 0
@@ -1033,7 +1033,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                         {/* 名称 */}
                         <td style={{ ...st.td, borderRight: HDIV }}>
                           {editing?.id === item.id && editing.field === 'name' ? (
-                            <input ref={editRef} style={st.input}
+                            <input ref={editRef} className="cl-edit-input" style={st.input}
                               value={editing.value}
                               onChange={e => setEditing(v => v ? { ...v, value: e.target.value } : v)}
                               onBlur={commitEdit}
@@ -1053,7 +1053,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                         {/* 業者名 */}
                         <td style={{ ...st.td, borderRight: HDIV }}>
                           {editing?.id === item.id && editing.field === 'vendor_name' ? (
-                            <input ref={editRef} style={st.input}
+                            <input ref={editRef} className="cl-edit-input" style={st.input}
                               placeholder="業者名を入力"
                               value={editing.value}
                               onChange={e => setEditing(v => v ? { ...v, value: e.target.value } : v)}
@@ -1074,7 +1074,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
 
                         {/* 見積原価（読み取り専用） */}
                         <td style={{ ...st.td, ...st.tdNum, color: C.textMuted,
-                          background: isRow ? 'transparent' : idx % 2 === 0 ? '#F8F9FB' : '#F4F5F7',
+                          background: isRow ? 'transparent' : idx % 2 === 0 ? '#F3F7F4' : '#F0F6F2',
                           borderRight: HDIV }}>
                           {fmtYen(item.estimate_cost)}
                         </td>
@@ -1082,7 +1082,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                         {/* 実行予算 */}
                         <td style={{ ...st.td, ...st.tdNum, borderRight: `1px solid ${C.borderLight}` }}>
                           {editing?.id === item.id && editing.field === 'budget_cost' ? (
-                            <input ref={editRef} style={{ ...st.input, textAlign: 'right' }}
+                            <input ref={editRef} className="cl-edit-input" style={{ ...st.input, textAlign: 'right' }}
                               value={editing.value}
                               onChange={e => setEditing(v => v ? { ...v, value: e.target.value } : v)}
                               onBlur={commitEdit}
@@ -1111,7 +1111,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                         {/* 完工実績 */}
                         <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV }}>
                           {editing?.id === item.id && editing.field === 'completion_cost' ? (
-                            <input ref={editRef} style={{ ...st.input, textAlign: 'right' }}
+                            <input ref={editRef} className="cl-edit-input" style={{ ...st.input, textAlign: 'right' }}
                               value={editing.value}
                               onChange={e => setEditing(v => v ? { ...v, value: e.target.value } : v)}
                               onBlur={commitEdit}
@@ -1137,7 +1137,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                               <span style={st.invBadge}>{invs.length}件</span>
                             </div>
                           ) : editing?.id === item.id && editing.field === 'actual_cost' ? (
-                            <input ref={editRef} style={{ ...st.input, textAlign: 'right' }}
+                            <input ref={editRef} className="cl-edit-input" style={{ ...st.input, textAlign: 'right' }}
                               value={editing.value}
                               onChange={e => setEditing(v => v ? { ...v, value: e.target.value } : v)}
                               onBlur={commitEdit}
@@ -1166,7 +1166,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                         {/* 備考 */}
                         <td style={{ ...st.td, borderRight: HDIV }}>
                           {editing?.id === item.id && editing.field === 'note' ? (
-                            <input ref={editRef} style={st.input}
+                            <input ref={editRef} className="cl-edit-input" style={st.input}
                               value={editing.value}
                               onChange={e => setEditing(v => v ? { ...v, value: e.target.value } : v)}
                               onBlur={commitEdit}
@@ -1263,7 +1263,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                   <td style={{ ...st.td, fontWeight: 700, color: C.text, borderRight: HDIV }}>合計</td>
                   <td style={{ ...st.td, borderRight: HDIV }} />
                   <td style={{ ...st.td, ...st.tdNum, fontWeight: 600, color: C.textMuted,
-                    background: '#F0F2F5', borderRight: HDIV }}>
+                    background: '#ECF3EE', borderRight: HDIV }}>
                     {smry.estimate_cost_total > 0 ? fmtYen(smry.estimate_cost_total) : '─'}
                   </td>
                   <td style={{ ...st.td, ...st.tdNum, fontWeight: 700, color: C.text,
@@ -1332,6 +1332,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                         <td style={cellStyle}>
                           <input
                             ref={billingEditRef}
+                            className="cl-edit-input"
                             type={isDate ? 'date' : 'number'}
                             defaultValue={val != null ? String(val).slice(0, 10) : ''}
                             style={cellInput}
@@ -1350,7 +1351,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                   }
 
                   return (
-                    <tr key={m.id} style={{ background: i % 2 === 0 ? C.bg : '#FAFBFD', borderBottom: `1px solid ${C.borderLight}` }}>
+                    <tr key={m.id} style={{ background: i % 2 === 0 ? C.bg : '#FAFCFA', borderBottom: `1px solid ${C.borderLight}` }}>
                       <td style={{ ...st.td, fontWeight: 600, borderRight: HDIV }}>{m.type}</td>
                       <BillingCell field="invoice_date" isDate />
                       <BillingCell field="invoice_amount" isNum />
@@ -1457,9 +1458,9 @@ function VendorView({
             )}
             <th style={{ ...st.thGrp, textAlign: 'right', width: 120, borderRight: HDIV }}>業者請求額</th>
             <th style={{ ...st.thGrp, textAlign: 'right', width: 110, borderRight: HDIV }}>差額</th>
-            <th style={{ ...st.thGrp, textAlign: 'right', width: 120, borderRight: HDIV, background: '#EEF3FF' }}>売上額</th>
-            <th style={{ ...st.thGrp, textAlign: 'right', width: 110, borderRight: HDIV, background: '#EEF3FF' }}>粗利</th>
-            <th style={{ ...st.thGrp, textAlign: 'right', width: 72, borderRight: HDIV, background: '#EEF3FF' }}>粗利率</th>
+            <th style={{ ...st.thGrp, textAlign: 'right', width: 120, borderRight: HDIV, background: '#EAF3DE' }}>売上額</th>
+            <th style={{ ...st.thGrp, textAlign: 'right', width: 110, borderRight: HDIV, background: '#EAF3DE' }}>粗利</th>
+            <th style={{ ...st.thGrp, textAlign: 'right', width: 72, borderRight: HDIV, background: '#EAF3DE' }}>粗利率</th>
             <th style={{ ...st.thGrp, width: 40 }}></th>
           </tr>
         </thead>
@@ -1476,7 +1477,7 @@ function VendorView({
                 : '▲¥' + Math.abs(Math.round(diff)).toLocaleString('ja-JP')
             const diffColor = diff == null ? C.textMuted : isOver ? C.red : C.green
             const diffBg    = diff == null ? 'transparent' : isOver ? C.redBg : C.greenBg
-            const rowBg     = idx % 2 === 0 ? C.bg : '#FAFBFD'
+            const rowBg     = idx % 2 === 0 ? C.bg : '#FAFCFA'
             const workTypes = g.items.map(i => i.name).filter(Boolean).slice(0, 5).join('・')
             const moreCount = g.items.length > 5 ? g.items.length - 5 : 0
 
@@ -1511,7 +1512,7 @@ function VendorView({
                   </td>
 
                   {/* 見積原価 */}
-                  <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV, background: '#F8F9FB' }}>
+                  <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV, background: '#F3F7F4' }}>
                     <span style={{ color: C.textSub }}>{fmtYen(g.estimateCost)}</span>
                   </td>
 
@@ -1549,19 +1550,19 @@ function VendorView({
                     const rate    = selling > 0 ? (selling - cost) / selling : null
                     return (
                       <>
-                        <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV, background: '#F5F8FF' }}>
+                        <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV, background: '#F0F6F2' }}>
                           <span style={{ color: selling > 0 ? C.textSub : C.textMuted }}>
                             {selling > 0 ? fmtYen(selling) : '─'}
                           </span>
                         </td>
-                        <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV, background: '#F5F8FF' }}>
+                        <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV, background: '#F0F6F2' }}>
                           {profit != null ? (
                             <span style={{ fontWeight: 700, color: profit >= 0 ? C.green : C.red }}>
                               {fmtYen(profit)}
                             </span>
                           ) : <span style={{ color: C.textMuted }}>─</span>}
                         </td>
-                        <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV, background: '#F5F8FF' }}>
+                        <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV, background: '#F0F6F2' }}>
                           {rate != null ? (
                             <span style={{
                               fontWeight: 700,
@@ -1601,7 +1602,7 @@ function VendorView({
                         </div>
                         <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, fontFamily: FONT }}>
                           <thead>
-                            <tr style={{ background: '#E8EEFF' }}>
+                            <tr style={{ background: '#E8F3EE' }}>
                               <th style={vs.dth}>工種名</th>
                               <th style={{ ...vs.dth, textAlign: 'right' }}>見積原価</th>
                               {hasBudget && <th style={{ ...vs.dth, textAlign: 'right' }}>実行予算</th>}
@@ -1619,7 +1620,7 @@ function VendorView({
                                 : '▲¥' + Math.abs(Math.round(d)).toLocaleString('ja-JP')
                               const dColor = d == null ? C.textMuted : d > 0 ? C.red : C.green
                               return (
-                                <tr key={item.id} style={{ background: ii % 2 === 0 ? 'transparent' : '#EEF3FF' }}>
+                                <tr key={item.id} style={{ background: ii % 2 === 0 ? 'transparent' : '#EAF3DE' }}>
                                   <td style={vs.dtd}>{item.name}</td>
                                   <td style={{ ...vs.dtd, textAlign: 'right', color: C.textSub }}>{fmtYen(item.estimate_cost)}</td>
                                   {hasBudget && <td style={{ ...vs.dtd, textAlign: 'right' }}>{item.budget_cost != null ? fmtYen(item.budget_cost) : '─'}</td>}
@@ -1632,7 +1633,7 @@ function VendorView({
                             })}
                           </tbody>
                           <tfoot>
-                            <tr style={{ background: '#DDE6FF', borderTop: `1.5px solid ${C.accent}` }}>
+                            <tr style={{ background: '#D5E8DC', borderTop: `1.5px solid ${C.accent}` }}>
                               <td style={{ ...vs.dtd, fontWeight: 700 }}>合計</td>
                               <td style={{ ...vs.dtd, textAlign: 'right', fontWeight: 700, color: C.textSub }}>{fmtYen(g.estimateCost)}</td>
                               {hasBudget && <td style={{ ...vs.dtd, textAlign: 'right', fontWeight: 700 }}>{g.budgetCost != null ? fmtYen(g.budgetCost) : '─'}</td>}
@@ -1677,15 +1678,15 @@ function VendorView({
               const totalRate    = totalSelling > 0 ? (totalSelling - costForProfit) / totalSelling : null
               return (
                 <>
-                  <td style={{ ...st.td, ...st.tdNum, fontWeight: 600, background: '#EEF3FF', borderRight: HDIV }}>
+                  <td style={{ ...st.td, ...st.tdNum, fontWeight: 600, background: '#EAF3DE', borderRight: HDIV }}>
                     {totalSelling > 0 ? fmtYen(totalSelling) : '─'}
                   </td>
-                  <td style={{ ...st.td, ...st.tdNum, fontWeight: 700, background: '#EEF3FF', borderRight: HDIV }}>
+                  <td style={{ ...st.td, ...st.tdNum, fontWeight: 700, background: '#EAF3DE', borderRight: HDIV }}>
                     {totalProfit != null ? (
                       <span style={{ color: totalProfit >= 0 ? C.green : C.red }}>{fmtYen(totalProfit)}</span>
                     ) : '─'}
                   </td>
-                  <td style={{ ...st.td, ...st.tdNum, fontWeight: 700, background: '#EEF3FF', borderRight: HDIV }}>
+                  <td style={{ ...st.td, ...st.tdNum, fontWeight: 700, background: '#EAF3DE', borderRight: HDIV }}>
                     {totalRate != null ? (
                       <span style={{ color: marginColor(totalRate) }}>{(totalRate * 100).toFixed(1)}%</span>
                     ) : '─'}
@@ -1829,7 +1830,7 @@ function SummaryCards({
             <span style={{ color: C.textMuted, fontSize: 16, fontWeight: 300 }}>=</span>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
               <span style={{ fontSize: 10, fontWeight: 700, color: C.textMuted, letterSpacing: '0.06em' }}>合計金額</span>
-              <span style={{ fontSize: 16, fontWeight: 800, color: '#1D4ED8', fontVariantNumeric: 'tabular-nums' }}>
+              <span style={{ fontSize: 16, fontWeight: 800, color: C.accent, fontVariantNumeric: 'tabular-nums' }}>
                 {fmtYen(smry.contract_amount)}
               </span>
             </div>
@@ -1957,7 +1958,7 @@ const st: Record<string, React.CSSProperties> = {
   card: {
     background: C.bg, borderRadius: 10,
     border: `1px solid ${C.border}`, borderLeftWidth: 4,
-    padding: '16px 16px 14px', boxShadow: '0 1px 3px rgba(45,111,246,0.06)',
+    padding: '16px 16px 14px', boxShadow: '0 1px 3px rgba(0,0,0,0.04)',
   },
   emptyWrap: { display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '64px 24px', gap: 12 },
   emptyIcon: {
@@ -1976,7 +1977,7 @@ const st: Record<string, React.CSSProperties> = {
   tableCard: {
     margin: '16px 16px 0', background: C.bg, borderRadius: 10,
     border: `1px solid ${C.border}`,
-    boxShadow: '0 1px 3px rgba(45,111,246,0.06)', overflow: 'hidden',
+    boxShadow: '0 1px 3px rgba(0,0,0,0.04)', overflow: 'hidden',
   },
   toolbar: {
     display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -2021,9 +2022,9 @@ const st: Record<string, React.CSSProperties> = {
   syncBtn: {
     display: 'flex', alignItems: 'center', gap: 6,
     padding: '6px 14px', borderRadius: 7,
-    background: '#EFF6FF', color: '#1D4ED8',
+    background: C.accentLight, color: C.accent,
     fontSize: 13, fontWeight: 600,
-    border: '1px solid #BFDBFE', cursor: 'pointer', minHeight: 34,
+    border: '1px solid #A8D4B5', cursor: 'pointer', minHeight: 34,
     fontFamily: FONT,
   },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: 13 },
@@ -2054,7 +2055,7 @@ const st: Record<string, React.CSSProperties> = {
   editCell: { display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 4, cursor: 'text', minHeight: 26, borderRadius: 4 },
   pen: { fontSize: 10, color: C.border, flexShrink: 0 },
   input: {
-    width: '100%', border: `1.5px solid ${C.accent}`, borderRadius: 4,
+    width: '100%', border: `1.5px solid ${C.accent}`, borderRadius: 6,
     padding: '3px 6px', fontSize: 13, outline: 'none',
     background: C.accentLight, color: C.text, minHeight: 28,
     boxSizing: 'border-box', fontFamily: FONT,
@@ -2080,7 +2081,7 @@ const st: Record<string, React.CSSProperties> = {
     display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 24,
     padding: '10px 24px',
     background: C.bg, borderTop: `1px solid ${C.border}`,
-    boxShadow: '0 -2px 8px rgba(45,111,246,0.06)',
+    boxShadow: '0 -2px 8px rgba(0,0,0,0.04)',
     flexWrap: 'wrap', zIndex: 10,
   },
 }

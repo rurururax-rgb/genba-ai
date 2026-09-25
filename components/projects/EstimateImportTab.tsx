@@ -69,6 +69,15 @@ export function EstimateImportTab({ projectId }: Props) {
   const [dragging,     setDragging]    = useState(false)
   const [addedCount,   setAddedCount]  = useState(0)
 
+  function fadeRemove(id: string) {
+    setRemovingIds(prev => new Set([...prev, id]))
+    setTimeout(() => {
+      setRows(prev => prev.filter(r => r.id !== id))
+      setRemovingIds(prev => { const n = new Set(prev); n.delete(id); return n })
+      setAddedCount(c => c + 1)
+    }, 280)
+  }
+
   // ドラッグ成功通知を受けて該当カードを消す
   useEffect(() => {
     const handler = (e: Event) => {
@@ -78,15 +87,6 @@ export function EstimateImportTab({ projectId }: Props) {
     window.addEventListener('genba:import-item-moved', handler)
     return () => window.removeEventListener('genba:import-item-moved', handler)
   }, [])
-
-  function fadeRemove(id: string) {
-    setRemovingIds(prev => new Set([...prev, id]))
-    setTimeout(() => {
-      setRows(prev => prev.filter(r => r.id !== id))
-      setRemovingIds(prev => { const n = new Set(prev); n.delete(id); return n })
-      setAddedCount(c => c + 1)
-    }, 280)
-  }
 
   function addFiles(newFiles: FileList | File[]) {
     const arr = Array.from(newFiles).filter(f =>
@@ -653,7 +653,7 @@ const s: Record<string, React.CSSProperties> = {
   browseBtn: {
     marginTop: 6, padding: '9px 24px',
     background: G.cardBg, border: `1.5px solid ${G.border}`,
-    borderRadius: 10, fontSize: 13, fontWeight: 600,
+    borderRadius: 8, fontSize: 13, fontWeight: 600,
     color: G.textSec, cursor: 'pointer',
   },
 

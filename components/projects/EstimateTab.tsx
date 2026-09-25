@@ -2,6 +2,8 @@
 
 import React, { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 import {
   useReactTable,
   getCoreRowModel,
@@ -94,9 +96,9 @@ const C = {
   pageBg:      '#F3F7F4',
   bg:          '#FFFFFF',
   groupBg:     '#F0F6F2',
-  hover:       '#EDF5EF',
-  divider:     '#DDE8E2',
-  accent:      '#3D7A55',
+  hover:       '#F8FAF8',
+  divider:     '#D5DED8',
+  accent:      '#2B5E40',
   accentMid:   '#6CB382',
   accentTint:  '#A8D4B5',
   accentLight: '#EAF3DE',
@@ -214,7 +216,8 @@ function DeleteBtn({ onClick, disabled }: { onClick: () => void; disabled?: bool
         cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.4 : 1,
         color: hov ? C.red : C.textMuted,
-        transition: 'all 0.12s', padding: 0, flexShrink: 0,
+        transition: 'background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard)',
+        padding: 0, flexShrink: 0,
       }}
     >
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -268,7 +271,7 @@ function NumInput({
         }}
         style={{
           width: '100%', height: CELL_H,
-          border: `1.5px solid ${C.accent}`, borderRadius: 6,
+          border: `1.5px solid ${C.accent}`, borderRadius: 8,
           padding: '0 8px', fontSize: 13, textAlign: align,
           fontFamily: FONT, outline: 'none', background: '#FFF',
           color: C.text, fontVariantNumeric: 'tabular-nums',
@@ -280,9 +283,9 @@ function NumInput({
 
   const isPast = fromPast && value != null
   return (
-    <div onClick={start} style={{
+    <div onClick={start} className="edit-cell" style={{
       width: '100%', height: CELL_H,
-      border: `1px solid ${isPast ? '#BFDBFE' : C.divider}`, borderRadius: 6,
+      border: `1px solid ${isPast ? '#BFDBFE' : C.divider}`, borderRadius: 8,
       padding: '0 8px',
       display: 'flex', alignItems: 'center',
       justifyContent: align === 'right' ? 'flex-end' : 'flex-start',
@@ -315,9 +318,10 @@ const UNIT_OPTIONS = ['式', '坪', '㎡', 'm', '本', '個', '枚', '台', '箇
 function UnitSelect({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   return (
     <select value={value} onChange={e => onChange(e.target.value)} onClick={e => e.stopPropagation()}
+      className="edit-select"
       style={{
         width: '100%', height: CELL_H,
-        border: `1px solid ${C.divider}`, borderRadius: 6,
+        border: `1px solid ${C.divider}`, borderRadius: 8,
         background: '#FFF',
         fontSize: 13, color: C.text, fontFamily: FONT,
         cursor: 'pointer', appearance: 'none', textAlign: 'center',
@@ -352,7 +356,7 @@ function TextInput({ value, onChange, placeholder = '─' }: {
         }}
         style={{
           width: '100%', height: CELL_H,
-          border: `1.5px solid ${C.accent}`, borderRadius: 6,
+          border: `1.5px solid ${C.accent}`, borderRadius: 8,
           padding: '0 8px', fontSize: 12, fontFamily: FONT,
           outline: 'none', background: '#FFF', color: C.text,
           boxShadow: `0 0 0 3px ${C.accent}20`,
@@ -362,9 +366,9 @@ function TextInput({ value, onChange, placeholder = '─' }: {
   }
 
   return (
-    <div onClick={start} style={{
+    <div onClick={start} className="edit-cell" style={{
       width: '100%', height: CELL_H,
-      border: `1px solid ${C.divider}`, borderRadius: 6,
+      border: `1px solid ${C.divider}`, borderRadius: 8,
       padding: '0 8px',
       display: 'flex', alignItems: 'center',
       background: '#FFF',
@@ -397,7 +401,7 @@ function PillAddBtn({ onClick, disabled, label }: { onClick: () => void; disable
         fontSize: 12, fontWeight: 600, fontFamily: FONT,
         cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.5 : 1,
-        transition: 'all 0.12s',
+        transition: 'background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard)',
       }}
     >
       <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
@@ -450,7 +454,7 @@ function TopFormulaCell({
       <span style={{ fontSize: 26, fontWeight: 700, color: valueColor, fontFamily: FONT, fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.5px' }}>
         {value}
       </span>
-      {open && formula && <FormulaTooltip lines={formula} anchor={ref.current} />}
+      {open && formula && <FormulaTooltip lines={formula} anchor={ref} />}
     </div>
   )
 }
@@ -460,13 +464,14 @@ function TopFormulaCell({
 
 function FormulaTooltip({
   lines, anchor,
-}: { lines: string[]; anchor: HTMLElement | null }) {
+}: { lines: string[]; anchor: React.RefObject<HTMLElement | null> }) {
   const [pos, setPos] = useState<{ top: number; right: number } | null>(null)
 
   useLayoutEffect(() => {
-    if (!anchor) return
+    const el = anchor.current
+    if (!el) return
     const update = () => {
-      const r = anchor.getBoundingClientRect()
+      const r = el.getBoundingClientRect()
       setPos({ top: r.bottom + 8, right: window.innerWidth - r.right })
     }
     update()
@@ -478,7 +483,7 @@ function FormulaTooltip({
     }
   }, [anchor])
 
-  if (!anchor || !pos) return null
+  if (!pos) return null
 
   return createPortal(
     <div style={{
@@ -570,7 +575,7 @@ function DetailCell({
       }}>
         {value}
       </span>
-      {open && formula && <FormulaTooltip lines={formula} anchor={cellRef.current} />}
+      {open && formula && <FormulaTooltip lines={formula} anchor={cellRef} />}
     </div>
   )
 }
@@ -770,7 +775,7 @@ function GroupHeader({
             onMouseDown={e => e.stopPropagation()}
             onClick={e => e.stopPropagation()}
             style={{
-              flex: 1, border: `1.5px solid ${C.accent}`, borderRadius: 4,
+              flex: 1, border: `1.5px solid ${C.accent}`, borderRadius: 6,
               padding: '1px 6px', fontSize: 12, fontWeight: 600,
               fontFamily: FONT, outline: 'none', background: C.bg, color: C.text,
               boxShadow: `0 0 0 3px ${C.accent}20`,
@@ -780,6 +785,7 @@ function GroupHeader({
           <span
             onClick={() => { setLabelDraft(group.label); setEditingLabel(true) }}
             title="クリックして編集"
+            className="group-label-edit"
             style={{
               flex: 1, fontSize: 12, fontWeight: 600, color: '#555',
               fontFamily: FONT, cursor: 'text',
@@ -925,7 +931,7 @@ function ItemRow({
   onSave, onDelete, deleting, rowIndex, onAddAfter,
   selected, onToggleSelect, anySelected,
   indent, onIndent, onUnindent,
-  isGhost,
+  isGhost, saved,
 }: {
   item: EstimateItem; inGroup: boolean; isDragging: boolean
   dragHandleProps: DraggableProvidedDragHandleProps | null
@@ -933,7 +939,7 @@ function ItemRow({
   deleting: boolean; rowIndex: number; onAddAfter?: () => void
   selected?: boolean; onToggleSelect?: (shift: boolean) => void; anySelected?: boolean
   indent?: number; onIndent?: () => void; onUnindent?: () => void
-  isGhost?: boolean
+  isGhost?: boolean; saved?: boolean
 }) {
   const gridCols = useContext(GridColsCtx)
   const [editField, setEditField] = useState<string | null>(null)
@@ -1099,7 +1105,7 @@ function ItemRow({
               <div style={{
                 flex: 1, height: GRP_H - 6,
                 border: editField === 'name' ? `1.5px solid ${C.accent}` : `1px solid ${C.divider}`,
-                borderRadius: 6,
+                borderRadius: 8,
                 display: 'flex', alignItems: 'center',
                 background: editField === 'name' ? '#FFF' : inputBg,
                 boxShadow: editField === 'name' ? `0 0 0 3px ${C.accent}20` : undefined,
@@ -1153,10 +1159,10 @@ function ItemRow({
 
       {/* 種別 */}
       <div style={{ display: 'flex', alignItems: 'center', paddingLeft: 4, paddingRight: 4, height: '100%' }}>
-        <div style={{
+        <div className="edit-cell" style={{
           flex: 1, height: CELL_H, overflow: 'hidden',
           border: editField === 'category' ? `1.5px solid ${C.accent}` : `1px solid ${C.divider}`,
-          borderRadius: 6, display: 'flex', alignItems: 'center',
+          borderRadius: 8, display: 'flex', alignItems: 'center',
           background: '#FFF',
           boxShadow: editField === 'category' ? `0 0 0 3px ${C.accent}20` : undefined,
         }}>
@@ -1200,10 +1206,10 @@ function ItemRow({
             <path d="M1 0v5a2 2 0 002 2h5" stroke={(indent ?? 0) > 0 ? C.accentTint : C.divider} strokeWidth="1.5" strokeLinecap="round"/>
           </svg>
         )}
-        <div style={{
+        <div className="edit-cell" style={{
           flex: 1, height: CELL_H, overflow: 'hidden',
           border: editField === 'name' ? `1.5px solid ${C.accent}` : `1px solid ${C.divider}`,
-          borderRadius: 6,
+          borderRadius: 8,
           display: 'flex', alignItems: 'center',
           background: '#FFF',
           boxShadow: editField === 'name' ? `0 0 0 3px ${C.accent}20` : undefined,
@@ -1255,7 +1261,7 @@ function ItemRow({
 
       {/* 金額（読み取り専用） */}
       <div style={{ display: 'flex', alignItems: 'center', paddingLeft: 4, paddingRight: 4, height: '100%' }}>
-        <div style={{
+        <div className="amount-cell" style={{
           flex: 1, height: CELL_H,
           border: `1px solid ${C.divider}`, borderRadius: 6,
           padding: '0 10px',
@@ -1280,10 +1286,10 @@ function ItemRow({
 
       {/* 備考 */}
       <div style={{ display: 'flex', alignItems: 'center', paddingLeft: 4, paddingRight: 4, height: '100%', overflow: 'hidden' }}>
-        <div style={{
+        <div className="edit-cell" style={{
           flex: 1, height: CELL_H, overflow: 'hidden',
           border: editField === 'memo' ? `1.5px solid ${C.accent}` : `1px solid ${C.divider}`,
-          borderRadius: 6, display: 'flex', alignItems: 'center',
+          borderRadius: 8, display: 'flex', alignItems: 'center',
           background: '#FFF',
           boxShadow: editField === 'memo' ? `0 0 0 3px ${C.accent}20` : undefined,
         }}>
@@ -1312,10 +1318,10 @@ function ItemRow({
 
       {/* 業者名（内部専用） */}
       <div style={{ display: 'flex', alignItems: 'center', paddingLeft: 4, paddingRight: 4, height: '100%', overflow: 'hidden' }}>
-        <div style={{
+        <div className="edit-cell" style={{
           flex: 1, height: CELL_H, overflow: 'hidden',
           border: editField === 'vendor_name' ? `1.5px solid ${C.accent}` : `1px solid ${C.divider}`,
-          borderRadius: 6, display: 'flex', alignItems: 'center',
+          borderRadius: 8, display: 'flex', alignItems: 'center',
           background: '#FFF',
           boxShadow: editField === 'vendor_name' ? `0 0 0 3px ${C.accent}20` : undefined,
         }}>
@@ -1414,6 +1420,14 @@ function ItemRow({
         追加
       </button>
     )}
+    {saved && (
+      <div style={{
+        position: 'absolute', inset: 0,
+        background: 'rgba(61,122,85,0.08)',
+        pointerEvents: 'none',
+        animation: 'save-flash-fade 400ms var(--ease-leave) both',
+      }} />
+    )}
   </div>
     {editRect && editField && createPortal(
       <input
@@ -1431,7 +1445,7 @@ function ItemRow({
           height: editRect.height,
           zIndex: 9999,
           border: `1.5px solid ${C.accent}`,
-          borderRadius: 6,
+          borderRadius: 8,
           padding: '0 8px',
           fontSize: editField === 'name' ? 13 : 12,
           fontWeight: editField === 'name' ? 500 : undefined,
@@ -1439,7 +1453,7 @@ function ItemRow({
           outline: 'none',
           background: '#FFF',
           color: C.text,
-          boxShadow: `0 2px 12px rgba(22,114,236,0.18), 0 0 0 3px ${C.accent}20`,
+          boxShadow: `0 2px 8px rgba(43,94,64,0.12), 0 0 0 3px ${C.accent}20`,
         }}
       />,
       document.body
@@ -1521,7 +1535,7 @@ function RevDiffModal({ rev, currentItems, fmt, onClose, fontFamily }: {
               {rev.total != null && ` ／ 合計 ¥${fmt(rev.total)}`}
             </div>
           </div>
-          <button onClick={onClose} style={{ border: 'none', background: 'none', cursor: 'pointer', color: C.textMuted, fontSize: 18, lineHeight: 1 }}>✕</button>
+          <button onClick={onClose} aria-label="閉じる" style={{ border: 'none', background: 'none', cursor: 'pointer', color: C.textMuted, fontSize: 18, lineHeight: 1 }}>✕</button>
         </div>
 
         {/* 差分サマリー */}
@@ -1607,6 +1621,8 @@ export function EstimateTab({ projectId }: { projectId: string }) {
   const [newlyCreatedGroupId, setNewlyCreatedGroupId] = useState<string | null>(null)
   // 複数選択
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  // 保存フラッシュ（保存直後に行をハイライト）
+  const [savedIds, setSavedIds] = useState<Set<string>>(new Set())
   // Shift+クリック範囲選択用：最後にクリックした行のID
   const lastClickedIdRef = useRef<string | null>(null)
   // ドラッグ作成中のゴースト位置
@@ -2003,10 +2019,11 @@ export function EstimateTab({ projectId }: { projectId: string }) {
     groupUpdates: { id: string; sort_order: number }[],
     itemUpdates:  { id: string; sort_order: number; group_id: string | null }[],
   ) {
-    await fetch('/api/estimate-items/reorder', {
+    const res = await fetch('/api/estimate-items/reorder', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ groups: groupUpdates, items: itemUpdates }),
     })
+    if (!res.ok) throw new Error('reorder failed')
   }
 
   function handleDragEnd(result: DropResult) {
@@ -2018,9 +2035,11 @@ export function EstimateTab({ projectId }: { projectId: string }) {
       if (source.index === destination.index) return
       const ng = reorder(visibleGroups, source.index, destination.index)
         .map((g, i) => ({ ...g, sort_order: i * 1000 }))
-      const ngIds = new Set(ng.map(g => g.id))
+      const ngIds    = new Set(ng.map(g => g.id))
+      const prevGrps = groups  // rollback snapshot
       setGroups(prev => [...ng, ...prev.filter(g => !ngIds.has(g.id))])
       persistReorder(ng.map(g => ({ id: g.id, sort_order: g.sort_order })), [])
+        .catch(() => { setGroups(prevGrps); alert('並び替えの保存に失敗しました') })
       return
     }
 
@@ -2062,14 +2081,16 @@ export function EstimateTab({ projectId }: { projectId: string }) {
         ].map((x, i) => ({ ...x, sort_order: i * 1000 }))
 
         const updatedItems = items.map(item => newDst.find(x => x.id === item.id) ?? item)
+        const prevItems    = items  // rollback snapshot
         setItems(updatedItems)
         setSelectedIds(new Set())
 
         const changed = updatedItems.filter(i => {
-          const o = items.find(x => x.id === i.id)
+          const o = prevItems.find(x => x.id === i.id)
           return o && (o.sort_order !== i.sort_order || o.group_id !== i.group_id)
         })
         persistReorder([], changed.map(i => ({ id: i.id, sort_order: i.sort_order, group_id: i.group_id })))
+          .catch(() => { setItems(prevItems); alert('並び替えの保存に失敗しました') })
         return
       }
 
@@ -2097,12 +2118,14 @@ export function EstimateTab({ projectId }: { projectId: string }) {
           return i
         })
       }
+      const prevItems = items  // rollback snapshot
       setItems(updatedItems)
       const changed = updatedItems.filter(i => {
-        const o = items.find(x => x.id === i.id)
+        const o = prevItems.find(x => x.id === i.id)
         return o && (o.sort_order !== i.sort_order || o.group_id !== i.group_id)
       })
       persistReorder([], changed.map(i => ({ id: i.id, sort_order: i.sort_order, group_id: i.group_id })))
+        .catch(() => { setItems(prevItems); alert('並び替えの保存に失敗しました') })
     }
   }
 
@@ -2245,6 +2268,8 @@ export function EstimateTab({ projectId }: { projectId: string }) {
     if (!res.ok) { alert('保存に失敗しました'); return }
     const updated = await res.json() as Partial<EstimateItem>
     setItems(prev => prev.map(i => i.id === itemId ? { ...i, ...updated } : i))
+    setSavedIds(prev => new Set([...prev, itemId]))
+    setTimeout(() => setSavedIds(prev => { const n = new Set(prev); n.delete(itemId); return n }), 400)
   }
 
   async function handleDelete(itemId: string) {
@@ -2444,19 +2469,19 @@ export function EstimateTab({ projectId }: { projectId: string }) {
           padding: '0 16px', height: 52,
           background: C.bg, borderBottom: HDIV,
         }}>
-          <button style={st.tbBtn} onMouseDown={e => startDragCreate(e, 'item')} disabled={addingRow}>
+          <button className="est-tb-btn" style={st.tbBtn} onMouseDown={e => startDragCreate(e, 'item')} disabled={addingRow}>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
               <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
             </svg>
             行を追加
           </button>
-          <button style={st.tbBtnHeader} onMouseDown={e => startDragCreate(e, 'header')} disabled={addingRow} title="グループ内の区切り見出し（金額なし）">
+          <button className="est-tb-btn-header" style={st.tbBtnHeader} onMouseDown={e => startDragCreate(e, 'header')} disabled={addingRow} title="グループ内の区切り見出し（金額なし）">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
               <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="14" y2="12"/><line x1="4" y1="18" x2="17" y2="18"/>
             </svg>
             見出し行
           </button>
-          <button style={st.tbBtnNote} onMouseDown={e => startDragCreate(e, 'note')} disabled={addingRow} title="自由記載のメモ行（金額なし）">
+          <button className="est-tb-btn-note" style={st.tbBtnNote} onMouseDown={e => startDragCreate(e, 'note')} disabled={addingRow} title="自由記載のメモ行（金額なし）">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
               <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
@@ -2464,7 +2489,7 @@ export function EstimateTab({ projectId }: { projectId: string }) {
             メモ行
           </button>
           <div style={{ width: 1, height: 18, background: C.divider }} />
-          <button style={st.tbBtn} onClick={handleCreateGroup} disabled={creating}>
+          <button className="est-tb-btn" style={st.tbBtn} onClick={handleCreateGroup} disabled={creating}>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
               <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/>
               <line x1="9" y1="21" x2="9" y2="9"/>
@@ -2492,6 +2517,7 @@ export function EstimateTab({ projectId }: { projectId: string }) {
           </button>
           <button
             onClick={() => setShowImportModal(v => !v)}
+            className="est-tb-import"
             style={{
               ...st.tbBtn, display: 'inline-flex', alignItems: 'center', gap: 5,
               borderColor: showImportModal ? '#93C5FD' : '#A8C5B5',
@@ -2509,6 +2535,7 @@ export function EstimateTab({ projectId }: { projectId: string }) {
           </button>
           <div style={{ width: 1, height: 18, background: C.divider }} />
           <a href={`/projects/${projectId}/estimate`} target="_blank" rel="noreferrer"
+            className="est-tb-accent"
             style={{ ...st.tbBtn, ...st.tbAccent, textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: 5 }}>
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/>
@@ -2518,6 +2545,7 @@ export function EstimateTab({ projectId }: { projectId: string }) {
           <div style={{ width: 1, height: 18, background: C.divider }} />
           <button
             onClick={() => window.dispatchEvent(new CustomEvent('genba:tab', { detail: 'invoice' }))}
+            className="est-tb-invoice"
             style={{ ...st.tbBtn, display: 'inline-flex', alignItems: 'center', gap: 5, borderColor: '#A0BFD8', color: '#1E3A5F', background: '#EFF6FF' }}
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -2527,19 +2555,25 @@ export function EstimateTab({ projectId }: { projectId: string }) {
             請求書を作成
           </button>
           <div style={{ width: 1, height: 18, background: C.divider }} />
-          <button
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            className="h-8 rounded-[7px] gap-[5px]"
             onClick={() => setShowRevConfirm(true)}
-            style={{ ...st.tbBtn, borderColor: '#B5A0D8', color: '#5B21B6', background: '#F5F0FF' }}
             title="現在の見積をRevとしてスナップショット保存"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/>
             </svg>
             Rev確定
-          </button>
-          <button
+          </Button>
+          <Button
+            type="button"
+            variant={showRevHistory ? 'secondary' : 'tertiary'}
+            size="sm"
+            className="h-8 rounded-[7px] gap-[5px]"
             onClick={() => setShowRevHistory(v => !v)}
-            style={{ ...st.tbBtn, borderColor: '#B5A0D8', color: '#5B21B6', background: showRevHistory ? '#EDE9FE' : '#F5F0FF', position: 'relative' }}
             title="改訂履歴を表示"
           >
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -2547,11 +2581,11 @@ export function EstimateTab({ projectId }: { projectId: string }) {
             </svg>
             履歴
             {revisions.length > 0 && (
-              <span style={{ fontSize: 10, fontWeight: 700, background: '#5B21B6', color: '#fff', borderRadius: 10, padding: '1px 5px', marginLeft: 2 }}>
+              <span style={{ fontSize: 10, fontWeight: 700, background: '#2B5E40', color: '#fff', borderRadius: 10, padding: '1px 5px', marginLeft: 2 }}>
                 {revisions.length}
               </span>
             )}
-          </button>
+          </Button>
         </div>
 
         {/* ── 選択アクションバー（複数選択時のみ表示）── */}
@@ -2764,6 +2798,7 @@ export function EstimateTab({ projectId }: { projectId: string }) {
                     setDragHoverTabId(null)
                     if (dragTabTimer.current) { clearTimeout(dragTabTimer.current); dragTabTimer.current = null }
                   }}
+                  className={isActive ? 'est-tab est-tab-active' : 'est-tab'}
                   style={{
                     position: 'relative', overflow: 'hidden',
                     height: '100%', padding: '0 14px', border: 'none',
@@ -2845,6 +2880,7 @@ export function EstimateTab({ projectId }: { projectId: string }) {
             {/* グレーキャンバス: カードが白い背景に浮いて見えるよう内側にグレーサーフェスを敷く */}
             <div style={{ background: C.bg }}>
             <DragDropContext
+              autoScrollerOptions={{ disabled: true }}
               onDragStart={(start: DragStart) => {
                 startDndAutoScroll()
                 if (start.type !== 'ITEM') return
@@ -2994,7 +3030,8 @@ export function EstimateTab({ projectId }: { projectId: string }) {
                                                   indent={localIndent[item.id] ?? 0}
                                                   onIndent={() => setLocalIndent(p => ({ ...p, [item.id]: Math.min((p[item.id] ?? 0) + 1, 3) }))}
                                                   onUnindent={() => setLocalIndent(p => ({ ...p, [item.id]: Math.max((p[item.id] ?? 0) - 1, 0) }))}
-                                                  isGhost={draggingId !== null && selectedIds.has(item.id) && item.id !== draggingId} />
+                                                  isGhost={draggingId !== null && selectedIds.has(item.id) && item.id !== draggingId}
+                                                  saved={savedIds.has(item.id)} />
                                                 {nextPb && !is.isDragging && (
                                                   <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 30 }}>
                                                     <PageBreakRow pageNum={nextPb.pageNum} pageTotal={nextPb.pageTotal} pageCostTotal={nextPb.pageCostTotal} />
@@ -3089,7 +3126,8 @@ export function EstimateTab({ projectId }: { projectId: string }) {
                                   indent={localIndent[item.id] ?? 0}
                                   onIndent={() => setLocalIndent(p => ({ ...p, [item.id]: Math.min((p[item.id] ?? 0) + 1, 3) }))}
                                   onUnindent={() => setLocalIndent(p => ({ ...p, [item.id]: Math.max((p[item.id] ?? 0) - 1, 0) }))}
-                                  isGhost={draggingId !== null && selectedIds.has(item.id) && item.id !== draggingId} />
+                                  isGhost={draggingId !== null && selectedIds.has(item.id) && item.id !== draggingId}
+                                  saved={savedIds.has(item.id)} />
                               </div>
                             )}
                           </Draggable>
@@ -3123,14 +3161,17 @@ export function EstimateTab({ projectId }: { projectId: string }) {
         }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 16px', height: 52, borderBottom: HDIV, flexShrink: 0 }}>
             <span style={{ fontSize: 14, fontWeight: 700, color: '#1A2E24', fontFamily: FONT }}>見積書を取り込む</span>
-            <button
+            <Button
+              type="button"
+              variant="tertiary"
+              size="icon"
+              aria-label="取込パネルを閉じる"
               onClick={() => setShowImportModal(false)}
-              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#6B7280', padding: 4, display: 'flex', borderRadius: 6 }}
             >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
                 <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
               </svg>
-            </button>
+            </Button>
           </div>
           <div style={{ flex: 1, overflow: 'auto' }}>
             <EstimateImportTab projectId={projectId} />
@@ -3202,24 +3243,34 @@ export function EstimateTab({ projectId }: { projectId: string }) {
           </p>
           <div style={{ marginBottom: 18 }}>
             <label style={{ fontSize: 11, fontWeight: 600, color: '#7C5CB8', display: 'block', marginBottom: 6 }}>ラベル（任意）</label>
-            <input
+            <Input
+              inputSize="compact"
               autoFocus
               value={revLabel}
               onChange={e => setRevLabel(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') handleCreateRevision() }}
               placeholder="例：初版、設計変更1回目、追加工事後"
-              style={{ width: '100%', border: '1.5px solid #DDD5F0', borderRadius: 8, padding: '8px 12px', fontSize: 13, color: C.text, outline: 'none', boxSizing: 'border-box', fontFamily: FONT }}
+              className="w-full"
             />
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
-            <button onClick={() => { setShowRevConfirm(false); setRevLabel('') }}
-              style={{ flex: 1, padding: '9px', borderRadius: 8, border: '1.5px solid #DDD5F0', background: '#fff', color: C.textMuted, fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: FONT }}>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={() => { setShowRevConfirm(false); setRevLabel('') }}
+              className="flex-1"
+            >
               キャンセル
-            </button>
-            <button onClick={handleCreateRevision} disabled={savingRev}
-              style={{ flex: 2, padding: '9px', borderRadius: 8, border: 'none', background: savingRev ? '#C4B3E8' : '#5B21B6', color: '#fff', fontSize: 13, fontWeight: 700, cursor: savingRev ? 'default' : 'pointer', fontFamily: FONT }}>
+            </Button>
+            <Button
+              type="button"
+              variant="primary"
+              onClick={handleCreateRevision}
+              disabled={savingRev}
+              className="flex-[2]"
+            >
               {savingRev ? '保存中…' : '確定する'}
-            </button>
+            </Button>
           </div>
         </div>
       </div>,
@@ -3318,7 +3369,7 @@ const st = {
     border: `1px solid #8BA3D9`, background: '#EEF1F8',
     color: '#2B3A5C', fontSize: 12, fontWeight: 600,
     cursor: 'pointer', whiteSpace: 'nowrap' as const,
-    fontFamily: FONT,
+    fontFamily: FONT, transition: 'background 0.1s, border-color 0.1s',
   } as React.CSSProperties,
 
   tbBtnNote: {
@@ -3327,6 +3378,6 @@ const st = {
     border: `1px solid #C9A84C`, background: '#FEFAED',
     color: '#7A5A00', fontSize: 12, fontWeight: 600,
     cursor: 'pointer', whiteSpace: 'nowrap' as const,
-    fontFamily: FONT,
+    fontFamily: FONT, transition: 'background 0.1s, border-color 0.1s',
   } as React.CSSProperties,
 } as const

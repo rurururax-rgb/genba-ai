@@ -34,7 +34,7 @@
 
   --border:             215 20% 91%;
   --input:              215 20% 91%;
-  --ring:               210 100% 52%;
+  --ring:               152 43% 36%;
   --radius:             0.5rem;
 }
 
@@ -57,7 +57,7 @@
   --destructive-foreground: 0 0% 100%;
   --border:             214 30% 22%;
   --input:              214 30% 22%;
-  --ring:               210 100% 55%;
+  --ring:               152 43% 55%;
 }
 
 /* ================================================================
@@ -146,6 +146,15 @@
   --shadow-card:  0 2px 8px rgba(0,0,0,0.07), 0 0 0 1px rgba(0,0,0,0.04);
   --shadow-float: 0 4px 16px rgba(0,0,0,0.10), 0 0 0 1px rgba(0,0,0,0.05);
   --shadow-modal: 0 20px 60px rgba(0,0,0,0.25);
+
+  /* ── モーション ───────────────────────────────────── */
+  --duration-micro:  80ms;
+  --duration-fast:   120ms;
+  --duration-normal: 180ms;
+  --duration-medium: 250ms;
+  --ease-standard:   cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-enter:      cubic-bezier(0, 0, 0.2, 1);
+  --ease-leave:      cubic-bezier(0.4, 0, 1, 1);
 }
 
 /* ================================================================
@@ -202,4 +211,277 @@ body {
   font-weight: 600;
   line-height: 1.4;
   white-space: nowrap;
+}
+
+/* ================================================================
+   フォーカス（キーボードのみ）
+   ================================================================ */
+
+:focus-visible {
+  outline: 2px solid hsl(152 43% 36%);
+  outline-offset: 2px;
+}
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* ================================================================
+   案件カード インタラクション
+   ================================================================ */
+
+.project-card {
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    box-shadow  var(--duration-fast) var(--ease-standard);
+}
+.project-card:hover {
+  background: #F5FAF6 !important;
+  box-shadow: 0 2px 8px rgba(43,94,64,0.10), 0 0 0 1px rgba(43,94,64,0.08) !important;
+}
+.project-card:active {
+  background: #EBF4ED !important;
+  box-shadow: 0 0.5px 0 rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04) !important;
+  transition-duration: var(--duration-micro);
+}
+.project-card:focus-visible {
+  outline: 2px solid hsl(152 43% 36%);
+  outline-offset: 2px;
+}
+.project-card:hover .card-chevron {
+  stroke: #6CB382;
+  transition: stroke var(--duration-fast) var(--ease-standard);
+}
+
+/* ================================================================
+   新規案件ボタン インタラクション
+   ================================================================ */
+
+.new-project-btn {
+  transition:
+    background var(--duration-fast) var(--ease-standard),
+    box-shadow  var(--duration-fast) var(--ease-standard);
+}
+.new-project-btn:hover {
+  background: #3D7A55 !important;
+  box-shadow: 0 4px 12px rgba(43,94,64,0.3);
+}
+.new-project-btn:active {
+  background: #1D4530 !important;
+  box-shadow: none;
+  transition-duration: var(--duration-micro);
+}
+.new-project-btn:focus-visible {
+  outline: 2px solid hsl(152 43% 36%);
+  outline-offset: 2px;
+}
+
+/* ================================================================
+   モーダル開くアニメーション
+   ================================================================ */
+
+@keyframes modal-enter {
+  from { opacity: 0; transform: scale(0.96); }
+  to   { opacity: 1; transform: scale(1); }
+}
+.modal-panel {
+  animation: modal-enter var(--duration-normal) var(--ease-enter) both;
+}
+
+/* ================================================================
+   reduced-motion（CSS インタラクションのみ対象、DnDは除外）
+   ================================================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  .project-card,
+  .new-project-btn { transition: none; }
+  .modal-panel { animation: none; }
+}
+
+/* ================================================================
+   EstimateTab — Interaction (Phase 1.2)
+   ================================================================ */
+
+/* Editable cell: hover ring (inset = no layout shift) */
+.edit-cell {
+  transition:
+    box-shadow var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard);
+}
+.edit-cell:hover {
+  box-shadow: inset 0 0 0 1.5px rgba(43,94,64,0.28);
+}
+
+/* UnitSelect: hover/focus */
+.edit-select:hover {
+  border-color: var(--input-border-hover) !important;
+}
+.edit-select:focus {
+  border-color: var(--input-border-focus) !important;
+  box-shadow: 0 0 0 3px var(--input-ring-focus);
+  outline: none;
+}
+
+/* Read-only calculated cell: no border */
+.amount-cell {
+  border-color: transparent !important;
+}
+
+/* GroupHeader label: editable hint on hover */
+.group-label-edit:hover {
+  text-decoration: underline dotted rgba(61,122,85,0.45);
+}
+
+/* Toolbar base buttons */
+.est-tb-btn:hover {
+  background: #F0F5F2 !important;
+  border-color: #A8C5B5 !important;
+}
+.est-tb-btn:active {
+  background: #E3EFE7 !important;
+  transition-duration: var(--duration-micro) !important;
+}
+.est-tb-btn-header:hover {
+  background: #E4E8F4 !important;
+  border-color: #6B83B8 !important;
+}
+.est-tb-btn-header:active {
+  background: #D0D8F0 !important;
+  transition-duration: var(--duration-micro) !important;
+}
+.est-tb-btn-note:hover {
+  background: #FEF0C0 !important;
+  border-color: #B08020 !important;
+}
+.est-tb-btn-note:active {
+  background: #FDE8A0 !important;
+  transition-duration: var(--duration-micro) !important;
+}
+.est-tb-accent:hover {
+  background: #D3E8D8 !important;
+  border-color: #8BB09B !important;
+}
+.est-tb-accent:active {
+  background: #C3D8C8 !important;
+  transition-duration: var(--duration-micro) !important;
+}
+
+.est-tb-invoice:hover {
+  background: #DBEAFE !important;
+  border-color: #7BACD0 !important;
+}
+.est-tb-invoice:active {
+  background: #BFDBFE !important;
+  transition-duration: var(--duration-micro) !important;
+}
+.est-tb-import:hover {
+  opacity: 0.85;
+}
+
+/* Group tabs */
+.est-tab:not(.est-tab-active):hover {
+  color: #2B5E40 !important;
+  background: rgba(43,94,64,0.07) !important;
+}
+
+/* Save-flash overlay fade */
+@keyframes save-flash-fade {
+  0%   { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* Reduced motion: estimate editor */
+@media (prefers-reduced-motion: reduce) {
+  .edit-cell { transition: none; }
+  .edit-select { transition: none !important; }
+  .est-tb-btn, .est-tb-btn-header, .est-tb-btn-note,
+  .est-tb-accent, .est-tb-invoice { transition: none !important; }
+}
+
+/* ================================================================
+   Button Constitution Design Tokens
+   ================================================================ */
+
+:root {
+  /* Primary — RAGZ brand green */
+  --btn-primary-bg:       #2B5E40;
+  --btn-primary-bg-hover: #3D7A55;
+  --btn-primary-bg-press: #1D4530;
+  --btn-primary-text:     #FFFFFF;
+  --btn-primary-disabled: #9BBFA7;
+
+  /* Secondary — white/border */
+  --btn-secondary-bg:       #FFFFFF;
+  --btn-secondary-bg-hover: #F3F7F4;
+  --btn-secondary-bg-press: #E8F2EB;
+  --btn-secondary-border:   #C0D4C5;
+  --btn-secondary-text:     #1A2E24;
+
+  /* Tertiary — ghost */
+  --btn-tertiary-bg-hover: rgba(61, 122, 85, 0.08);
+  --btn-tertiary-text:     #4B7560;
+
+  /* Danger — delete/destroy only */
+  --btn-danger-bg:       #FEF2F2;
+  --btn-danger-bg-hover: #FEE2E2;
+  --btn-danger-border:   #FCA5A5;
+  --btn-danger-text:     #DC2626;
+
+  /* Geometry */
+  --btn-radius:  8px;
+  --btn-sm-h:   36px;
+  --btn-md-h:   44px;
+  --btn-lg-h:   48px;
+}
+
+/* ================================================================
+   Input Constitution Design Tokens v1.0
+   ================================================================ */
+
+:root {
+  /* Heights */
+  --input-h-standard:      44px;
+  --input-h-compact:       36px;
+  --input-h-large:         48px;
+
+  /* Geometry */
+  --input-radius:          8px;
+
+  /* Border */
+  --input-border-default:  #D5DED8;
+  --input-border-hover:    #AFC4B5;
+  --input-border-focus:    #2B5E40;
+  --input-border-error:    #DC2626;
+  --input-border-readonly: #E4E8E5;
+  --input-border-disabled: #E4E8EE;
+
+  /* Backgrounds */
+  --input-bg:              #FFFFFF;
+  --input-bg-readonly:     #F8FAF8;
+  --input-bg-disabled:     #F3F4F6;
+
+  /* Text */
+  --input-text:            #1A2E24;
+  --input-text-readonly:   #47564E;
+  --input-text-disabled:   #9CA3AF;
+  --input-placeholder:     #8A9A91;
+
+  /* Focus / Error rings */
+  --input-ring-focus:      rgba(43, 94, 64, 0.14);
+  --input-ring-error:      rgba(220, 38, 38, 0.12);
+
+  /* Font sizes */
+  --input-fs-standard:     15px;
+  --input-fs-compact:      14px;
+  --input-fs-large:        16px;
+
+  /* Textarea */
+  --textarea-min-h:        96px;
+  --textarea-min-h-compact: 72px;
+}
+
+/* ── CostLedger 編集 input — focus ring（compact table 用） ── */
+/* st.input は常時 accent border で "編集中" を示す（DOM swap設計）。
+   ここでは keyboard/browser focus の補助リングのみを追加する。        */
+.cl-edit-input:focus {
+  box-shadow: 0 0 0 2px rgba(43, 94, 64, 0.12);
 }

@@ -13,14 +13,15 @@
  * ⑤ ハッシュなし                   → セッション確認 → /projects or /login
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { getClient } from '@/lib/supabase/client'
+import { Input } from '@/components/ui/input'
 
 type Phase = 'loading' | 'reset' | 'error'
 
 export default function AuthCallbackPage() {
-  const supabase = useRef(getClient()).current
+  const supabase = useMemo(() => getClient(), [])
   const router   = useRouter()
 
   const [phase,      setPhase]      = useState<Phase>('loading')
@@ -174,7 +175,7 @@ export default function AuthCallbackPage() {
             <label htmlFor="new-password" style={S.label}>
               新しいパスワード
             </label>
-            <input
+            <Input
               id="new-password"
               type="password"
               required
@@ -183,7 +184,6 @@ export default function AuthCallbackPage() {
               placeholder="8文字以上"
               value={pwd}
               onChange={e => setPwd(e.target.value)}
-              style={S.input}
             />
           </div>
           {pwdError && <p style={S.errInline}>{pwdError}</p>}
@@ -289,9 +289,9 @@ const S = {
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
-    height: 50,
-    borderRadius: 14,
-    background: 'linear-gradient(135deg, #00B4DB, #0083B0)',
+    height: 48,
+    borderRadius: 8,
+    background: '#2B5E40',
     color: '#FFFFFF',
     fontSize: 15,
     fontWeight: 600,
@@ -316,17 +316,6 @@ const S = {
     color: '#3C3C43',
   } as React.CSSProperties,
 
-  input: {
-    height: 44,
-    padding: '0 14px',
-    borderRadius: 10,
-    border: '1.5px solid #E5E5EA',
-    fontSize: 15,
-    color: '#1C1C1E',
-    background: '#FFFFFF',
-    outline: 'none',
-  } as React.CSSProperties,
-
   errInline: {
     fontSize: 13,
     color: '#FF3B30',
@@ -335,10 +324,10 @@ const S = {
   } as React.CSSProperties,
 
   btn: {
-    height: 50,
-    borderRadius: 14,
+    height: 48,
+    borderRadius: 8,
     border: 'none',
-    background: 'linear-gradient(135deg, #00B4DB, #0083B0)',
+    background: '#2B5E40',
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: 600,

@@ -51,8 +51,8 @@ const C = {
   aiBg:         'transparent',
   aiText:       '#1A1A18',
   inputBg:      '#FFFFFF',
-  inputBorder:  '#D9D6CF',
-  sendBtn:      '#1E3A5F',
+  inputBorder:  '#D5DED8',
+  sendBtn:      '#2B5E40',
   sendDisabled: '#C8D3E8',
   divider:      '#EAE7E1',
   muted:        '#9B968E',
@@ -156,13 +156,13 @@ function ChangeCard({
               try { await onConfirm(change.id) ; setStatus('confirmed') }
               catch (e) { setStatus('error') ; setErrMsg(e instanceof Error ? e.message : String(e)) }
             }}
-            style={{ flex: 1, padding: '8px 0', borderRadius: 7, border: 'none', background: C.confirmBg, color: C.confirmBtn, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
+            style={{ flex: 1, padding: '8px 0', borderRadius: 8, border: 'none', background: C.confirmBg, color: C.confirmBtn, fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
           >
             作成する
           </button>
           <button
             onClick={() => { onCancel(change.id) ; setStatus('cancelled') }}
-            style={{ padding: '8px 16px', borderRadius: 7, border: `1px solid ${C.panelBorder}`, background: C.cancelBg, color: C.cancelBtn, fontSize: 13, cursor: 'pointer' }}
+            style={{ padding: '8px 16px', borderRadius: 8, border: `1px solid ${C.panelBorder}`, background: C.cancelBg, color: C.cancelBtn, fontSize: 13, cursor: 'pointer' }}
           >
             キャンセル
           </button>
@@ -442,17 +442,26 @@ export function CompanyChat({ onClose, initialMessage }: Props) {
               value={input}
               onChange={e => setInput(e.target.value)}
               onKeyDown={e => {
-                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault() ; sendMessage(input) }
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault() ; sendMessage(input) }
+              }}
+              onFocus={e => {
+                e.currentTarget.style.borderColor = '#2B5E40'
+                e.currentTarget.style.boxShadow = '0 0 0 2px rgba(43,94,64,0.12)'
+              }}
+              onBlur={e => {
+                e.currentTarget.style.borderColor = C.inputBorder
+                e.currentTarget.style.boxShadow = 'none'
               }}
               placeholder="例: 未入金の案件は？  請求書を作って"
               rows={2}
               disabled={isStreaming}
-              style={{ flex: 1, resize: 'none', border: `1px solid ${C.inputBorder}`, borderRadius: 10, padding: '8px 12px', fontSize: 13, fontFamily: FONT, outline: 'none', background: isStreaming ? '#F9F9F9' : C.inputBg }}
+              style={{ flex: 1, resize: 'none', border: `1px solid ${C.inputBorder}`, borderRadius: 8, padding: '8px 12px', fontSize: 13, fontFamily: FONT, outline: 'none', background: isStreaming ? '#F9F9F9' : C.inputBg }}
             />
             <button
               onClick={() => sendMessage(input)}
               disabled={!input.trim() || isStreaming}
-              style={{ width: 44, height: 44, borderRadius: 10, border: 'none', background: !input.trim() || isStreaming ? C.sendDisabled : C.sendBtn, cursor: !input.trim() || isStreaming ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', alignSelf: 'flex-end' }}
+              aria-label="送信"
+              style={{ width: 44, height: 44, borderRadius: 8, border: 'none', background: !input.trim() || isStreaming ? C.sendDisabled : C.sendBtn, cursor: !input.trim() || isStreaming ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', alignSelf: 'flex-end' }}
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                 <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
