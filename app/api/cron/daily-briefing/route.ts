@@ -29,7 +29,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server'
-import { supabaseAdmin } from '@/lib/supabase/admin'
+import { getAdminClient } from '@/lib/supabase/admin'
 import { getDailyBriefingItems, filterHighPriorityItems, formatBriefingMessage } from '@/lib/services/daily-briefing'
 import { summarizeBriefingWithAI } from '@/lib/services/briefing-summarizer'
 import { sendLinePushMessage, maskUserId } from '@/lib/line/push'
@@ -59,6 +59,7 @@ async function processBriefingForCompany(
   reason?:   string
   itemCount?: number
 }> {
+  const supabaseAdmin = getAdminClient()
   // ── Step 1: 送信権を取得（INSERT 試行）────────────────────────────
 
   const { error: insertErr } = await supabaseAdmin
@@ -225,6 +226,7 @@ async function runDailyBriefing(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
+  const supabaseAdmin = getAdminClient()
   const jstDate = getJstDate()
   console.log(`[Cron] daily-briefing 開始 date=${jstDate}`)
 
