@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Design reference files (not production code):
+    "UI参考/**",
   ]),
 ]);
 

@@ -184,15 +184,24 @@ function IconBtn({
   href?: string
 }) {
   const [tooltip, setTooltip] = useState<TooltipPos | null>(null)
+  const [isHovered, setIsHovered] = useState(false)
   const ref = useRef<HTMLElement>(null)
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const onEnter = () => {
-    if (ref.current) {
-      const r = ref.current.getBoundingClientRect()
-      setTooltip({ top: r.top + r.height / 2, left: r.right + 14 })
-    }
+    setIsHovered(true)
+    timerRef.current = setTimeout(() => {
+      if (ref.current) {
+        const r = ref.current.getBoundingClientRect()
+        setTooltip({ top: r.top + r.height / 2, left: r.right + 14 })
+      }
+    }, 400)
   }
-  const onLeave = () => setTooltip(null)
+  const onLeave = () => {
+    setIsHovered(false)
+    if (timerRef.current) clearTimeout(timerRef.current)
+    setTooltip(null)
+  }
 
   const style: React.CSSProperties = {
     width: 44,
@@ -200,6 +209,8 @@ function IconBtn({
     borderRadius: 12,
     background: active
       ? 'linear-gradient(135deg, #2B5E40, #1D4530)'
+      : isHovered
+      ? 'rgba(108,179,130,0.12)'
       : 'transparent',
     border: 'none',
     cursor: 'pointer',
@@ -208,7 +219,7 @@ function IconBtn({
     justifyContent: 'center',
     color: active ? '#FFFFFF' : '#5E8A6E',
     boxShadow: active ? '0 4px 14px rgba(43,94,64,0.5)' : 'none',
-    transition: 'all 0.18s',
+    transition: 'background 120ms cubic-bezier(0.4,0,0.2,1), box-shadow 120ms cubic-bezier(0.4,0,0.2,1), color 120ms cubic-bezier(0.4,0,0.2,1)',
     position: 'relative',
     textDecoration: 'none',
   }

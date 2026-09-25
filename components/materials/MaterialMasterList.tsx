@@ -2,6 +2,7 @@
 
 import { useState, useCallback } from 'react'
 import { CatalogImportModal } from './CatalogImportModal'
+import { Input } from '@/components/ui/input'
 
 // ─────────────────────────────────────────────────────────
 // 型
@@ -29,7 +30,7 @@ type Props = {
 // ─────────────────────────────────────────────────────────
 
 const C = {
-  navy:      '#1E3A5F',
+  navy:      '#2B5E40',
   navyLight: '#EFF6FF',
   border:    '#D8E0EE',
   muted:     '#8A96A8',
@@ -100,22 +101,16 @@ function EditRow({
     setSaving(false)
   }
 
-  const inputStyle: React.CSSProperties = {
-    width: '100%', border: `1px solid ${C.border}`, borderRadius: 6,
-    padding: '5px 8px', fontSize: 13, fontFamily: FONT, color: '#1A1A2E',
-    background: C.white, outline: 'none', boxSizing: 'border-box',
-  }
-
   return (
     <tr style={{ background: C.navyLight }}>
       {/* 品名 */}
-      <td style={td}><input value={fields.name} onChange={set('name')} style={inputStyle} /></td>
+      <td style={td}><Input inputSize="compact" value={fields.name} onChange={set('name')} /></td>
       {/* 仕様 */}
-      <td style={td}><input value={fields.spec} onChange={set('spec')} style={inputStyle} placeholder="型番・仕様" /></td>
+      <td style={td}><Input inputSize="compact" value={fields.spec} onChange={set('spec')} placeholder="型番・仕様" /></td>
       {/* 参考単価 */}
-      <td style={td}><input value={fields.selling_price} onChange={set('selling_price')} style={{ ...inputStyle, textAlign: 'right' }} placeholder="例: 552000" /></td>
+      <td style={td}><Input inputSize="compact" value={fields.selling_price} onChange={set('selling_price')} placeholder="例: 552000" className="text-right" /></td>
       {/* URL */}
-      <td style={td}><input value={fields.url} onChange={set('url')} style={inputStyle} placeholder="https://..." /></td>
+      <td style={td}><Input inputSize="compact" value={fields.url} onChange={set('url')} placeholder="https://..." /></td>
       {/* 更新日 */}
       <td style={td} />
       {/* 操作 */}
@@ -156,12 +151,6 @@ function AddRow({ onAdd }: { onAdd: (fields: EditableFields) => Promise<void> })
     setSaving(false)
   }
 
-  const inputStyle: React.CSSProperties = {
-    width: '100%', border: `1px solid ${C.border}`, borderRadius: 6,
-    padding: '5px 8px', fontSize: 13, fontFamily: FONT, color: '#1A1A2E',
-    background: C.white, outline: 'none', boxSizing: 'border-box',
-  }
-
   if (!open) {
     return (
       <tr>
@@ -184,10 +173,10 @@ function AddRow({ onAdd }: { onAdd: (fields: EditableFields) => Promise<void> })
 
   return (
     <tr style={{ background: '#F0FDF4' }}>
-      <td style={td}><input value={fields.name} onChange={set('name')} style={inputStyle} placeholder="品名（必須）" autoFocus /></td>
-      <td style={td}><input value={fields.spec} onChange={set('spec')} style={inputStyle} placeholder="型番・仕様" /></td>
-      <td style={td}><input value={fields.selling_price} onChange={set('selling_price')} style={{ ...inputStyle, textAlign: 'right' }} placeholder="例: 552000" /></td>
-      <td style={td}><input value={fields.url} onChange={set('url')} style={inputStyle} placeholder="https://..." /></td>
+      <td style={td}><Input inputSize="compact" value={fields.name} onChange={set('name')} placeholder="品名（必須）" autoFocus /></td>
+      <td style={td}><Input inputSize="compact" value={fields.spec} onChange={set('spec')} placeholder="型番・仕様" /></td>
+      <td style={td}><Input inputSize="compact" value={fields.selling_price} onChange={set('selling_price')} placeholder="例: 552000" className="text-right" /></td>
+      <td style={td}><Input inputSize="compact" value={fields.url} onChange={set('url')} placeholder="https://..." /></td>
       <td style={td} />
       <td style={{ ...td, textAlign: 'right' }}>
         <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
@@ -274,15 +263,11 @@ export function MaterialMasterList({ initialItems }: Props) {
 
       {/* ── 検索バー ── */}
       <div style={{ display: 'flex', gap: 10, marginBottom: 16, alignItems: 'center' }}>
-        <input
+        <Input
           value={q}
           onChange={e => setQ(e.target.value)}
           placeholder="品名・仕様・カテゴリで絞り込み…"
-          style={{
-            flex: 1, border: `1.5px solid ${C.border}`, borderRadius: 10,
-            padding: '9px 14px', fontSize: 14, fontFamily: FONT,
-            color: '#1A1A2E', outline: 'none', background: C.white,
-          }}
+          className="flex-1"
         />
         <span style={{ fontSize: 13, color: C.muted, whiteSpace: 'nowrap' }}>
           {filtered.length}件
@@ -291,9 +276,9 @@ export function MaterialMasterList({ initialItems }: Props) {
           onClick={() => setShowImport(true)}
           style={{
             display: 'flex', alignItems: 'center', gap: 6,
-            padding: '0 16px', height: 40,
+            padding: '0 16px', height: 44,
             background: C.navy, color: C.white,
-            border: 'none', borderRadius: 10,
+            border: 'none', borderRadius: 8,
             fontSize: 13, fontWeight: 600, cursor: 'pointer',
             fontFamily: FONT, whiteSpace: 'nowrap', flexShrink: 0,
           }}
@@ -426,23 +411,24 @@ function buildBody(f: EditableFields): Record<string, unknown> {
 const td: React.CSSProperties = { padding: '9px 14px', verticalAlign: 'middle' }
 
 const btnBase: React.CSSProperties = {
-  border: 'none', borderRadius: 6, padding: '5px 12px',
-  fontSize: 12, cursor: 'pointer', fontFamily: FONT, fontWeight: 500,
+  border: 'none', borderRadius: 8, padding: '5px 12px',
+  fontSize: 12, cursor: 'pointer', fontFamily: FONT, fontWeight: 600,
   whiteSpace: 'nowrap',
 }
 
 const btnPrimary: React.CSSProperties = {
   ...btnBase,
-  background: C.navy, color: '#FFFFFF',
+  background: '#2B5E40', color: '#FFFFFF',
 }
 
 const btnOutline: React.CSSProperties = {
   ...btnBase,
-  background: C.white, color: C.navy,
-  border: `1px solid ${C.border}`,
+  background: C.white, color: '#1A2E24',
+  border: '1px solid #C0D4C5',
 }
 
 const btnDanger: React.CSSProperties = {
   ...btnBase,
   background: C.dangerBg, color: C.danger,
+  border: '1px solid #FCA5A5',
 }

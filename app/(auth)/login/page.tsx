@@ -7,6 +7,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { getClient } from '@/lib/supabase/client'
+import { Input } from '@/components/ui/input'
 
 export default function LoginPage() {
   const supabase = getClient()
@@ -49,28 +50,26 @@ export default function LoginPage() {
         <form onSubmit={handleSubmit} style={styles.form}>
           <div style={styles.field}>
             <label htmlFor="email" style={styles.label}>メールアドレス</label>
-            <input
+            <Input
               id="email"
               type="email"
               required
               autoComplete="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              style={styles.input}
               placeholder="example@email.com"
             />
           </div>
 
           <div style={styles.field}>
             <label htmlFor="password" style={styles.label}>パスワード</label>
-            <input
+            <Input
               id="password"
               type="password"
               required
               autoComplete="current-password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              style={styles.input}
               placeholder="パスワード"
             />
           </div>
@@ -124,16 +123,6 @@ const styles = {
   form: { display: 'flex', flexDirection: 'column' as const, gap: 16 },
   field: { display: 'flex', flexDirection: 'column' as const, gap: 6 },
   label: { fontSize: 13, fontWeight: 500, color: '#3C3C43' },
-  input: {
-    height: 44,
-    padding: '0 14px',
-    borderRadius: 10,
-    border: '1.5px solid #E5E5EA',
-    fontSize: 15,
-    color: '#1C1C1E',
-    background: '#FFFFFF',
-    outline: 'none',
-  },
   error: {
     fontSize: 13,
     color: '#FF3B30',
@@ -141,10 +130,10 @@ const styles = {
     textAlign: 'center' as const,
   },
   button: {
-    height: 50,
-    borderRadius: 14,
+    height: 48,
+    borderRadius: 8,
     border: 'none',
-    background: 'linear-gradient(135deg, #00B4DB, #0083B0)',
+    background: '#2B5E40',
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: 600,

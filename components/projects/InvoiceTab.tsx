@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { getClient } from '@/lib/supabase/client'
+import { Input } from '@/components/ui/input'
+import { Textarea } from '@/components/ui/textarea'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -149,7 +151,7 @@ html, body {
 
 /* ─ 印刷ボタンバー ─ */
 .no-print {
-  background: #1e3a5f;
+  background: #2B5E40;
   padding: 10pt 14pt;
   display: flex;
   align-items: center;
@@ -160,9 +162,9 @@ html, body {
 }
 .print-btn {
   background: #fff;
-  color: #1e3a5f;
+  color: #2B5E40;
   border: none;
-  border-radius: 4pt;
+  border-radius: 8px;
   padding: 6pt 20pt;
   font-size: 11pt;
   font-weight: bold;
@@ -580,7 +582,7 @@ function InvoiceCard({
           onClick={handlePrint}
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 4,
-            background: '#1e3a5f', color: '#fff', border: 'none', borderRadius: 6,
+            background: '#2B5E40', color: '#fff', border: 'none', borderRadius: 8,
             padding: '4px 10px', fontSize: 11, cursor: 'pointer', fontFamily: FONT,
           }}
         >
@@ -722,10 +724,6 @@ function InvoiceEditor({
     }
   }
 
-  const inputSt: React.CSSProperties = {
-    border: `1px solid ${C.border}`, borderRadius: 6, padding: '6px 9px',
-    fontSize: 13, fontFamily: FONT, color: C.text, background: '#FAFCFB', outline: 'none', width: '100%',
-  }
   const labelSt: React.CSSProperties = {
     fontSize: 11, fontWeight: 600, color: C.label, fontFamily: FONT, marginBottom: 4, display: 'block',
   }
@@ -734,7 +732,7 @@ function InvoiceEditor({
     <div style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 14, fontFamily: FONT, overflow: 'hidden' }}>
       {/* エディタヘッダー */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 18px', borderBottom: `1px solid ${C.divider}`, background: C.accentBg }}>
-        <button onClick={onClose} style={{ background: 'none', border: `1px solid ${C.accentTint}`, borderRadius: 6, padding: '4px 10px', fontSize: 12, cursor: 'pointer', color: C.accent, fontFamily: FONT }}>
+        <button onClick={onClose} style={{ background: 'none', border: `1px solid ${C.accentTint}`, borderRadius: 8, padding: '4px 10px', fontSize: 12, cursor: 'pointer', color: C.accent, fontFamily: FONT }}>
           ← 一覧に戻る
         </button>
         <span style={{ fontSize: 14, fontWeight: 700, color: C.text }}>
@@ -749,7 +747,7 @@ function InvoiceEditor({
           }}
           style={{
             display: 'inline-flex', alignItems: 'center', gap: 6,
-            background: '#1e3a5f', color: '#fff', border: 'none', borderRadius: 7,
+            background: '#2B5E40', color: '#fff', border: 'none', borderRadius: 8,
             padding: '7px 16px', fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: FONT,
           }}
         >
@@ -759,7 +757,7 @@ function InvoiceEditor({
           </svg>
           印刷プレビュー
         </button>
-        <button onClick={handleSave} disabled={saving} style={{ background: C.accent, color: '#fff', border: 'none', borderRadius: 7, padding: '7px 18px', fontSize: 13, fontWeight: 700, cursor: saving ? 'not-allowed' : 'pointer', fontFamily: FONT, opacity: saving ? 0.6 : 1 }}>
+        <button onClick={handleSave} disabled={saving} style={{ background: C.accent, color: '#fff', border: 'none', borderRadius: 8, padding: '7px 18px', fontSize: 13, fontWeight: 700, cursor: saving ? 'not-allowed' : 'pointer', fontFamily: FONT, opacity: saving ? 0.6 : 1 }}>
           {saving ? '保存中…' : '保存する'}
         </button>
       </div>
@@ -770,7 +768,7 @@ function InvoiceEditor({
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
           <div>
             <label style={labelSt}>支払種別</label>
-            <select value={form.payment_type ?? 'custom'} onChange={e => handlePayTypeChange(e.target.value as PaymentType)} style={{ ...inputSt }}>
+            <select value={form.payment_type ?? 'custom'} onChange={e => handlePayTypeChange(e.target.value as PaymentType)} className="h-9 w-full rounded-[8px] border border-[#D5DED8] bg-white px-[10px] text-sm text-[#1A2E24] outline-none hover:border-[#AFC4B5] focus:border-[#2B5E40] focus:shadow-[0_0_0_3px_rgba(43,94,64,0.14)] cursor-pointer">
               <option value="contract">契約時</option>
               <option value="start">着工時</option>
               <option value="completion">完工時</option>
@@ -788,7 +786,7 @@ function InvoiceEditor({
           </div>
           <div>
             <label style={labelSt}>請求書No.</label>
-            <input style={inputSt} value={form.invoice_number ?? ''} onChange={e => setForm(p => ({ ...p, invoice_number: e.target.value }))} placeholder="例：請-2024-001" />
+            <Input inputSize="compact" value={form.invoice_number ?? ''} onChange={e => setForm(p => ({ ...p, invoice_number: e.target.value }))} placeholder="例：請-2024-001" />
           </div>
           <div>
             <label style={labelSt}>ステータス</label>
@@ -806,19 +804,19 @@ function InvoiceEditor({
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 140px 140px', gap: 16 }}>
           <div>
             <label style={labelSt}>顧客名（様）</label>
-            <input style={inputSt} value={form.customer_name ?? ''} onChange={e => setForm(p => ({ ...p, customer_name: e.target.value }))} placeholder="例：栗本" />
+            <Input inputSize="compact" value={form.customer_name ?? ''} onChange={e => setForm(p => ({ ...p, customer_name: e.target.value }))} placeholder="例：栗本" />
           </div>
           <div>
             <label style={labelSt}>工事名</label>
-            <input style={inputSt} value={form.construction_name ?? ''} onChange={e => setForm(p => ({ ...p, construction_name: e.target.value }))} placeholder="例：犬山市古民家滅築プラン" />
+            <Input inputSize="compact" value={form.construction_name ?? ''} onChange={e => setForm(p => ({ ...p, construction_name: e.target.value }))} placeholder="例：犬山市古民家滅築プラン" />
           </div>
           <div>
             <label style={labelSt}>発行日</label>
-            <input type="date" style={inputSt} value={form.issued_at ?? ''} onChange={e => setForm(p => ({ ...p, issued_at: e.target.value }))} />
+            <Input type="date" inputSize="compact" value={form.issued_at ?? ''} onChange={e => setForm(p => ({ ...p, issued_at: e.target.value }))} />
           </div>
           <div>
             <label style={labelSt}>お支払期限</label>
-            <input type="date" style={inputSt} value={form.payment_due_at ?? ''} onChange={e => setForm(p => ({ ...p, payment_due_at: e.target.value || null }))} />
+            <Input type="date" inputSize="compact" value={form.payment_due_at ?? ''} onChange={e => setForm(p => ({ ...p, payment_due_at: e.target.value || null }))} />
           </div>
         </div>
 
@@ -826,7 +824,7 @@ function InvoiceEditor({
         <div>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
             <span style={{ fontSize: 12, fontWeight: 700, color: C.accent, letterSpacing: '0.05em' }}>明細</span>
-            <button onClick={addItem} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'none', border: `1px solid ${C.border}`, borderRadius: 6, padding: '4px 10px', fontSize: 12, cursor: 'pointer', color: C.textSub, fontFamily: FONT }}>
+            <button onClick={addItem} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'none', border: `1px solid ${C.border}`, borderRadius: 8, padding: '4px 10px', fontSize: 12, cursor: 'pointer', color: C.textSub, fontFamily: FONT }}>
               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
               行を追加
             </button>
@@ -843,11 +841,11 @@ function InvoiceEditor({
             {/* 行 */}
             {items.map((item, idx) => (
               <div key={item.id} style={{ display: 'grid', gridTemplateColumns: '2fr 64px 52px 150px 1fr 32px', padding: '5px 10px', borderBottom: idx < items.length - 1 ? `1px solid ${C.divider}` : 'none', alignItems: 'center', gap: 4 }}>
-                <input style={{ ...inputSt, fontSize: 12 }} value={item.name} onChange={e => updateItem(idx, 'name', e.target.value)} placeholder="例：リフォーム工事（契約時）" />
-                <input type="number" style={{ ...inputSt, fontSize: 12, textAlign: 'right' }} value={item.quantity} min={0} onChange={e => updateItem(idx, 'quantity', Number(e.target.value))} />
-                <input style={{ ...inputSt, fontSize: 12, textAlign: 'center' }} value={item.unit} onChange={e => updateItem(idx, 'unit', e.target.value)} />
-                <input type="number" style={{ ...inputSt, fontSize: 12, textAlign: 'right' }} value={item.amount} min={0} onChange={e => updateItem(idx, 'amount', Number(e.target.value))} placeholder="0" />
-                <input style={{ ...inputSt, fontSize: 12 }} value={item.memo} onChange={e => updateItem(idx, 'memo', e.target.value)} placeholder="備考" />
+                <Input inputSize="compact" className="text-xs" value={item.name} onChange={e => updateItem(idx, 'name', e.target.value)} placeholder="例：リフォーム工事（契約時）" />
+                <Input type="number" inputSize="compact" className="text-xs text-right" value={item.quantity} min={0} onChange={e => updateItem(idx, 'quantity', Number(e.target.value))} />
+                <Input inputSize="compact" className="text-xs text-center" value={item.unit} onChange={e => updateItem(idx, 'unit', e.target.value)} />
+                <Input type="number" inputSize="compact" className="text-xs text-right" value={item.amount} min={0} onChange={e => updateItem(idx, 'amount', Number(e.target.value))} placeholder="0" />
+                <Input inputSize="compact" className="text-xs" value={item.memo} onChange={e => updateItem(idx, 'memo', e.target.value)} placeholder="備考" />
                 <button onClick={() => removeItem(idx)} disabled={items.length <= 1} style={{ background: 'none', border: 'none', cursor: items.length <= 1 ? 'not-allowed' : 'pointer', color: C.textMuted, fontSize: 16, padding: 0, opacity: items.length <= 1 ? 0.3 : 1 }}>×</button>
               </div>
             ))}
@@ -868,7 +866,7 @@ function InvoiceEditor({
             ))}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 16px', borderBottom: `1px solid ${C.divider}` }}>
               <span style={{ fontSize: 12, color: C.label, fontFamily: FONT }}>調整額（端数など）</span>
-              <input type="number" value={adjustment} onChange={e => setForm(p => ({ ...p, adjustment: Number(e.target.value) }))} style={{ ...inputSt, width: 120, textAlign: 'right', fontSize: 13 }} />
+              <Input type="number" inputSize="compact" value={adjustment} onChange={e => setForm(p => ({ ...p, adjustment: Number(e.target.value) }))} className="text-right" style={{ width: 120 }} />
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', background: C.accentBg }}>
               <span style={{ fontSize: 14, fontWeight: 700, color: C.accent, fontFamily: FONT }}>ご請求金額（税込）</span>
@@ -880,9 +878,8 @@ function InvoiceEditor({
         {/* ── 備考 ── */}
         <div>
           <label style={labelSt}>備考・特記事項</label>
-          <textarea value={form.memo ?? ''} onChange={e => setForm(p => ({ ...p, memo: e.target.value || null }))} rows={3}
+          <Textarea inputSize="compact" value={form.memo ?? ''} onChange={e => setForm(p => ({ ...p, memo: e.target.value || null }))} rows={3}
             placeholder="例：恐れ入りますが、期日までにお振込みいただけますようお願いいたします。"
-            style={{ ...inputSt, resize: 'vertical', lineHeight: 1.6 }}
           />
         </div>
 
@@ -912,25 +909,33 @@ export function InvoiceTab({
   const [estimateTotal, setEstimateTotal] = useState(0)
 
   const loadInvoices = useCallback(async () => {
-    const res = await fetch(`/api/invoices?project_id=${projectId}`)
-    if (res.ok) setInvoices(await res.json())
-    setLoading(false)
+    try {
+      const res = await fetch(`/api/invoices?project_id=${projectId}`)
+      if (res.ok) setInvoices(await res.json())
+    } finally {
+      setLoading(false)
+    }
   }, [projectId])
 
   // 見積合計（税込）をSupabaseから直接集計
   const loadEstimateTotal = useCallback(async () => {
-    const supabase = getClient()
-    const [{ data: items }, { data: proj }] = await Promise.all([
-      supabase.from('estimate_items').select('quantity, selling_price, amount').eq('project_id', projectId).is('deleted_at', null),
-      supabase.from('projects').select('misc_expense_override, rounding_discount').eq('id', projectId).single(),
-    ])
-    if (!items) return
-    const subtotal = items.reduce((s, i) =>
-      s + (i.selling_price != null ? Math.round(i.quantity * i.selling_price) : (i.amount ?? 0)), 0)
-    const misc = proj?.misc_expense_override != null ? proj.misc_expense_override : Math.round(subtotal * 0.08)
-    const rounding = proj?.rounding_discount ?? 0
-    const taxBase = subtotal + misc - rounding
-    setEstimateTotal(taxBase + Math.floor(taxBase * 0.1))
+    let total = 0
+    try {
+      const supabase = getClient()
+      const [{ data: items }, { data: proj }] = await Promise.all([
+        supabase.from('estimate_items').select('quantity, selling_price, amount').eq('project_id', projectId).is('deleted_at', null),
+        supabase.from('projects').select('misc_expense_override, rounding_discount').eq('id', projectId).single(),
+      ])
+      if (!items) return
+      const subtotal = items.reduce((s, i) =>
+        s + (i.selling_price != null ? Math.round(i.quantity * i.selling_price) : (i.amount ?? 0)), 0)
+      const misc = proj?.misc_expense_override != null ? proj.misc_expense_override : Math.round(subtotal * 0.08)
+      const rounding = proj?.rounding_discount ?? 0
+      const taxBase = subtotal + misc - rounding
+      total = taxBase + Math.floor(taxBase * 0.1)
+    } finally {
+      setEstimateTotal(total)
+    }
   }, [projectId])
 
   useEffect(() => {

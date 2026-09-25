@@ -1,6 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { Input } from '@/components/ui/input'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -261,10 +262,10 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
             onClick={extract}
             disabled={loading}
             style={{
-              background: loading ? G.border : `linear-gradient(135deg, ${G.dark} 0%, ${G.med} 100%)`,
+              background: loading ? G.border : G.dark,
               color: '#fff',
               border: 'none',
-              borderRadius: 10,
+              borderRadius: 8,
               padding: '12px 36px',
               fontSize: 14,
               fontWeight: 700,
@@ -331,50 +332,50 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
             <Field label="業者名">
-              <input
+              <Input
+                inputSize="compact"
                 value={vendorName}
                 onChange={e => setVendorName(e.target.value)}
                 placeholder="例: ○○建材株式会社"
-                style={inputStyle}
               />
             </Field>
 
             <Field label="請求金額（税込）">
-              <input
+              <Input
+                inputSize="compact"
                 value={amount}
                 onChange={e => setAmount(e.target.value)}
                 placeholder="例: 125000"
                 inputMode="numeric"
-                style={inputStyle}
               />
             </Field>
 
             <Field label="請求日">
-              <input
+              <Input
                 type="date"
+                inputSize="compact"
                 value={invoiceDate}
                 onChange={e => setInvoiceDate(e.target.value)}
-                style={inputStyle}
               />
             </Field>
 
             <Field label="支払期日">
-              <input
+              <Input
                 type="date"
+                inputSize="compact"
                 value={paymentDate}
                 onChange={e => setPaymentDate(e.target.value)}
-                style={inputStyle}
               />
             </Field>
           </div>
 
           <div style={{ marginTop: 14 }}>
             <Field label="メモ（任意）">
-              <input
+              <Input
+                inputSize="compact"
                 value={note}
                 onChange={e => setNote(e.target.value)}
                 placeholder="例: 7月分材料費"
-                style={inputStyle}
               />
             </Field>
           </div>
@@ -443,7 +444,7 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
               <select
                 value={selectedItemId}
                 onChange={e => setSelectedItemId(e.target.value)}
-                style={{ ...inputStyle, appearance: 'auto', width: '100%', cursor: 'pointer' }}
+                className="h-9 w-full rounded-[8px] border border-[#D5DED8] bg-white px-[10px] text-sm text-[#1A2E24] outline-none hover:border-[#AFC4B5] focus:border-[#2B5E40] focus:shadow-[0_0_0_3px_rgba(43,94,64,0.14)] cursor-pointer"
               >
                 <option value="">-- 台帳項目を選択 --</option>
                 {ledgerItems.map(item => (
@@ -494,12 +495,10 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
               onClick={register}
               disabled={saving || !selectedItemId}
               style={{
-                background: (!selectedItemId || saving)
-                  ? G.border
-                  : `linear-gradient(135deg, ${G.dark} 0%, ${G.med} 100%)`,
+                background: (!selectedItemId || saving) ? G.border : G.dark,
                 color: '#fff',
                 border: 'none',
-                borderRadius: 10,
+                borderRadius: 8,
                 padding: '12px 32px',
                 fontSize: 14,
                 fontWeight: 700,
@@ -535,19 +534,6 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 // ── スタイル ──────────────────────────────────────────────
-
-const inputStyle: React.CSSProperties = {
-  width: '100%',
-  padding: '9px 12px',
-  border: `1.5px solid ${G.border}`,
-  borderRadius: 8,
-  fontSize: 13,
-  color: G.textPri,
-  background: '#FAFDFB',
-  outline: 'none',
-  boxSizing: 'border-box',
-  fontFamily: 'inherit',
-}
 
 // ── アイコン ──────────────────────────────────────────────
 

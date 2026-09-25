@@ -3,6 +3,8 @@
 import { useState, useRef, useEffect } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
 
 // ── 型 ───────────────────────────────────────────────────
 
@@ -59,7 +61,7 @@ function ProjectCard({ project: p, thumbUrl, statusConfig, derivedBadge }: {
   const borderColor = derivedBadge?.border ?? STATUS_BORDER[p.status] ?? '#9CA3AF'
 
   return (
-    <Link href={`/projects/${p.id}`} style={{ ...cardS.root, borderLeft: `4px solid ${borderColor}` }}>
+    <Link href={`/projects/${p.id}`} className="project-card" style={{ ...cardS.root, borderLeft: `4px solid ${borderColor}` }}>
       <div style={cardS.thumb}>
         {thumbUrl ? (
           <img src={thumbUrl} alt="" style={cardS.thumbImg} />
@@ -98,7 +100,7 @@ function ProjectCard({ project: p, thumbUrl, statusConfig, derivedBadge }: {
         <span style={cardS.date}>{relativeDate(p.updated_at)}</span>
       </div>
       <svg width="6" height="11" viewBox="0 0 6 11" fill="none" style={{ flexShrink: 0, marginLeft: 4 }}>
-        <path d="M1 1l4 4.5L1 10" stroke="#BDD1C3" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"/>
+        <path className="card-chevron" d="M1 1l4 4.5L1 10" stroke="#BDD1C3" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"/>
       </svg>
     </Link>
   )
@@ -114,6 +116,12 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => { inputRef.current?.focus() }, [])
+
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [onClose])
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
@@ -137,34 +145,34 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
       style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
       onClick={e => { if (e.target === e.currentTarget) onClose() }}
     >
-      <div style={{ background: '#fff', borderRadius: 16, padding: '32px 28px', width: 380, boxShadow: '0 8px 32px rgba(0,0,0,0.18)' }}>
+      <div className="modal-panel" style={{ background: '#fff', borderRadius: 16, padding: '32px 28px', width: 380, boxShadow: '0 8px 32px rgba(0,0,0,0.18)' }}>
         <h2 style={{ fontSize: 16, fontWeight: 700, color: '#192C1F', margin: '0 0 24px' }}>新規案件を作成</h2>
         <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <div>
             <label style={modal.label}>案件名 <span style={{ color: '#E53E3E' }}>*</span></label>
-            <input
+            <Input
               ref={inputRef}
+              inputSize="compact"
               value={name}
               onChange={e => setName(e.target.value)}
               placeholder="例：田中様邸 外壁塗装"
               required
-              style={modal.input}
             />
           </div>
           <div>
             <label style={modal.label}>顧客名（任意）</label>
-            <input
+            <Input
+              inputSize="compact"
               value={customerName}
               onChange={e => setCustomerName(e.target.value)}
               placeholder="例：田中 太郎"
-              style={modal.input}
             />
           </div>
           <div style={{ display: 'flex', gap: 10, marginTop: 8 }}>
-            <button type="button" onClick={onClose} style={modal.cancelBtn}>キャンセル</button>
-            <button type="submit" disabled={saving || !name.trim()} style={{ ...modal.submitBtn, opacity: saving || !name.trim() ? 0.6 : 1 }}>
+            <Button type="button" variant="secondary" onClick={onClose} className="flex-1">キャンセル</Button>
+            <Button type="submit" variant="primary" disabled={saving || !name.trim()} className="flex-[2]">
               {saving ? '作成中…' : '作成する'}
-            </button>
+            </Button>
           </div>
         </form>
       </div>
@@ -174,9 +182,6 @@ function NewProjectModal({ onClose }: { onClose: () => void }) {
 
 const modal = {
   label: { fontSize: 12, fontWeight: 600, color: '#5E8A6E', display: 'block', marginBottom: 6 } as React.CSSProperties,
-  input: { width: '100%', border: '1.5px solid #C8D8CA', borderRadius: 8, padding: '9px 12px', fontSize: 14, color: '#192C1F', outline: 'none', boxSizing: 'border-box' } as React.CSSProperties,
-  cancelBtn: { flex: 1, padding: '10px', borderRadius: 8, border: '1.5px solid #C8D8CA', background: '#fff', color: '#6B7280', fontSize: 13, fontWeight: 600, cursor: 'pointer' } as React.CSSProperties,
-  submitBtn: { flex: 2, padding: '10px', borderRadius: 8, border: 'none', background: '#2B5E40', color: '#fff', fontSize: 13, fontWeight: 700, cursor: 'pointer' } as React.CSSProperties,
 }
 
 // ── 空状態 ────────────────────────────────────────────────
@@ -200,6 +205,7 @@ function EmptyState({ tab }: { tab: FilterTab }) {
 export function ProjectListClient({ projects, thumbMap, statusConfig, derivedBadgeMap }: Props) {
   const [tab, setTab] = useState<FilterTab>('active')
   const [showModal, setShowModal] = useState(false)
+  const newBtnRef = useRef<HTMLButtonElement>(null)
 
   const active   = projects.filter(p => p.status !== 'done')
   const finished = projects.filter(p => p.status === 'done')
@@ -213,7 +219,7 @@ export function ProjectListClient({ projects, thumbMap, statusConfig, derivedBad
 
   return (
     <div style={{ padding: '0 32px 80px' }}>
-      {showModal && <NewProjectModal onClose={() => setShowModal(false)} />}
+      {showModal && <NewProjectModal onClose={() => { setShowModal(false); setTimeout(() => newBtnRef.current?.focus(), 0) }} />}
 
       {/* ── フィルタ + 新規ボタン ── */}
       <div style={s.filterRow}>
@@ -231,7 +237,7 @@ export function ProjectListClient({ projects, thumbMap, statusConfig, derivedBad
             </button>
           ))}
         </div>
-        <button onClick={() => setShowModal(true)} style={s.newBtn}>
+        <button ref={newBtnRef} onClick={() => setShowModal(true)} style={s.newBtn} className="new-project-btn">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
           </svg>
@@ -283,7 +289,7 @@ const s = {
     background: 'transparent',
     border: 'none',
     cursor: 'pointer',
-    transition: 'background 0.15s',
+    transition: 'background var(--duration-fast) var(--ease-standard), box-shadow var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard)',
     whiteSpace: 'nowrap',
   } as React.CSSProperties,
   filterTabActive: {
@@ -315,6 +321,8 @@ const s = {
     gap: 6,
     padding: '8px 15px',
     borderRadius: 8,
+    border: 'none',
+    cursor: 'pointer',
     background: '#2B5E40',
     color: '#FFFFFF',
     fontSize: 13,

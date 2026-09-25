@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { Textarea } from '@/components/ui/textarea'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -47,7 +48,7 @@ const G = {
   cardBg: '#FFFFFF', border: '#BDD1C3', borderLight: '#DFF0E4',
   textPri: '#192C1F', textSec: '#4E6557', textTer: '#8AA491',
 } as const
-const E = { bg: '#1e3a5f', light: '#EFF6FF', border: '#BFDBFE' } as const
+const E = { bg: '#2B5E40', light: '#EFF6FF', border: '#BFDBFE' } as const
 
 // ── ユーティリティ ────────────────────────────────────────
 
@@ -127,22 +128,24 @@ export function SpecImportTab({ projectId }: { projectId: string }) {
 
   useEffect(() => { fetchNotes() }, [projectId])
 
-  // メモ取得後に最新グループを展開
-  useEffect(() => {
-    if (noteGroups.length > 0) {
-      setExpandedDates(new Set([noteGroups[0].dateKey]))
-    }
-    if (noteGroups.length === 0 && !notesLoading) {
-      setShowImport(true) // メモがない初回はインポートパネルを開く
-    }
-  }, [noteGroups.length, notesLoading])
-
   async function fetchNotes() {
     setNotesLoading(true)
+    let groups: NoteGroup[] = []
     try {
       const res = await fetch(`/api/project-notes?project_id=${projectId}`)
-      if (res.ok) setNotes(await res.json())
-    } finally { setNotesLoading(false) }
+      if (res.ok) {
+        const data: ProjectNote[] = await res.json()
+        groups = groupNotesByDate(data)
+        setNotes(data)
+      }
+    } finally {
+      setNotesLoading(false)
+      if (groups.length > 0) {
+        setExpandedDates(new Set([groups[0].dateKey]))
+      } else {
+        setShowImport(true)
+      }
+    }
   }
 
   function toggleDate(key: string) {
@@ -396,7 +399,7 @@ export function SpecImportTab({ projectId }: { projectId: string }) {
 
               {/* テキストモード */}
               {inputMode === 'text' && (
-                <textarea style={s.textarea} rows={8}
+                <Textarea rows={8}
                   placeholder="打ち合わせメモ・ToDoリストのテキストをここに貼り付けてください…"
                   value={text} onChange={e => setText(e.target.value)}
                 />
@@ -434,7 +437,7 @@ export function SpecImportTab({ projectId }: { projectId: string }) {
                       onNote={() => addNote('overview', '工事概要', edited.overview)}
                       onEstimate={() => addToEstimate('overview', edited.overview)}
                     >
-                      <textarea style={s.sectionTA} rows={3} value={edited.overview}
+                      <Textarea inputSize="compact" rows={3} value={edited.overview}
                         onChange={e => updateEdited({ overview: e.target.value })} />
                     </ResultCard>
                   )}
@@ -444,7 +447,7 @@ export function SpecImportTab({ projectId }: { projectId: string }) {
                       onNote={() => addNote('requirements', '施主要望・仕様', edited.requirements)}
                       onEstimate={() => addToEstimate('requirements', edited.requirements)}
                     >
-                      <textarea style={s.sectionTA} rows={Math.min(result.requirements.length + 1, 7)}
+                      <Textarea inputSize="compact" rows={Math.min(result.requirements.length + 1, 7)}
                         value={edited.requirements} onChange={e => updateEdited({ requirements: e.target.value })} />
                     </ResultCard>
                   )}
@@ -454,7 +457,7 @@ export function SpecImportTab({ projectId }: { projectId: string }) {
                       onNote={() => addNote('cautions', '注意・確認事項', edited.cautions)}
                       onEstimate={() => addToEstimate('cautions', edited.cautions)}
                     >
-                      <textarea style={{ ...s.sectionTA, borderLeft: '3px solid #F97316' }}
+                      <Textarea inputSize="compact" style={{ borderLeft: '3px solid #F97316' }}
                         rows={Math.min(result.cautions.length + 1, 7)}
                         value={edited.cautions} onChange={e => updateEdited({ cautions: e.target.value })} />
                     </ResultCard>
@@ -465,7 +468,7 @@ export function SpecImportTab({ projectId }: { projectId: string }) {
                       onNote={() => addNote('todos', 'ToDo・作業項目', edited.todos)}
                       onEstimate={() => addToEstimate('todos', edited.todos)}
                     >
-                      <textarea style={s.sectionTA} rows={Math.min(result.todos.length + 1, 7)}
+                      <Textarea inputSize="compact" rows={Math.min(result.todos.length + 1, 7)}
                         value={edited.todos} onChange={e => updateEdited({ todos: e.target.value })} />
                     </ResultCard>
                   )}
@@ -475,7 +478,7 @@ export function SpecImportTab({ projectId }: { projectId: string }) {
                       onNote={() => addNote('budget', '概算予算感', edited.budget_notes)}
                     >
                       <div style={s.budgetWarning}>※打ち合わせ時の概算。正式見積前の参考値</div>
-                      <textarea style={{ ...s.sectionTA, background: '#FFFBEB', borderColor: '#FDE68A' }}
+                      <Textarea inputSize="compact" style={{ background: '#FFFBEB', borderColor: '#FDE68A' }}
                         rows={3} value={edited.budget_notes}
                         onChange={e => updateEdited({ budget_notes: e.target.value })} />
                     </ResultCard>
@@ -578,7 +581,7 @@ export function SpecImportTab({ projectId }: { projectId: string }) {
             打ち合わせの音声テキスト・要約メモを貼り付けてください。<br />
             「トイレの壁はサンゲツの○○で、LDKの床は…」のような会話をそのまま貼り付けてOKです。
           </p>
-          <textarea style={s.textarea} rows={10}
+          <Textarea rows={10}
             placeholder={'例：\nトイレの天井と壁はサンゲツのAA級壁紙にします。品番はSP-2865。\nLDKの床はウッドワンのフローリング（ナチュラルオーク）。\n玄関ホールはサンゲツSP級。\n洋室①の照明はシーリングライト。'}
             value={specText} onChange={e => setSpecText(e.target.value)}
           />
@@ -806,7 +809,7 @@ const s: Record<string, React.CSSProperties> = {
 
   estBtn: {
     padding: '6px 14px', background: E.bg, color: '#fff',
-    border: 'none', borderRadius: 7, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+    border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer',
   },
   estDoneBadge: { fontSize: 12, fontWeight: 600, color: E.bg, background: E.light, border: `1px solid ${E.border}`, padding: '4px 10px', borderRadius: 6 },
 
@@ -819,7 +822,7 @@ const s: Record<string, React.CSSProperties> = {
 
 const rc: Record<string, React.CSSProperties> = {
   label: { fontSize: 13, fontWeight: 700, flex: 1 },
-  btn: { padding: '5px 12px', background: G.dark, color: '#fff', border: 'none', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer', flexShrink: 0 },
+  btn: { padding: '5px 12px', background: G.dark, color: '#fff', border: 'none', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer', flexShrink: 0 },
   noteDone: { fontSize: 12, fontWeight: 600, color: G.dark, background: G.light, border: `1px solid ${G.border}`, padding: '4px 10px', borderRadius: 6, flexShrink: 0 },
   estDone: { fontSize: 12, fontWeight: 600, color: E.bg, background: E.light, border: `1px solid ${E.border}`, padding: '4px 10px', borderRadius: 6, flexShrink: 0 },
 }

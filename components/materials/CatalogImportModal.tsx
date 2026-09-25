@@ -2,6 +2,7 @@
 
 import { useRef, useState, useCallback } from 'react'
 import type { ExtractedItem } from '@/app/api/catalog/import-ai/route'
+import { Button } from '@/components/ui/button'
 
 // ─────────────────────────────────────────────────────────
 // デザイントークン
@@ -473,26 +474,27 @@ export function CatalogImportModal({ onClose, onImportDone }: Props) {
           background: C.white,
         }}>
           {phase === 'done' ? (
-            <button onClick={onClose} style={btnPrimary}>閉じる</button>
+            <Button type="button" variant="secondary" onClick={onClose}>閉じる</Button>
           ) : phase === 'preview' ? (
             <>
-              <button
+              <Button
+                type="button"
+                variant="secondary"
                 onClick={() => { setPhase('idle'); setItems([]) }}
-                style={btnSecondary}
-                disabled={false}
               >
                 別のファイルを選択
-              </button>
-              <button
+              </Button>
+              <Button
+                type="button"
+                variant="primary"
                 onClick={handleSave}
-                style={{ ...btnPrimary, opacity: selectedCount === 0 ? 0.5 : 1 }}
                 disabled={selectedCount === 0}
               >
                 {selectedCount}件をカタログに登録
-              </button>
+              </Button>
             </>
           ) : (
-            <button onClick={onClose} style={btnSecondary}>キャンセル</button>
+            <Button type="button" variant="secondary" onClick={onClose}>キャンセル</Button>
           )}
         </div>
       </div>
@@ -528,30 +530,3 @@ const cellInput: React.CSSProperties = {
   boxSizing: 'border-box',
 }
 
-const btnPrimary: React.CSSProperties = {
-  padding: '0 20px',
-  height: 40,
-  background: '#1E3A5F',
-  color: '#fff',
-  border: 'none',
-  borderRadius: 8,
-  fontSize: 14,
-  fontWeight: 600,
-  cursor: 'pointer',
-  fontFamily: "'Inter','Hiragino Kaku Gothic ProN','Meiryo UI',Meiryo,sans-serif",
-  whiteSpace: 'nowrap',
-}
-
-const btnSecondary: React.CSSProperties = {
-  padding: '0 16px',
-  height: 40,
-  background: 'none',
-  color: '#1E3A5F',
-  border: '1px solid #D8E0EE',
-  borderRadius: 8,
-  fontSize: 14,
-  fontWeight: 500,
-  cursor: 'pointer',
-  fontFamily: "'Inter','Hiragino Kaku Gothic ProN','Meiryo UI',Meiryo,sans-serif",
-  whiteSpace: 'nowrap',
-}

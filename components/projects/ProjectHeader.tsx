@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import Link from 'next/link'
 
 type Props = {
   projectName: string
@@ -31,14 +32,14 @@ export function ProjectHeader({
       padding: '0 16px', height: 48, flexShrink: 0,
     }}>
       {/* 戻るボタン */}
-      <a href="/projects" style={{
+      <Link href="/projects" style={{
         display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
         width: 28, height: 28, borderRadius: 7, background: '#E3EFE7', textDecoration: 'none', flexShrink: 0,
       }}>
         <svg width="8" height="13" viewBox="0 0 9 15" fill="none">
           <path d="M7.5 1.5L2 7.5l5.5 6" stroke="#3D7A55" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
-      </a>
+      </Link>
 
       {/* ステータスバッジ */}
       <span style={{

@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 import type { ConfirmableChange, QuickReply } from '@/lib/ai/chat/types'
+import { Button } from '@/components/ui/button'
 
 // ─────────────────────────────────────────────────────────
 // 型定義
@@ -22,26 +23,26 @@ type ChangeStatus = 'idle' | 'confirming' | 'confirmed' | 'cancelled' | 'error'
 type Props = { projectId: string }
 
 // ─────────────────────────────────────────────────────────
-// デザイントークン（Claude 風クリームホワイト）
+// デザイントークン（RAGZ Green系）
 // ─────────────────────────────────────────────────────────
 
 const C = {
-  bg:           '#FAF9F7',   // ウォームクリーム（Claudeのメインbg）
-  panelBorder:  '#E8E5DF',
-  userBubble:   '#1E3A5F',
+  bg:           '#F3F7F4',
+  panelBorder:  '#D4E4D9',
+  userBubble:   '#2B5E40',
   userText:     '#FFFFFF',
   aiBg:         'transparent',
   aiText:       '#1A1A18',
   inputBg:      '#FFFFFF',
-  inputBorder:  '#D9D6CF',
-  inputFocus:   '#9B8EA0',
-  sendBtn:      '#1E3A5F',
-  sendDisabled: '#C8D3E8',
-  divider:      '#EAE7E1',
-  muted:        '#9B968E',
+  inputBorder:  '#D5DED8',
+  inputFocus:   '#2B5E40',
+  sendBtn:      '#3D7A55',
+  sendDisabled: '#A8D4B5',
+  divider:      '#DDEAE0',
+  muted:        '#7A9185',
   headerBg:     '#FFFFFF',
-  headerBorder: '#EAE7E1',
-  // 変更カード
+  headerBorder: '#D4E4D9',
+  // 変更カード（意味を持つ色：変更しない）
   cardBg:       '#FFFBEB',
   cardBorder:   '#F59E0B',
   cardTitle:    '#92400E',
@@ -55,18 +56,18 @@ const C = {
   confirmedText:'#166534',
   errorBg:      '#FEF2F2',
   errorText:    '#B91C1C',
-  tableHead:    '#F5F4F1',
-  tableBorder:  '#E8E5DF',
-  tableStripe:  '#FDFCFA',
+  tableHead:    '#F0F6F2',
+  tableBorder:  '#D4E4D9',
+  tableStripe:  '#FAFCFA',
   // クイックリプライ
-  qrBorder:     '#D9D6CF',
+  qrBorder:     '#C8D9CC',
   qrBg:         '#FFFFFF',
   qrText:       '#1A1A18',
-  qrPrimaryBg:  '#1E3A5F',
+  qrPrimaryBg:  '#3D7A55',
   qrPrimaryText:'#FFFFFF',
 }
 
-const FONT = "system-ui, -apple-system, 'Segoe UI', 'Helvetica Neue', sans-serif"
+const FONT = "'Inter', 'Hiragino Kaku Gothic ProN', 'Meiryo UI', Meiryo, sans-serif"
 
 const CURRENCY_FIELDS = new Set(['selling_price', 'cost_price', 'budget_cost', 'actual_cost', 'amount', 'estimate_cost'])
 const FIELD_LABELS: Record<string, string> = {
@@ -536,6 +537,7 @@ export function ChatPanel({ projectId }: Props) {
             </div>
             <button
               onClick={() => setOpen(false)}
+              aria-label="チャットを閉じる"
               style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 6, color: C.muted, display: 'flex', borderRadius: 8, transition: 'background 0.12s' }}
               onMouseEnter={e => (e.currentTarget.style.background = '#EAE7E1')}
               onMouseLeave={e => (e.currentTarget.style.background = 'none')}
@@ -584,13 +586,19 @@ export function ChatPanel({ projectId }: Props) {
               display: 'flex', gap: 10, alignItems: 'flex-end',
               background: C.inputBg,
               border: `1.5px solid ${C.inputBorder}`,
-              borderRadius: 12,
+              borderRadius: 8,
               padding: '6px 6px 6px 12px',
-              transition: 'border-color 0.15s',
+              transition: 'border-color 0.15s, box-shadow 0.15s',
               boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
             }}
-              onFocusCapture={e => (e.currentTarget.style.borderColor = C.inputFocus)}
-              onBlurCapture={e  => (e.currentTarget.style.borderColor = C.inputBorder)}
+              onFocusCapture={e => {
+                e.currentTarget.style.borderColor = C.inputFocus
+                e.currentTarget.style.boxShadow = '0 0 0 2px rgba(43,94,64,0.12)'
+              }}
+              onBlurCapture={e => {
+                e.currentTarget.style.borderColor = C.inputBorder
+                e.currentTarget.style.boxShadow = '0 1px 3px rgba(0,0,0,0.05)'
+              }}
             >
               <textarea
                 ref={inputRef}
@@ -615,21 +623,17 @@ export function ChatPanel({ projectId }: Props) {
                   padding: 0,
                 }}
               />
-              <button
+              <Button
+                type="button"
+                variant="primary"
+                size="icon"
+                aria-label="送信"
                 onClick={send}
                 disabled={!input.trim() || loading}
-                style={{
-                  background: !input.trim() || loading ? C.sendDisabled : C.sendBtn,
-                  border: 'none', borderRadius: 8,
-                  width: 36, height: 36, flexShrink: 0,
-                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                  cursor: !input.trim() || loading ? 'default' : 'pointer',
-                  transition: 'background 0.15s',
-                  alignSelf: 'flex-end',
-                }}
+                className="flex-shrink-0 self-end"
               >
                 <SendIcon />
-              </button>
+              </Button>
             </div>
             <div style={{ fontSize: 11, color: C.muted, textAlign: 'center', marginTop: 7 }}>
               AIによる整理結果です。最終判断は担当者が行ってください。
@@ -801,23 +805,24 @@ function PendingChangeCard({
         </table>
       )}
       <div style={{ padding: '8px 14px 12px', display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-        <button onClick={onCancel} disabled={status === 'confirming'} style={{
-          background: C.cancelBg, color: C.cancelBtn,
-          border: '1px solid #D1D5DB', borderRadius: 7, padding: '6px 14px',
-          fontSize: 12, cursor: 'pointer', fontFamily: FONT, fontWeight: 500,
-        }}>
+        <Button
+          type="button"
+          variant="secondary"
+          size="sm"
+          onClick={onCancel}
+          disabled={status === 'confirming'}
+        >
           キャンセル
-        </button>
-        <button onClick={onConfirm} disabled={status === 'confirming'} style={{
-          background: isDelete ? C.deleteBg : C.confirmBg,
-          color:      isDelete ? C.deleteBtn : C.confirmBtn,
-          border: `1px solid ${isDelete ? '#FCA5A5' : '#86EFAC'}`,
-          borderRadius: 7, padding: '6px 14px',
-          fontSize: 12, cursor: status === 'confirming' ? 'wait' : 'pointer',
-          fontFamily: FONT, fontWeight: 600,
-        }}>
+        </Button>
+        <Button
+          type="button"
+          variant={isDelete ? 'danger' : 'primary'}
+          size="sm"
+          onClick={onConfirm}
+          disabled={status === 'confirming'}
+        >
           {status === 'confirming' ? '処理中…' : isDelete ? '確定（削除）' : isBulkCreate ? '確定（一括追加）' : '確定する'}
-        </button>
+        </Button>
       </div>
     </div>
   )
@@ -1010,7 +1015,7 @@ function AiLogo({ size = 28, color }: { size?: number; color?: string }) {
     <div style={{
       width: size, height: size,
       borderRadius: size / 2,
-      background: 'linear-gradient(135deg, #1E3A5F 0%, #2D6A4F 100%)',
+      background: 'linear-gradient(135deg, #2B5E40 0%, #3D7A55 100%)',
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       flexShrink: 0,
       boxShadow: '0 1px 4px rgba(0,0,0,0.15)',
