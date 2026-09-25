@@ -53,6 +53,7 @@ supabase/.temp/
 # UI reference materials / design docs (local only)
 UI参考/
 design-system/
+!docs/design-system/
 アーキリンク・コンクルー資料/
 
 # Customer real data (never commit)

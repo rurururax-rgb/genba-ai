@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { supabaseAdmin } from '@/lib/supabase/admin'
+import { getAdminClient } from '@/lib/supabase/admin'
 import { verifyLineSignature, fetchLineContent } from '@/lib/line/webhook'
 import { transcribeAudio } from '@/lib/ai/whisper'
 import { extractSearchTerms, type SearchTerm } from '@/lib/ai/extract-search-terms'
@@ -83,6 +83,7 @@ export async function POST(request: NextRequest) {
 // ──────────────────────────────────────────────────────────
 
 async function processEvents(events: LineWebhookBody['events']) {
+  const supabaseAdmin = getAdminClient()
   const companyId = process.env.LINE_COMPANY_ID ?? null
 
   for (const event of events) {
@@ -179,6 +180,7 @@ async function processAudioEvent(
   audioBuffer: Buffer,
   messageId: string
 ): Promise<void> {
+  const supabaseAdmin = getAdminClient()
   // ── Step 1: Whisper 文字起こし ──────────────────────────
   let transcription: string
   try {

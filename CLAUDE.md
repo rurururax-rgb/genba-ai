@@ -695,6 +695,23 @@ pg_trgm の `similarity` スコアをUIに反映し、スコアの高低に応�
 
 ---
 
+## デザインシステム
+
+### Input Constitution v1.0（FROZEN）
+
+Input / Textarea / Select / Table Editor / Chat Composer を追加・変更する前に必ず読む：
+
+`docs/design-system/input-constitution.md`
+
+**最重要ルール：**
+- 通常フォームは `<Input>` / `<Textarea>` を使う（`components/ui/`）
+- テーブルセルの高さを Shared Input height（36/44px）に合わせない（Table Geometry 優先）
+- EstimateTab / CostLedgerTab の cell editor を `<Input>` へ機械的に移行しない
+- Enter-to-send を実装するときは必ず `!e.nativeEvent.isComposing` を確認する
+- AI チャットだからといって purple / blue / gradient の独自 Input を作らない
+
+---
+
 ## 既知の課題
 
 実装中に発見した問題の記録。解決時は ✅ を付けて解決済みに移動すること。

@@ -1982,6 +1982,7 @@ export function EstimateTab({ projectId }: { projectId: string }) {
   }, [visibleGroups, items])
 
   const subtotal      = useMemo(() => items.reduce((acc, i) => acc + liveAmount(i), 0), [items])
+  const selectedSum   = useMemo(() => items.filter(i => selectedIds.has(i.id)).reduce((acc, i) => acc + liveAmount(i), 0), [items, selectedIds])
   // 各明細の原価合計（quantity × cost_price）
   const itemCostTotal = useMemo(() => items.reduce((acc, i) => acc + ((i.cost_price ?? 0) * i.quantity), 0), [items])
   // 諸経費（見積金額）: 手動上書きがあればその値、なければ小計×8%
@@ -2602,6 +2603,9 @@ export function EstimateTab({ projectId }: { projectId: string }) {
             </svg>
             <span style={{ fontSize: 12, fontWeight: 700, color: C.accent, fontFamily: FONT }}>
               {selectedIds.size}件選択中
+            </span>
+            <span style={{ fontSize: 12, color: C.textMuted, fontFamily: FONT }}>
+              ｜ 合計 ¥{fmt(selectedSum)}
             </span>
             <span style={{ fontSize: 12, color: C.textSub, fontFamily: FONT }}>→ 移動先：</span>
             <select
