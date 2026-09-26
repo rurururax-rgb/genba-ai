@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { createPortal } from 'react-dom'
 import { VendorInvoiceImportTab } from './VendorInvoiceImportTab'
 import { Button } from '@/components/ui/button'
 
@@ -433,8 +434,10 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
   const [additionalAmounts, setAdditionalAmounts] = useState<[number|null, number|null, number|null]>([null, null, null])
   const [editingAdditional, setEditingAdditional] = useState<{ idx: number; value: string } | null>(null)
   const [showImport, setShowImport] = useState(false)
-  // セル金額合計選択（読み取り専用セルのみ・Layer 1）key = `${item.id}:${field}`
+  // セル金額合計選択（Layer 1 + Layer 2）
+  // key: item.id+':ec'（見積原価）/ ':d1'（差額①）/ ':d2'（差額②）/ ':bc'（実行予算）/ ':cc'（完工実績）/ ':ac'（請求実績）
   const [sumSelection, setSumSelection] = useState<Map<string, number>>(new Map)
+  const [sumMode, setSumMode] = useState(false)
   const sumTotal = useMemo(() => { let t = 0; sumSelection.forEach(v => { t += v }); return t }, [sumSelection])
 
   const editRef = useRef<HTMLInputElement>(null)
@@ -513,6 +516,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
     document.addEventListener('keydown', h)
     return () => document.removeEventListener('keydown', h)
   }, [sumSelection])
+
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -796,6 +800,12 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
 
   return (
     <div style={{ background: C.pageBg, minHeight: 400, paddingBottom: 80, display: 'flex', flexDirection: 'column', fontFamily: FONT }}>
+    <style>{`
+      .genba-sum-float { position: fixed; right: 24px; bottom: 24px; z-index: 200; }
+      @media (max-width: 1023px) {
+        .genba-sum-float { right: 16px; bottom: calc(56px + env(safe-area-inset-bottom, 0px) + 8px); }
+      }
+    `}</style>
 
       {/* ── サマリーカード ── */}
       {!isEmpty && (
@@ -876,7 +886,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
               <div style={st.toggleWrap}>
                 <button
                   style={{ ...st.toggleBtn, ...(viewMode === 'item' ? st.toggleActive : {}) }}
-                  onClick={() => setViewMode('item')}
+                  onClick={() => { setViewMode('item'); setSumSelection(new Map) }}
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                     strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -889,7 +899,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                 </button>
                 <button
                   style={{ ...st.toggleBtn, ...(viewMode === 'vendor' ? st.toggleActive : {}) }}
-                  onClick={() => setViewMode('vendor')}
+                  onClick={() => { setViewMode('vendor'); setSumSelection(new Map) }}
                 >
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                     strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -941,6 +951,20 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                   <line x1="8" y1="14" x2="16" y2="14"/>
                 </svg>
                 業者請求書取り込み
+              </button>
+              <button
+                onClick={() => setSumMode(v => !v)}
+                style={{
+                  fontSize: 11, padding: '2px 9px', height: 30, lineHeight: 1,
+                  border: `1px solid ${sumMode ? C.accent : C.border}`, borderRadius: 7,
+                  background: sumMode ? C.accent : C.bg,
+                  cursor: 'pointer', color: sumMode ? '#fff' : C.textMuted,
+                  fontFamily: FONT, display: 'inline-flex', alignItems: 'center', gap: 3,
+                  flexShrink: 0, fontWeight: 600, userSelect: 'none', minHeight: 34,
+                }}
+                title={sumMode ? '合計モードを終了（もう一度押す）' : '合計モード：セルをクリックして金額を合計'}
+              >
+                ∑ 合計
               </button>
             </div>
           </div>
@@ -1104,23 +1128,39 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                         })()}
 
                         {/* 実行予算 */}
-                        <td style={{ ...st.td, ...st.tdNum, borderRight: `1px solid ${C.borderLight}` }}>
-                          {editing?.id === item.id && editing.field === 'budget_cost' ? (
-                            <input ref={editRef} className="cl-edit-input" style={{ ...st.input, textAlign: 'right' }}
-                              value={editing.value}
-                              onChange={e => setEditing(v => v ? { ...v, value: e.target.value } : v)}
-                              onBlur={commitEdit}
-                              onKeyDown={e => e.key === 'Enter' && commitEdit()}
-                            />
-                          ) : (
-                            <div style={st.editCell} onClick={() => startEdit(item, 'budget_cost')}>
-                              <span style={{ color: item.budget_cost != null ? C.text : C.textMuted }}>
-                                {fmtYen(item.budget_cost)}
-                              </span>
-                              <span style={st.pen}>✎</span>
-                            </div>
-                          )}
-                        </td>
+                        {(() => {
+                          const key = `${item.id}:bc`
+                          const isSel = sumSelection.has(key)
+                          return (
+                            <td style={{ ...st.td, ...st.tdNum, borderRight: `1px solid ${C.borderLight}`,
+                              outline: isSel ? `2px solid ${C.accent}` : undefined, outlineOffset: '-2px',
+                              background: isSel ? C.accentLight : undefined,
+                            }}>
+                              {editing?.id === item.id && editing.field === 'budget_cost' ? (
+                                <input ref={editRef} className="cl-edit-input" style={{ ...st.input, textAlign: 'right' }}
+                                  value={editing.value}
+                                  onChange={e => setEditing(v => v ? { ...v, value: e.target.value } : v)}
+                                  onBlur={commitEdit}
+                                  onKeyDown={e => e.key === 'Enter' && commitEdit()}
+                                />
+                              ) : (
+                                <div style={{ ...st.editCell, cursor: (sumMode || undefined) && item.budget_cost != null ? 'pointer' : st.editCell.cursor }}
+                                  onClick={() => {
+                                    if ((sumMode) && item.budget_cost != null) {
+                                      setSumSelection(p => { const n = new Map(p); n.has(key) ? n.delete(key) : n.set(key, item.budget_cost!); return n })
+                                      return
+                                    }
+                                    startEdit(item, 'budget_cost')
+                                  }}>
+                                  <span style={{ color: item.budget_cost != null ? (isSel ? C.green : C.text) : C.textMuted }}>
+                                    {fmtYen(item.budget_cost)}
+                                  </span>
+                                  {!sumMode && <span style={st.pen}>✎</span>}
+                                </div>
+                              )}
+                            </td>
+                          )
+                        })()}
 
                         {/* 差額①（読み取り専用・クリックで合計選択） */}
                         {(() => {
@@ -1147,49 +1187,81 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                         })()}
 
                         {/* 完工実績 */}
-                        <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV }}>
-                          {editing?.id === item.id && editing.field === 'completion_cost' ? (
-                            <input ref={editRef} className="cl-edit-input" style={{ ...st.input, textAlign: 'right' }}
-                              value={editing.value}
-                              onChange={e => setEditing(v => v ? { ...v, value: e.target.value } : v)}
-                              onBlur={commitEdit}
-                              onKeyDown={e => e.key === 'Enter' && commitEdit()}
-                            />
-                          ) : (
-                            <div style={st.editCell} onClick={() => startEdit(item, 'completion_cost')}>
-                              <span style={{ color: item.completion_cost != null ? C.text : C.textMuted }}>
-                                {fmtYen(item.completion_cost)}
-                              </span>
-                              <span style={st.pen}>✎</span>
-                            </div>
-                          )}
-                        </td>
+                        {(() => {
+                          const key = `${item.id}:cc`
+                          const isSel = sumSelection.has(key)
+                          return (
+                            <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV,
+                              outline: isSel ? `2px solid ${C.accent}` : undefined, outlineOffset: '-2px',
+                              background: isSel ? C.accentLight : undefined,
+                            }}>
+                              {editing?.id === item.id && editing.field === 'completion_cost' ? (
+                                <input ref={editRef} className="cl-edit-input" style={{ ...st.input, textAlign: 'right' }}
+                                  value={editing.value}
+                                  onChange={e => setEditing(v => v ? { ...v, value: e.target.value } : v)}
+                                  onBlur={commitEdit}
+                                  onKeyDown={e => e.key === 'Enter' && commitEdit()}
+                                />
+                              ) : (
+                                <div style={st.editCell}
+                                  onClick={() => {
+                                    if (sumMode && item.completion_cost != null) {
+                                      setSumSelection(p => { const n = new Map(p); n.has(key) ? n.delete(key) : n.set(key, item.completion_cost!); return n })
+                                      return
+                                    }
+                                    startEdit(item, 'completion_cost')
+                                  }}>
+                                  <span style={{ color: item.completion_cost != null ? (isSel ? C.green : C.text) : C.textMuted }}>
+                                    {fmtYen(item.completion_cost)}
+                                  </span>
+                                  {!sumMode && <span style={st.pen}>✎</span>}
+                                </div>
+                              )}
+                            </td>
+                          )
+                        })()}
 
                         {/* 請求実績 */}
-                        <td style={{ ...st.td, ...st.tdNum, borderRight: `1px solid ${C.borderLight}` }}>
-                          {hasInvoices ? (
-                            <div style={{ ...st.editCell, gap: 6 }}>
-                              <span style={{ color: C.text, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
-                                {fmtYen(item.actual_cost)}
-                              </span>
-                              <span style={st.invBadge}>{invs.length}件</span>
-                            </div>
-                          ) : editing?.id === item.id && editing.field === 'actual_cost' ? (
-                            <input ref={editRef} className="cl-edit-input" style={{ ...st.input, textAlign: 'right' }}
-                              value={editing.value}
-                              onChange={e => setEditing(v => v ? { ...v, value: e.target.value } : v)}
-                              onBlur={commitEdit}
-                              onKeyDown={e => e.key === 'Enter' && commitEdit()}
-                            />
-                          ) : (
-                            <div style={st.editCell} onClick={() => startEdit(item, 'actual_cost')}>
-                              <span style={{ color: item.actual_cost != null ? C.text : C.textMuted }}>
-                                {fmtYen(item.actual_cost)}
-                              </span>
-                              <span style={st.pen}>✎</span>
-                            </div>
-                          )}
-                        </td>
+                        {(() => {
+                          const key = `${item.id}:ac`
+                          const isSel = sumSelection.has(key)
+                          return (
+                            <td style={{ ...st.td, ...st.tdNum, borderRight: `1px solid ${C.borderLight}`,
+                              outline: isSel ? `2px solid ${C.accent}` : undefined, outlineOffset: '-2px',
+                              background: isSel ? C.accentLight : undefined,
+                            }}>
+                              {hasInvoices ? (
+                                <div style={{ ...st.editCell, gap: 6 }}>
+                                  <span style={{ color: C.text, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+                                    {fmtYen(item.actual_cost)}
+                                  </span>
+                                  <span style={st.invBadge}>{invs.length}件</span>
+                                </div>
+                              ) : editing?.id === item.id && editing.field === 'actual_cost' ? (
+                                <input ref={editRef} className="cl-edit-input" style={{ ...st.input, textAlign: 'right' }}
+                                  value={editing.value}
+                                  onChange={e => setEditing(v => v ? { ...v, value: e.target.value } : v)}
+                                  onBlur={commitEdit}
+                                  onKeyDown={e => e.key === 'Enter' && commitEdit()}
+                                />
+                              ) : (
+                                <div style={st.editCell}
+                                  onClick={() => {
+                                    if (sumMode && item.actual_cost != null) {
+                                      setSumSelection(p => { const n = new Map(p); n.has(key) ? n.delete(key) : n.set(key, item.actual_cost!); return n })
+                                      return
+                                    }
+                                    startEdit(item, 'actual_cost')
+                                  }}>
+                                  <span style={{ color: item.actual_cost != null ? (isSel ? C.green : C.text) : C.textMuted }}>
+                                    {fmtYen(item.actual_cost)}
+                                  </span>
+                                  {!sumMode && <span style={st.pen}>✎</span>}
+                                </div>
+                              )}
+                            </td>
+                          )
+                        })()}
 
                         {/* 差額②（読み取り専用・クリックで合計選択） */}
                         {(() => {
@@ -1455,23 +1527,37 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
             rate={estRate}
             positive={estGross >= 0}
           />
-          {sumSelection.size > 0 && (
-            <>
-              <div style={{ width: 1, height: 36, background: C.border }} />
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: FONT }}>
-                <span style={{ fontSize: 11, color: C.textMuted }}>{sumSelection.size}セル選択</span>
-                <span style={{ fontSize: 14, fontWeight: 700, color: C.green, fontVariantNumeric: 'tabular-nums' }}>
-                  合計 {fmtYen(sumTotal)}
-                </span>
-                <button
-                  onClick={() => setSumSelection(new Map)}
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.textMuted, padding: '2px 6px', borderRadius: 4, fontSize: 13, lineHeight: '1' }}
-                  title="選択解除（Esc）"
-                >✕</button>
-              </div>
-            </>
-          )}
         </div>
+      )}
+
+      {/* ── 合計フロートバー（position: fixed・右下） ── */}
+      {createPortal(
+        sumSelection.size > 0 ? (
+          <div className="genba-sum-float" style={{
+            display: 'flex', alignItems: 'center', gap: 10,
+            padding: '8px 14px',
+            background: '#fff',
+            border: `1.5px solid ${C.border}`,
+            borderRadius: 10,
+            boxShadow: '0 4px 20px rgba(43,94,64,0.18)',
+            fontSize: 13, fontFamily: FONT,
+            userSelect: 'none',
+          }}>
+            {sumMode && (
+              <span style={{ fontSize: 10, color: C.accent, background: C.accentLight, borderRadius: 4, padding: '2px 6px', fontWeight: 600 }}>∑ ON</span>
+            )}
+            <span style={{ color: C.textMuted, fontSize: 12 }}>{sumSelection.size}セル選択</span>
+            <span style={{ fontSize: 14, fontWeight: 700, color: C.green, fontVariantNumeric: 'tabular-nums' }}>
+              合計 {fmtYen(sumTotal)}
+            </span>
+            <button
+              onClick={() => setSumSelection(new Map)}
+              style={{ marginLeft: 4, background: 'none', border: 'none', cursor: 'pointer', color: C.textMuted, padding: '2px 6px', borderRadius: 4, fontSize: 13, lineHeight: '1' }}
+              title="選択解除（Esc）"
+            >✕</button>
+          </div>
+        ) : null,
+        document.body
       )}
     </div>
   )
