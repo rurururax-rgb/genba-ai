@@ -745,3 +745,71 @@ await supabase
 ### 解決済み
 
 （なし）
+
+---
+
+## Autonomous Development Safety Boundary
+
+RAGZ 自律開発において Claude が守るべき境界を定義する。
+GitHub 側で強制されるものと、運用ルールで管理するものを明示する。
+
+### AI MUST NOT（絶対禁止）
+
+- main へ直接 push する（`git push origin main`）
+- main へ force push する
+- Pull Request を merge する（`gh pr merge` 等）
+- Branch Protection / Ruleset を変更する（明示的に許可された場合を除く）
+- Production 環境変数・シークレットを変更する
+- Production データベースへの破壊的マイグレーションを人間の明示的承認なしに実行する
+- Production LINE メッセージを人間の明示的承認なしに送信する
+- Bypass を使用して Branch Protection / Ruleset を回避する
+- その他の破壊的 Production 操作を実行する
+
+### AI MAY（許可される操作）
+
+- feature branch を作成する
+- feature branch 上でコードを変更する
+- ローカルで Quality Gate（typecheck / lint / test / build）を実行する
+- commit する
+- feature branch を push する
+- Pull Request を作成・更新する
+- CI の状態を確認・修正する
+- Vercel Preview デプロイを確認する
+- Preview URL に対してブラウザ非破壊 QA を行う
+- CI 失敗を修正して再 push する
+
+### Completion Boundary（完了境界）
+
+以下がすべて満たされたとき：
+
+- RAGZ Quality Gate: PASS
+- Vercel Preview Deployment: Ready かつ健全
+- Browser QA（Preview）: PASS
+
+Claude は以下を報告して**停止する**：
+
+```
+READY FOR HUMAN REVIEW
+```
+
+**最終 merge は人間のみが行う。**
+
+### GitHub 側で強制される境界
+
+| ルール | 強制内容 |
+|--------|---------|
+| Require PR (`RAGZ Main Protection`) | main への direct push を reject |
+| Block force push | force push を reject |
+| Block deletion | main の削除を reject |
+| Required check: `Quality Gate` | CI 未通過 PR の merge を GitHub が拒否 |
+| Linear history | Squash / Rebase のみ許可（merge commit 禁止） |
+
+### 運用ルールで管理する境界
+
+| ルール | 理由 |
+|--------|------|
+| PR merge 禁止 | GitHub API でマージ可能だが CLAUDE.md で禁止 |
+| Ruleset 変更禁止 | API でアクセス可能だが変更は許可されていない |
+| Production env / secret 変更禁止 | Vercel / GitHub API でアクセス可能だが禁止 |
+| Production DB migration 禁止 | Supabase API でアクセス可能だが明示承認必須 |
+| Bypass 使用禁止 | 緊急時の owner 専用手段。Claude は使用しない |
