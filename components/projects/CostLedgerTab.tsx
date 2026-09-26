@@ -1610,15 +1610,15 @@ function VendorView({
       <table style={{ ...st.table, margin: 0 }}>
         <thead>
           <tr>
-            <th style={{ ...st.thGrp, textAlign: 'left', minWidth: 160, width: 200, borderRight: HDIV }}>業者名</th>
-            <th style={{ ...st.thGrp, textAlign: 'right', width: 120, borderRight: HDIV }}>業者見積額</th>
+            <th style={{ ...st.thGrp, textAlign: 'left', minWidth: 220, borderRight: HDIV }}>業者名</th>
+            <th style={{ ...st.thGrp, textAlign: 'right', width: 130, borderRight: HDIV }}>業者見積額</th>
             {hasBudget && (
               <th style={{ ...st.thGrp, textAlign: 'right', width: 120, borderRight: HDIV }}>実行予算</th>
             )}
-            <th style={{ ...st.thGrp, textAlign: 'right', width: 120, borderRight: HDIV }}>業者請求額</th>
+            <th style={{ ...st.thGrp, textAlign: 'right', width: 130, borderRight: HDIV }}>業者請求額</th>
             <th style={{ ...st.thGrp, textAlign: 'right', width: 110, borderRight: HDIV }}>差額</th>
-            <th style={{ ...st.thGrp, textAlign: 'right', width: 120, borderRight: HDIV, background: '#EAF3DE' }}>売上額</th>
-            <th style={{ ...st.thGrp, textAlign: 'right', width: 110, borderRight: HDIV, background: '#EAF3DE' }}>粗利</th>
+            <th style={{ ...st.thGrp, textAlign: 'right', width: 130, borderRight: HDIV, background: '#EAF3DE' }}>売上額</th>
+            <th style={{ ...st.thGrp, textAlign: 'right', width: 120, borderRight: HDIV, background: '#EAF3DE' }}>粗利</th>
             <th style={{ ...st.thGrp, textAlign: 'right', width: 72, borderRight: HDIV, background: '#EAF3DE' }}>粗利率</th>
             <th style={{ ...st.thGrp, width: 40 }}></th>
           </tr>
@@ -1871,7 +1871,7 @@ function VendorView({
         {/* 全業者合計フッター */}
         <tfoot>
           <tr style={{ background: C.groupBg, borderTop: `2px solid ${C.border}` }}>
-            <td style={{ ...st.td, fontWeight: 700, color: C.text, borderRight: HDIV }} colSpan={2}>
+            <td style={{ ...st.td, fontWeight: 700, color: C.text, borderRight: HDIV }}>
               全業者合計
             </td>
             <td style={{ ...st.td, ...st.tdNum, fontWeight: 600, color: C.textMuted, background: '#F0F2F5', borderRight: HDIV }}>
