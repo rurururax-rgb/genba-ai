@@ -1610,16 +1610,15 @@ function VendorView({
       <table style={{ ...st.table, margin: 0 }}>
         <thead>
           <tr>
-            <th style={{ ...st.thGrp, textAlign: 'left', minWidth: 160, width: 200, borderRight: HDIV }}>業者名</th>
-            <th style={{ ...st.thGrp, textAlign: 'left', minWidth: 160, borderRight: HDIV }}>担当工種</th>
-            <th style={{ ...st.thGrp, textAlign: 'right', width: 120, borderRight: HDIV }}>業者見積額</th>
+            <th style={{ ...st.thGrp, textAlign: 'left', minWidth: 220, borderRight: HDIV }}>業者名</th>
+            <th style={{ ...st.thGrp, textAlign: 'right', width: 130, borderRight: HDIV }}>業者見積額</th>
             {hasBudget && (
               <th style={{ ...st.thGrp, textAlign: 'right', width: 120, borderRight: HDIV }}>実行予算</th>
             )}
-            <th style={{ ...st.thGrp, textAlign: 'right', width: 120, borderRight: HDIV }}>業者請求額</th>
+            <th style={{ ...st.thGrp, textAlign: 'right', width: 130, borderRight: HDIV }}>業者請求額</th>
             <th style={{ ...st.thGrp, textAlign: 'right', width: 110, borderRight: HDIV }}>差額</th>
-            <th style={{ ...st.thGrp, textAlign: 'right', width: 120, borderRight: HDIV, background: '#EAF3DE' }}>売上額</th>
-            <th style={{ ...st.thGrp, textAlign: 'right', width: 110, borderRight: HDIV, background: '#EAF3DE' }}>粗利</th>
+            <th style={{ ...st.thGrp, textAlign: 'right', width: 130, borderRight: HDIV, background: '#EAF3DE' }}>売上額</th>
+            <th style={{ ...st.thGrp, textAlign: 'right', width: 120, borderRight: HDIV, background: '#EAF3DE' }}>粗利</th>
             <th style={{ ...st.thGrp, textAlign: 'right', width: 72, borderRight: HDIV, background: '#EAF3DE' }}>粗利率</th>
             <th style={{ ...st.thGrp, width: 40 }}></th>
           </tr>
@@ -1638,9 +1637,6 @@ function VendorView({
             const diffColor = diff == null ? C.textMuted : isOver ? C.red : C.green
             const diffBg    = diff == null ? 'transparent' : isOver ? C.redBg : C.greenBg
             const rowBg     = idx % 2 === 0 ? C.bg : '#FAFCFA'
-            const workTypes = g.items.map(i => i.name).filter(Boolean).slice(0, 5).join('・')
-            const moreCount = g.items.length > 5 ? g.items.length - 5 : 0
-
             return (
               <React.Fragment key={g.vendor}>
                 <tr
@@ -1661,14 +1657,6 @@ function VendorView({
                       </span>
                       <span style={vs.countBadge}>{g.items.length}件</span>
                     </div>
-                  </td>
-
-                  {/* 担当工種 */}
-                  <td style={{ ...st.td, borderRight: HDIV }}>
-                    <span style={{ fontSize: 12, color: C.textSub }}>
-                      {workTypes}
-                      {moreCount > 0 && <span style={{ color: C.textMuted }}>…他{moreCount}件</span>}
-                    </span>
                   </td>
 
                   {/* 見積原価 */}
@@ -1822,7 +1810,7 @@ function VendorView({
                 {/* 展開行: この業者の明細一覧 */}
                 {isOpen && (
                   <tr>
-                    <td colSpan={hasBudget ? 10 : 9} style={{ padding: 0, background: C.accentLight }}>
+                    <td colSpan={hasBudget ? 9 : 8} style={{ padding: 0, background: C.accentLight }}>
                       <div style={vs.detailPanel}>
                         <div style={vs.detailHeader}>
                           <span style={{ fontSize: 11, fontWeight: 700, color: C.accent, letterSpacing: '0.04em', fontFamily: FONT }}>
@@ -1883,7 +1871,7 @@ function VendorView({
         {/* 全業者合計フッター */}
         <tfoot>
           <tr style={{ background: C.groupBg, borderTop: `2px solid ${C.border}` }}>
-            <td style={{ ...st.td, fontWeight: 700, color: C.text, borderRight: HDIV }} colSpan={2}>
+            <td style={{ ...st.td, fontWeight: 700, color: C.text, borderRight: HDIV }}>
               全業者合計
             </td>
             <td style={{ ...st.td, ...st.tdNum, fontWeight: 600, color: C.textMuted, background: '#F0F2F5', borderRight: HDIV }}>
