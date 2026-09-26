@@ -953,7 +953,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                 業者請求書取り込み
               </button>
               <button
-                onClick={() => setSumMode(v => !v)}
+                onClick={() => { if (sumMode) setSumSelection(new Map); setSumMode(v => !v) }}
                 style={{
                   fontSize: 11, padding: '2px 9px', height: 30, lineHeight: 1,
                   border: `1px solid ${sumMode ? C.accent : C.border}`, borderRadius: 7,
