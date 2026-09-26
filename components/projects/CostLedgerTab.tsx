@@ -985,6 +985,9 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
               groups={vendorGroups}
               expanded={expandedVendors}
               onToggle={(v) => setExpandedVendors(p => ({ ...p, [v]: !p[v] }))}
+              sumMode={sumMode}
+              sumSelection={sumSelection}
+              onSumToggle={(k, v) => setSumSelection(p => { const n = new Map(p); n.has(k) ? n.delete(k) : n.set(k, v); return n })}
             />
           )}
 
@@ -1570,11 +1573,14 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
 //   差額     = AK列（O - AG）。プラス=赤字超過、マイナス=節約
 
 function VendorView({
-  groups, expanded, onToggle,
+  groups, expanded, onToggle, sumMode, sumSelection, onSumToggle,
 }: {
   groups: VendorGroup[]
   expanded: Record<string, boolean>
   onToggle: (vendor: string) => void
+  sumMode: boolean
+  sumSelection: Map<string, number>
+  onSumToggle: (key: string, value: number) => void
 }) {
   const hasAny = groups.length > 0
   if (!hasAny) return null
@@ -1666,35 +1672,82 @@ function VendorView({
                   </td>
 
                   {/* 見積原価 */}
-                  <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV, background: '#F3F7F4' }}>
-                    <span style={{ color: C.textSub }}>{fmtYen(g.estimateCost)}</span>
-                  </td>
+                  {(() => {
+                    const k = `${g.vendor}:ec`; const isSel = sumSelection.has(k)
+                    return (
+                      <td
+                        style={{ ...st.td, ...st.tdNum, borderRight: HDIV,
+                          background: isSel ? C.accentLight : '#F3F7F4',
+                          outline: isSel ? `2px solid ${C.accent}` : undefined, outlineOffset: '-2px',
+                          cursor: sumMode ? 'pointer' : undefined,
+                        }}
+                        onClick={e => { if (sumMode) { e.stopPropagation(); onSumToggle(k, g.estimateCost) } }}
+                      >
+                        <span style={{ color: isSel ? C.green : C.textSub }}>{fmtYen(g.estimateCost)}</span>
+                      </td>
+                    )
+                  })()}
 
                   {/* 実行予算 */}
-                  {hasBudget && (
-                    <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV }}>
-                      <span style={{ color: g.budgetCost != null ? C.text : C.textMuted }}>
-                        {g.budgetCost != null ? fmtYen(g.budgetCost) : '─'}
-                      </span>
-                    </td>
-                  )}
+                  {hasBudget && (() => {
+                    const k = `${g.vendor}:bc`; const isSel = sumSelection.has(k)
+                    const selectable = g.budgetCost != null
+                    return (
+                      <td
+                        style={{ ...st.td, ...st.tdNum, borderRight: HDIV,
+                          background: isSel ? C.accentLight : undefined,
+                          outline: isSel ? `2px solid ${C.accent}` : undefined, outlineOffset: '-2px',
+                          cursor: sumMode && selectable ? 'pointer' : undefined,
+                        }}
+                        onClick={e => { if (sumMode && selectable) { e.stopPropagation(); onSumToggle(k, g.budgetCost!) } }}
+                      >
+                        <span style={{ color: isSel ? C.green : g.budgetCost != null ? C.text : C.textMuted }}>
+                          {g.budgetCost != null ? fmtYen(g.budgetCost) : '─'}
+                        </span>
+                      </td>
+                    )
+                  })()}
 
                   {/* 実際請求額 */}
-                  <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV }}>
-                    {g.actualCost != null ? (
-                      <span style={{ fontWeight: 700, color: C.text }}>{fmtYen(g.actualCost)}</span>
-                    ) : (
-                      <span style={{ color: C.textMuted, fontSize: 11 }}>未入力</span>
-                    )}
-                  </td>
+                  {(() => {
+                    const k = `${g.vendor}:ac`; const isSel = sumSelection.has(k)
+                    const selectable = g.actualCost != null
+                    return (
+                      <td
+                        style={{ ...st.td, ...st.tdNum, borderRight: HDIV,
+                          background: isSel ? C.accentLight : undefined,
+                          outline: isSel ? `2px solid ${C.accent}` : undefined, outlineOffset: '-2px',
+                          cursor: sumMode && selectable ? 'pointer' : undefined,
+                        }}
+                        onClick={e => { if (sumMode && selectable) { e.stopPropagation(); onSumToggle(k, g.actualCost!) } }}
+                      >
+                        {g.actualCost != null ? (
+                          <span style={{ fontWeight: 700, color: isSel ? C.green : C.text }}>{fmtYen(g.actualCost)}</span>
+                        ) : (
+                          <span style={{ color: C.textMuted, fontSize: 11 }}>未入力</span>
+                        )}
+                      </td>
+                    )
+                  })()}
 
                   {/* 差額 = 実際 - 見積 */}
-                  <td style={{ ...st.td, ...st.tdNum, background: diffBg, borderRight: HDIV }}>
-                    <span style={{ fontWeight: 700, color: diffColor }}>{diffStr}</span>
-                    {isOver && (
-                      <span style={vs.alertLabel}>超過</span>
-                    )}
-                  </td>
+                  {(() => {
+                    const k = `${g.vendor}:diff`; const isSel = sumSelection.has(k)
+                    const selectable = diff != null
+                    return (
+                      <td
+                        style={{ ...st.td, ...st.tdNum, borderRight: HDIV,
+                          background: isSel ? C.accentLight : diffBg,
+                          outline: isSel ? `2px solid ${C.accent}` : undefined, outlineOffset: '-2px',
+                          cursor: sumMode && selectable ? 'pointer' : undefined,
+                        }}
+                        onClick={e => { if (sumMode && selectable) { e.stopPropagation(); onSumToggle(k, diff!) } }}
+                      >
+                        <span style={{ fontWeight: 700, color: isSel ? C.green : diffColor }}>{diffStr}</span>
+                        {isOver && !isSel && <span style={vs.alertLabel}>超過</span>}
+                      </td>
+                    )
+                  })()}
 
                   {/* 売上額 */}
                   {(() => {
@@ -1702,20 +1755,42 @@ function VendorView({
                     const cost    = g.actualCost ?? g.estimateCost
                     const profit  = selling > 0 ? selling - cost : null
                     const rate    = selling > 0 ? (selling - cost) / selling : null
+                    // sum selection keys
+                    const kSell = `${g.vendor}:sell`; const sellSel = sumSelection.has(kSell)
+                    const kProfit = `${g.vendor}:profit`; const profitSel = sumSelection.has(kProfit)
+                    const sellSelectable = selling > 0
+                    const profitSelectable = profit != null
                     return (
                       <>
-                        <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV, background: '#F0F6F2' }}>
-                          <span style={{ color: selling > 0 ? C.textSub : C.textMuted }}>
+                        {/* 売上額 */}
+                        <td
+                          style={{ ...st.td, ...st.tdNum, borderRight: HDIV,
+                            background: sellSel ? C.accentLight : '#F0F6F2',
+                            outline: sellSel ? `2px solid ${C.accent}` : undefined, outlineOffset: '-2px',
+                            cursor: sumMode && sellSelectable ? 'pointer' : undefined,
+                          }}
+                          onClick={e => { if (sumMode && sellSelectable) { e.stopPropagation(); onSumToggle(kSell, selling) } }}
+                        >
+                          <span style={{ color: sellSel ? C.green : selling > 0 ? C.textSub : C.textMuted }}>
                             {selling > 0 ? fmtYen(selling) : '─'}
                           </span>
                         </td>
-                        <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV, background: '#F0F6F2' }}>
+                        {/* 粗利 */}
+                        <td
+                          style={{ ...st.td, ...st.tdNum, borderRight: HDIV,
+                            background: profitSel ? C.accentLight : '#F0F6F2',
+                            outline: profitSel ? `2px solid ${C.accent}` : undefined, outlineOffset: '-2px',
+                            cursor: sumMode && profitSelectable ? 'pointer' : undefined,
+                          }}
+                          onClick={e => { if (sumMode && profitSelectable) { e.stopPropagation(); onSumToggle(kProfit, profit!) } }}
+                        >
                           {profit != null ? (
-                            <span style={{ fontWeight: 700, color: profit >= 0 ? C.green : C.red }}>
+                            <span style={{ fontWeight: 700, color: profitSel ? C.green : profit >= 0 ? C.green : C.red }}>
                               {fmtYen(profit)}
                             </span>
                           ) : <span style={{ color: C.textMuted }}>─</span>}
                         </td>
+                        {/* 粗利率（合計非対象） */}
                         <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV, background: '#F0F6F2' }}>
                           {rate != null ? (
                             <span style={{
