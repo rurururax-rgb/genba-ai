@@ -15,7 +15,7 @@ import {
   type DropResult, type DraggableProvidedDragHandleProps, type DragStart,
 } from '@hello-pangea/dnd'
 import { getClient } from '@/lib/supabase/client'
-import { DEFAULT_MARKUP_RATE, getEffectiveMarkupRate, markupToMarginRate, resolveSellingPrice, type SellingPriceMode } from '@/lib/estimate/pricing'
+import { calculateSellingPrice, DEFAULT_MARKUP_RATE, getEffectiveMarkupRate, markupToMarginRate, resolveSellingPrice, type SellingPriceMode } from '@/lib/estimate/pricing'
 import { EstimateImportTab } from './EstimateImportTab'
 
 // ── 型定義 ────────────────────────────────────────────────
@@ -62,6 +62,7 @@ type ItemPatch = {
   memo?: string | null
   row_type?: RowType
   selling_price_mode?: SellingPriceMode
+  markup_rate_override?: number | null
 }
 
 type RevisionHeader = {
@@ -937,6 +938,7 @@ function ItemRow({
   indent, onIndent, onUnindent,
   isGhost, saved,
   sumMode, sumSelKeys, onSumToggle,
+  projectMarkupRate,
 }: {
   item: EstimateItem; inGroup: boolean; isDragging: boolean
   dragHandleProps: DraggableProvidedDragHandleProps | null
@@ -946,12 +948,19 @@ function ItemRow({
   indent?: number; onIndent?: () => void; onUnindent?: () => void
   isGhost?: boolean; saved?: boolean
   sumMode?: boolean; sumSelKeys?: Set<string>; onSumToggle?: (key: string, value: number | null) => void
+  projectMarkupRate?: number
 }) {
   const gridCols = useContext(GridColsCtx)
   const [editField, setEditField] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [editRect,  setEditRect]  = useState<DOMRect | null>(null)
   const [hovered,   setHovered]   = useState(false)
+  // 個別掛け率 popover（anchor は開く時点のBoundingClientRectをstateに保存）
+  const [overrideAnchor,   setOverrideAnchor]   = useState<DOMRect | null>(null)
+  const [overrideDraft,    setOverrideDraft]    = useState('')
+  const [overrideApplying, setOverrideApplying] = useState(false)
+  const [overrideError,    setOverrideError]    = useState<string | null>(null)
+  const overrideCellRef = useRef<HTMLDivElement>(null)
   const nameRef    = useRef<HTMLInputElement>(null)
   const portalRef  = useRef<HTMLInputElement>(null)
 
@@ -1419,17 +1428,32 @@ function ItemRow({
         </div>
       </div>
 
-      {/* 粗利率（内部専用） */}
-      <div style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
-        height: '100%', paddingRight: 8,
-      }}>
+      {/* 粗利率（内部専用）+ 個別掛け率設定 */}
+      <div
+        ref={overrideCellRef}
+        style={{
+          display: 'flex', flexDirection: 'column', alignItems: 'flex-end',
+          justifyContent: 'center',
+          height: '100%', paddingRight: 6, gap: 2,
+        }}
+      >
+        {/* override badge（設定時のみ） */}
+        {item.markup_rate_override != null && (
+          <span style={{
+            fontSize: 9, fontWeight: 700, fontFamily: FONT,
+            color: '#1D4ED8', background: '#DBEAFE',
+            borderRadius: 3, padding: '1px 4px', lineHeight: 1.3,
+            whiteSpace: 'nowrap',
+          }}>
+            個別{item.markup_rate_override.toFixed(2)}
+          </span>
+        )}
+        {/* 粗利率バッジ */}
         {margin != null ? (
           <span style={{
             padding: '3px 6px', borderRadius: 20,
             fontSize: 11, fontWeight: 700, fontFamily: FONT,
-            fontVariantNumeric: 'tabular-nums',
-            whiteSpace: 'nowrap',
+            fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap',
             background: warnMargin ? '#FEF2F2' : '#F0FDF4',
             color: warnMargin ? C.red : C.green,
           }}>
@@ -1438,6 +1462,184 @@ function ItemRow({
         ) : (
           <span style={{ fontSize: 12, color: C.textMuted, opacity: 0.45, fontFamily: FONT }}>─</span>
         )}
+        {/* hover 時の設定ボタン */}
+        {hovered && !overrideAnchor && (
+          <button
+            onClick={e => {
+              e.stopPropagation()
+              setOverrideDraft(item.markup_rate_override != null ? String(item.markup_rate_override) : '')
+              setOverrideError(null)
+              setOverrideAnchor(overrideCellRef.current?.getBoundingClientRect() ?? null)
+            }}
+            style={{
+              fontSize: 9, fontFamily: FONT, lineHeight: 1.3, whiteSpace: 'nowrap',
+              padding: '1px 5px', borderRadius: 3,
+              border: `1px solid ${C.divider}`, cursor: 'pointer',
+              color: C.textMuted, background: '#F0F1F3',
+            }}
+          >
+            %設定
+          </button>
+        )}
+        {/* 個別掛け率 popover（portal） */}
+        {overrideAnchor && (() => {
+          const cellRect  = overrideAnchor
+          const pRate     = parseFloat(overrideDraft)
+          const pValid    = Number.isFinite(pRate) && pRate >= 0.01 && pRate <= 9.99
+          const pMargin   = pValid ? markupToMarginRate(pRate) : null
+          const curRate   = item.markup_rate_override ?? projectMarkupRate ?? DEFAULT_MARKUP_RATE
+          const curMargin = markupToMarginRate(curRate)
+          const hasOverride = item.markup_rate_override != null
+          const projRate  = projectMarkupRate ?? DEFAULT_MARKUP_RATE
+
+          return createPortal(
+            <>
+              {/* 背景クリックで閉じる */}
+              <div
+                style={{ position: 'fixed', inset: 0, zIndex: 8998 }}
+                onClick={() => { setOverrideAnchor(null); setOverrideError(null) }}
+              />
+              <div
+                style={{
+                  position: 'fixed',
+                  top: Math.min(cellRect.bottom + 4, window.innerHeight - 260),
+                  right: Math.max(window.innerWidth - cellRect.right, 8),
+                  width: 280,
+                  background: '#fff',
+                  borderRadius: 12,
+                  border: `1px solid ${C.divider}`,
+                  boxShadow: '0 6px 28px rgba(26,35,50,0.16)',
+                  zIndex: 8999,
+                  fontFamily: FONT,
+                  overflow: 'hidden',
+                }}
+                onClick={e => e.stopPropagation()}
+              >
+                {/* header */}
+                <div style={{ padding: '12px 16px 10px', borderBottom: `1px solid ${C.divider}` }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 2 }}>
+                    明細の掛け率を個別設定
+                  </div>
+                  <div style={{ fontSize: 11, color: C.textMuted }}>
+                    案件標準: {projRate.toFixed(2)}（粗利{((markupToMarginRate(projRate) ?? 0) * 100).toFixed(1)}%）
+                  </div>
+                </div>
+
+                {/* current */}
+                <div style={{ padding: '10px 16px', background: C.accentLight, display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <div>
+                    <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 1 }}>現在</div>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: hasOverride ? '#1D4ED8' : C.green, fontVariantNumeric: 'tabular-nums' }}>
+                      {curRate.toFixed(2)}{hasOverride ? ' (個別)' : ''}
+                    </div>
+                    <div style={{ fontSize: 10, color: C.textMuted }}>
+                      粗利 {curMargin != null ? `${(curMargin * 100).toFixed(1)}%` : '─'}
+                    </div>
+                  </div>
+                  {overrideDraft !== '' && pValid && pRate !== curRate && (
+                    <>
+                      <span style={{ fontSize: 16, color: C.textMuted }}>→</span>
+                      <div>
+                        <div style={{ fontSize: 9, color: C.textMuted, marginBottom: 1 }}>変更後</div>
+                        <div style={{ fontSize: 16, fontWeight: 700, color: '#1D4ED8', fontVariantNumeric: 'tabular-nums' }}>
+                          {pRate.toFixed(2)} (個別)
+                        </div>
+                        <div style={{ fontSize: 10, color: '#1D4ED8' }}>
+                          粗利 {pMargin != null ? `${(pMargin * 100).toFixed(1)}%` : '─'}
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                {/* input */}
+                <div style={{ padding: '12px 16px' }}>
+                  <label style={{ fontSize: 11, fontWeight: 600, color: C.textSub, display: 'block', marginBottom: 6 }}>
+                    個別掛け率（0.01〜9.99）
+                  </label>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <Input
+                      inputSize="compact"
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      max="9.99"
+                      value={overrideDraft}
+                      onChange={e => { setOverrideDraft(e.target.value); setOverrideError(null) }}
+                      onKeyDown={async e => {
+                        if (e.key === 'Enter' && !e.nativeEvent.isComposing && pValid && !overrideApplying) {
+                          e.preventDefault(); e.stopPropagation()
+                          setOverrideApplying(true)
+                          try { await onSave({ markup_rate_override: pRate }) } finally { setOverrideApplying(false) }
+                          setOverrideAnchor(null)
+                        }
+                        if (e.key === 'Escape') { e.stopPropagation(); setOverrideAnchor(null) }
+                        e.stopPropagation()
+                      }}
+                      autoFocus
+                      className="w-24"
+                      placeholder={projRate.toFixed(2)}
+                      aria-label="個別掛け率"
+                    />
+                    {pValid && (
+                      <span style={{ fontSize: 11, color: C.textSub }}>
+                        粗利 {pMargin != null ? `${(pMargin * 100).toFixed(1)}%` : '─'}
+                      </span>
+                    )}
+                  </div>
+                  {overrideError && (
+                    <p style={{ fontSize: 11, color: C.red, margin: '6px 0 0' }}>{overrideError}</p>
+                  )}
+                  {(item.selling_price_mode ?? 'auto') === 'manual' && (
+                    <p style={{ fontSize: 10, color: C.textMuted, margin: '6px 0 0', lineHeight: 1.5 }}>
+                      ※ 手動設定済み売価のため、掛け率変更による売価再計算はしません。
+                    </p>
+                  )}
+                </div>
+
+                {/* actions */}
+                <div style={{ padding: '0 16px 14px', display: 'flex', gap: 8 }}>
+                  {hasOverride && (
+                    <button
+                      onClick={async e => {
+                        e.stopPropagation()
+                        setOverrideApplying(true)
+                        try { await onSave({ markup_rate_override: null }) } finally { setOverrideApplying(false) }
+                        setOverrideAnchor(null)
+                      }}
+                      disabled={overrideApplying}
+                      style={{
+                        flex: 1, fontSize: 11, fontFamily: FONT, cursor: 'pointer',
+                        padding: '5px 8px', borderRadius: 6,
+                        border: `1px solid ${C.accentTint}`, background: C.accentLight,
+                        color: C.accent, fontWeight: 600,
+                      }}
+                    >
+                      案件標準に戻す
+                    </button>
+                  )}
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="sm"
+                    onClick={async e => {
+                      (e as React.MouseEvent).stopPropagation()
+                      if (!pValid) { setOverrideError('掛け率は 0.01〜9.99 の範囲で入力してください。'); return }
+                      setOverrideApplying(true)
+                      try { await onSave({ markup_rate_override: pRate }) } finally { setOverrideApplying(false) }
+                      setOverrideAnchor(null)
+                    }}
+                    disabled={!pValid || overrideApplying}
+                    className={hasOverride ? '' : 'flex-1'}
+                  >
+                    {overrideApplying ? '保存中…' : '保存'}
+                  </Button>
+                </div>
+              </div>
+            </>,
+            document.body
+          )
+        })()}
       </div>
 
       {/* 削除 */}
@@ -2344,7 +2546,18 @@ export function EstimateTab({ projectId }: { projectId: string }) {
     const item = items.find(i => i.id === itemId)
     const currentMode: SellingPriceMode = item?.selling_price_mode ?? 'auto'
 
-    if ('cost_price' in changes && changes.cost_price != null) {
+    if ('markup_rate_override' in changes) {
+      // 個別掛け率を変更 / リセット（null）→ AUTO行のみ selling_price を再計算
+      if (currentMode === 'auto' && item?.cost_price != null) {
+        const newOverride = changes.markup_rate_override ?? undefined
+        const rate = getEffectiveMarkupRate(projectMarkupRate, newOverride)
+        const newSelling = calculateSellingPrice(item.cost_price, rate)
+        if (newSelling != null) {
+          finalChanges = { ...finalChanges, selling_price: newSelling }
+        }
+      }
+      // MANUAL mode: selling_price は変更しない
+    } else if ('cost_price' in changes && changes.cost_price != null) {
       if (currentMode === 'auto') {
         const rate = getEffectiveMarkupRate(projectMarkupRate, item?.markup_rate_override)
         const newSelling = resolveSellingPrice('auto', null, changes.cost_price, rate)
@@ -3215,7 +3428,8 @@ export function EstimateTab({ projectId }: { projectId: string }) {
                                                   saved={savedIds.has(item.id)}
                                                   sumMode={sumMode}
                                                   sumSelKeys={sumSelKeys}
-                                                  onSumToggle={(k, v) => { if (v == null) return; setSumSelection(p => { const n = new Map(p); n.has(k) ? n.delete(k) : n.set(k, v); return n }) }} />
+                                                  onSumToggle={(k, v) => { if (v == null) return; setSumSelection(p => { const n = new Map(p); n.has(k) ? n.delete(k) : n.set(k, v); return n }) }}
+                                                  projectMarkupRate={projectMarkupRate} />
                                                 {nextPb && !is.isDragging && (
                                                   <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 30 }}>
                                                     <PageBreakRow pageNum={nextPb.pageNum} pageTotal={nextPb.pageTotal} pageCostTotal={nextPb.pageCostTotal} />
@@ -3314,7 +3528,8 @@ export function EstimateTab({ projectId }: { projectId: string }) {
                                   saved={savedIds.has(item.id)}
                                   sumMode={sumMode}
                                   sumSelKeys={sumSelKeys}
-                                  onSumToggle={(k, v) => { if (v == null) return; setSumSelection(p => { const n = new Map(p); n.has(k) ? n.delete(k) : n.set(k, v); return n }) }} />
+                                  onSumToggle={(k, v) => { if (v == null) return; setSumSelection(p => { const n = new Map(p); n.has(k) ? n.delete(k) : n.set(k, v); return n }) }}
+                                  projectMarkupRate={projectMarkupRate} />
                               </div>
                             )}
                           </Draggable>
