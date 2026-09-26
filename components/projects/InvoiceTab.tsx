@@ -1,6 +1,7 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { getClient } from '@/lib/supabase/client'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
@@ -661,6 +662,17 @@ function InvoiceEditor({
   const [saving, setSaving] = useState(false)
   const [toast, setToast] = useState('')
 
+  // ── Cell Sum Selection (Layer 2) ─────────────────────────
+  const [sumMode, setSumMode] = useState(false)
+  const [sumSelection, setSumSelection] = useState<Map<string, number>>(new Map())
+  const sumTotal = useMemo(() => { let t = 0; sumSelection.forEach(v => { t += v }); return t }, [sumSelection])
+
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') setSumSelection(new Map()) }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [])
+
   const items = form.items ?? []
   const subtotal = items.reduce((s, i) => s + (i.amount || 0), 0)
   const tax = Math.floor(subtotal * 0.1)
@@ -729,6 +741,13 @@ function InvoiceEditor({
   }
 
   return (
+    <>
+    <style>{`
+      .genba-sum-float { position: fixed; right: 24px; bottom: 24px; z-index: 200; }
+      @media (max-width: 1023px) {
+        .genba-sum-float { right: 16px; bottom: calc(56px + env(safe-area-inset-bottom, 0px) + 8px); }
+      }
+    `}</style>
     <div style={{ background: C.bg, border: `1.5px solid ${C.border}`, borderRadius: 14, fontFamily: FONT, overflow: 'hidden' }}>
       {/* エディタヘッダー */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 18px', borderBottom: `1px solid ${C.divider}`, background: C.accentBg }}>
@@ -739,6 +758,21 @@ function InvoiceEditor({
           {isNew ? '請求書を新規作成' : '請求書を編集'}
         </span>
         <span style={{ flex: 1 }} />
+        {/* ∑ 合計ボタン */}
+        <button
+          onClick={() => { if (sumMode) setSumSelection(new Map()); setSumMode(m => !m) }}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 5,
+            border: `1px solid ${sumMode ? C.accent : C.border}`, borderRadius: 7,
+            padding: '6px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: FONT,
+            background: sumMode ? C.accent : C.bg,
+            color: sumMode ? '#fff' : C.textMuted,
+            transition: 'background 0.12s',
+          }}
+          title={sumMode ? '合計モードを終了（もう一度押す）' : '合計モード：金額セルをクリックして合計'}
+        >
+          ∑ 合計
+        </button>
         {/* 印刷ボタン */}
         <button
           onClick={() => {
@@ -844,7 +878,32 @@ function InvoiceEditor({
                 <Input inputSize="compact" className="text-xs" value={item.name} onChange={e => updateItem(idx, 'name', e.target.value)} placeholder="例：リフォーム工事（契約時）" />
                 <Input type="number" inputSize="compact" className="text-xs text-right" value={item.quantity} min={0} onChange={e => updateItem(idx, 'quantity', Number(e.target.value))} />
                 <Input inputSize="compact" className="text-xs text-center" value={item.unit} onChange={e => updateItem(idx, 'unit', e.target.value)} />
-                <Input type="number" inputSize="compact" className="text-xs text-right" value={item.amount} min={0} onChange={e => updateItem(idx, 'amount', Number(e.target.value))} placeholder="0" />
+                {(() => {
+                  const isSel = sumSelection.has(item.id)
+                  return (
+                    <div
+                      onMouseDownCapture={e => {
+                        if ((e.target as HTMLElement).tagName !== 'INPUT') return
+                        if (sumMode || e.ctrlKey || e.metaKey) {
+                          e.preventDefault()
+                          setSumSelection(prev => {
+                            const next = new Map(prev)
+                            next.has(item.id) ? next.delete(item.id) : next.set(item.id, item.amount)
+                            return next
+                          })
+                        }
+                      }}
+                      style={{
+                        borderRadius: 8,
+                        outline: isSel ? `2px solid ${C.accent}` : undefined,
+                        outlineOffset: isSel ? '-2px' : undefined,
+                        background: isSel ? C.accentBg : undefined,
+                      }}
+                    >
+                      <Input type="number" inputSize="compact" className="text-xs text-right" value={item.amount} min={0} onChange={e => updateItem(idx, 'amount', Number(e.target.value))} placeholder="0" />
+                    </div>
+                  )
+                })()}
                 <Input inputSize="compact" className="text-xs" value={item.memo} onChange={e => updateItem(idx, 'memo', e.target.value)} placeholder="備考" />
                 <button onClick={() => removeItem(idx)} disabled={items.length <= 1} style={{ background: 'none', border: 'none', cursor: items.length <= 1 ? 'not-allowed' : 'pointer', color: C.textMuted, fontSize: 16, padding: 0, opacity: items.length <= 1 ? 0.3 : 1 }}>×</button>
               </div>
@@ -891,6 +950,26 @@ function InvoiceEditor({
         </div>
       )}
     </div>
+    {createPortal(
+      sumSelection.size > 0 ? (
+        <div className="genba-sum-float" style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '8px 14px', background: '#fff',
+          border: `1.5px solid ${C.accentTint}`, borderRadius: 10,
+          boxShadow: '0 4px 20px rgba(43,94,64,0.18)',
+          fontSize: 13, fontFamily: FONT, userSelect: 'none' as const,
+        }}>
+          {sumMode && (
+            <span style={{ fontSize: 10, color: C.accent, background: C.accentBg, borderRadius: 4, padding: '2px 6px', fontWeight: 600 }}>∑ ON</span>
+          )}
+          <span style={{ color: C.textMuted, fontSize: 12 }}>{sumSelection.size}セル選択</span>
+          <span style={{ fontWeight: 700, color: C.green, fontVariantNumeric: 'tabular-nums' }}>合計 ¥{fmt(sumTotal)}</span>
+          <button onClick={() => setSumSelection(new Map())} style={{ marginLeft: 4, background: 'none', border: 'none', cursor: 'pointer', color: C.textMuted, padding: '2px 6px', borderRadius: 4, fontSize: 13, lineHeight: '1' }} title="選択解除（Esc）">✕</button>
+        </div>
+      ) : null,
+      document.body
+    )}
+    </>
   )
 }
 
