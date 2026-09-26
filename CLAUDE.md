@@ -813,3 +813,58 @@ READY FOR HUMAN REVIEW
 | Production env / secret 変更禁止 | Vercel / GitHub API でアクセス可能だが禁止 |
 | Production DB migration 禁止 | Supabase API でアクセス可能だが明示承認必須 |
 | Bypass 使用禁止 | 緊急時の owner 専用手段。Claude は使用しない |
+
+---
+
+## Autonomous Development Workflow (RAGZ)
+
+Safety Boundary（上述）と組み合わせて使う。PHASE 1–11 が標準サイクル。
+
+### PHASE 1–11: 標準開発フロー
+
+| Phase | 名前 | アクション |
+|-------|------|-----------|
+| 1 | Branch | `git checkout -b <branch> origin/main` |
+| 2 | Read | 変更対象ファイルのみ読む（探索は最小限） |
+| 3 | Plan | スコープ確認。人間合意が必要なら**ここで停止**して質問する |
+| 4 | Implement | コードを変更する |
+| 5 | Local QG | `npm run typecheck && npm run lint && npm run test && npm run build` |
+| 6 | Fix | QG 失敗を修正する（下記「失敗分類」に従う） |
+| 7 | Commit | `git commit` |
+| 8 | Push | `git push -u origin <branch>` |
+| 9 | PR | `gh pr create --base main` |
+| 10 | CI/CD Wait | Quality Gate PASS + Vercel Preview Ready を待つ |
+| 11 | Report | **READY FOR HUMAN REVIEW** を報告して停止する |
+
+PHASE 5 で PASS なら PHASE 6 を飛ばして PHASE 7 へ進む。
+PHASE 10 で CI 失敗が出た場合は PHASE 4 へ戻って修正する（PHASE 9 の PR は閉じず同ブランチへ再 push）。
+
+### 失敗分類
+
+| 分類 | 適用条件 | アクション |
+|------|---------|-----------|
+| **AUTO-FIX** | TypeScript 型エラー、lint エラー、既存テストの軽微な失敗 | 修正して同 PHASE を再実行 |
+| **ASK HUMAN** | 設計判断・破壊的変更・スコープ外修正が必要、3回 AUTO-FIX を試みて解消しない | 状況を説明して停止・質問 |
+| **STOP** | AI MUST NOT 境界への抵触、本番環境への影響、原因不明の繰り返し失敗 | 即座に停止・報告。何もしない |
+
+### コンテキスト効率ルール
+
+- PHASE 2 で読むファイルは変更対象に絞る。調査目的の広域読み取りは fork agent に委任する。
+- QG ログは失敗行のみ引用する（全出力をコンテキストに載せない）。
+- PR 作成後は CI/Vercel の状態を確認するが、結果を待つ間は別作業をしない（ポーリングしない）。
+
+### 最終報告フォーマット
+
+QG PASS・Vercel Preview Ready がそろったら、以下フォーマットで報告して**停止**する。
+
+```
+READY FOR HUMAN REVIEW
+
+Branch : <branch-name>
+PR     : <pr-url>
+Quality Gate   : PASS
+Vercel Preview : <preview-url>
+
+変更概要:
+- <変更点>
+```
