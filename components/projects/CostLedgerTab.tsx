@@ -433,6 +433,10 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
   const [additionalAmounts, setAdditionalAmounts] = useState<[number|null, number|null, number|null]>([null, null, null])
   const [editingAdditional, setEditingAdditional] = useState<{ idx: number; value: string } | null>(null)
   const [showImport, setShowImport] = useState(false)
+  // セル金額合計選択（読み取り専用セルのみ・Layer 1）key = `${item.id}:${field}`
+  const [sumSelection, setSumSelection] = useState<Map<string, number>>(new Map)
+  const sumTotal = useMemo(() => { let t = 0; sumSelection.forEach(v => { t += v }); return t }, [sumSelection])
+
   const editRef = useRef<HTMLInputElement>(null)
   const billingEditRef = useRef<HTMLInputElement>(null)
 
@@ -502,6 +506,13 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
 
   useEffect(() => { load() }, [load])
   useEffect(() => { if (editing) editRef.current?.focus() }, [editing])
+  // ESC で合計選択クリア（編集中のキーハンドラが stopPropagation するため競合しない）
+  useEffect(() => {
+    if (sumSelection.size === 0) return
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape') setSumSelection(new Map) }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [sumSelection])
 
   useEffect(() => {
     const handler = (e: Event) => {
@@ -998,14 +1009,12 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
 
               <tbody>
                 {items.map((item, idx) => {
-                  const bd = fmtDiff(
-                    item.budget_cost != null && item.estimate_cost != null
-                      ? item.budget_cost - item.estimate_cost : null
-                  )
-                  const ad = fmtDiff(
-                    item.actual_cost != null && item.budget_cost != null
-                      ? item.actual_cost - item.budget_cost : null
-                  )
+                  const rawDiff1 = item.budget_cost != null && item.estimate_cost != null
+                    ? item.budget_cost - item.estimate_cost : null
+                  const rawDiff2 = item.actual_cost != null && item.budget_cost != null
+                    ? item.actual_cost - item.budget_cost : null
+                  const bd = fmtDiff(rawDiff1)
+                  const ad = fmtDiff(rawDiff2)
                   const isRow    = checked[item.id]
                   const rowBg    = isRow
                     ? C.selected
@@ -1072,12 +1081,27 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                           )}
                         </td>
 
-                        {/* 見積原価（読み取り専用） */}
-                        <td style={{ ...st.td, ...st.tdNum, color: C.textMuted,
-                          background: isRow ? 'transparent' : idx % 2 === 0 ? '#F3F7F4' : '#F0F6F2',
-                          borderRight: HDIV }}>
-                          {fmtYen(item.estimate_cost)}
-                        </td>
+                        {/* 見積原価（読み取り専用・クリックで合計選択） */}
+                        {(() => {
+                          const key = `${item.id}:ec`
+                          const isSel = sumSelection.has(key)
+                          return (
+                            <td style={{ ...st.td, ...st.tdNum,
+                              color: isSel ? C.green : C.textMuted,
+                              background: isSel ? C.accentLight : isRow ? 'transparent' : idx % 2 === 0 ? '#F3F7F4' : '#F0F6F2',
+                              outline: isSel ? `2px solid ${C.accent}` : undefined,
+                              outlineOffset: '-2px',
+                              cursor: item.estimate_cost != null ? 'pointer' : undefined,
+                              userSelect: 'none',
+                              borderRight: HDIV }}
+                              onClick={() => {
+                                if (item.estimate_cost == null) return
+                                setSumSelection(p => { const n = new Map(p); n.has(key) ? n.delete(key) : n.set(key, item.estimate_cost!); return n })
+                              }}>
+                              {fmtYen(item.estimate_cost)}
+                            </td>
+                          )
+                        })()}
 
                         {/* 実行予算 */}
                         <td style={{ ...st.td, ...st.tdNum, borderRight: `1px solid ${C.borderLight}` }}>
@@ -1098,15 +1122,29 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                           )}
                         </td>
 
-                        {/* 差額① */}
-                        <td style={{
-                          ...st.td, ...st.tdNum,
-                          color: bd.color, background: bd.bg,
-                          fontSize: 12, fontWeight: 600,
-                          borderRight: HDIV,
-                        }}>
-                          {bd.text}
-                        </td>
+                        {/* 差額①（読み取り専用・クリックで合計選択） */}
+                        {(() => {
+                          const key = `${item.id}:d1`
+                          const isSel = sumSelection.has(key)
+                          return (
+                            <td style={{
+                              ...st.td, ...st.tdNum,
+                              color: bd.color, background: bd.bg,
+                              fontSize: 12, fontWeight: 600,
+                              outline: isSel ? `2px solid ${C.accent}` : undefined,
+                              outlineOffset: '-2px',
+                              cursor: rawDiff1 != null ? 'pointer' : undefined,
+                              userSelect: 'none',
+                              borderRight: HDIV,
+                            }}
+                              onClick={() => {
+                                if (rawDiff1 == null) return
+                                setSumSelection(p => { const n = new Map(p); n.has(key) ? n.delete(key) : n.set(key, rawDiff1); return n })
+                              }}>
+                              {bd.text}
+                            </td>
+                          )
+                        })()}
 
                         {/* 完工実績 */}
                         <td style={{ ...st.td, ...st.tdNum, borderRight: HDIV }}>
@@ -1153,15 +1191,29 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                           )}
                         </td>
 
-                        {/* 差額② */}
-                        <td style={{
-                          ...st.td, ...st.tdNum,
-                          color: ad.color, background: ad.bg,
-                          fontSize: 12, fontWeight: 600,
-                          borderRight: HDIV,
-                        }}>
-                          {ad.text}
-                        </td>
+                        {/* 差額②（読み取り専用・クリックで合計選択） */}
+                        {(() => {
+                          const key = `${item.id}:d2`
+                          const isSel = sumSelection.has(key)
+                          return (
+                            <td style={{
+                              ...st.td, ...st.tdNum,
+                              color: ad.color, background: ad.bg,
+                              fontSize: 12, fontWeight: 600,
+                              outline: isSel ? `2px solid ${C.accent}` : undefined,
+                              outlineOffset: '-2px',
+                              cursor: rawDiff2 != null ? 'pointer' : undefined,
+                              userSelect: 'none',
+                              borderRight: HDIV,
+                            }}
+                              onClick={() => {
+                                if (rawDiff2 == null) return
+                                setSumSelection(p => { const n = new Map(p); n.has(key) ? n.delete(key) : n.set(key, rawDiff2); return n })
+                              }}>
+                              {ad.text}
+                            </td>
+                          )
+                        })()}
 
                         {/* 備考 */}
                         <td style={{ ...st.td, borderRight: HDIV }}>
@@ -1403,6 +1455,22 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
             rate={estRate}
             positive={estGross >= 0}
           />
+          {sumSelection.size > 0 && (
+            <>
+              <div style={{ width: 1, height: 36, background: C.border }} />
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: FONT }}>
+                <span style={{ fontSize: 11, color: C.textMuted }}>{sumSelection.size}セル選択</span>
+                <span style={{ fontSize: 14, fontWeight: 700, color: C.green, fontVariantNumeric: 'tabular-nums' }}>
+                  合計 {fmtYen(sumTotal)}
+                </span>
+                <button
+                  onClick={() => setSumSelection(new Map)}
+                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: C.textMuted, padding: '2px 6px', borderRadius: 4, fontSize: 13, lineHeight: '1' }}
+                  title="選択解除（Esc）"
+                >✕</button>
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

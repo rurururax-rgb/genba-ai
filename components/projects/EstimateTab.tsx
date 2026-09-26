@@ -932,6 +932,7 @@ function ItemRow({
   selected, onToggleSelect, anySelected,
   indent, onIndent, onUnindent,
   isGhost, saved,
+  sumSelected, onSumToggle,
 }: {
   item: EstimateItem; inGroup: boolean; isDragging: boolean
   dragHandleProps: DraggableProvidedDragHandleProps | null
@@ -940,6 +941,7 @@ function ItemRow({
   selected?: boolean; onToggleSelect?: (shift: boolean) => void; anySelected?: boolean
   indent?: number; onIndent?: () => void; onUnindent?: () => void
   isGhost?: boolean; saved?: boolean
+  sumSelected?: boolean; onSumToggle?: (value: number | null) => void
 }) {
   const gridCols = useContext(GridColsCtx)
   const [editField, setEditField] = useState<string | null>(null)
@@ -1259,20 +1261,25 @@ function ItemRow({
           fromPast={item.source === 'past_item' && item.selling_price != null} />
       </div>
 
-      {/* 金額（読み取り専用） */}
+      {/* 金額（読み取り専用・クリックで合計選択） */}
       <div style={{ display: 'flex', alignItems: 'center', paddingLeft: 4, paddingRight: 4, height: '100%' }}>
-        <div className="amount-cell" style={{
-          flex: 1, height: CELL_H,
-          border: `1px solid ${C.divider}`, borderRadius: 6,
-          padding: '0 10px',
-          display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
-          background: liveAmt != null ? '#F0FDF8' : '#FFF',
-          fontSize: 13, fontWeight: liveAmt != null ? 600 : undefined,
-          color: liveAmt != null ? C.green : C.textMuted,
-          fontStyle: liveAmt == null ? 'italic' : undefined,
-          opacity: liveAmt == null ? 0.55 : 1,
-          fontVariantNumeric: 'tabular-nums', fontFamily: FONT,
-        }}>
+        <div className="amount-cell"
+          onClick={() => liveAmt != null && onSumToggle?.(liveAmt)}
+          style={{
+            flex: 1, height: CELL_H,
+            border: sumSelected ? `2px solid ${C.accent}` : `1px solid ${C.divider}`,
+            borderRadius: 6,
+            padding: '0 10px',
+            display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+            background: sumSelected ? C.accentLight : liveAmt != null ? '#F0FDF8' : '#FFF',
+            fontSize: 13, fontWeight: liveAmt != null ? 600 : undefined,
+            color: liveAmt != null ? C.green : C.textMuted,
+            fontStyle: liveAmt == null ? 'italic' : undefined,
+            opacity: liveAmt == null ? 0.55 : 1,
+            fontVariantNumeric: 'tabular-nums', fontFamily: FONT,
+            cursor: liveAmt != null ? 'pointer' : undefined,
+            userSelect: 'none',
+          }}>
           {liveAmt != null ? `¥${fmt(liveAmt)}` : '─'}
         </div>
       </div>
@@ -1661,6 +1668,18 @@ export function EstimateTab({ projectId }: { projectId: string }) {
   const dragTabTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showSummaryDetail, setShowSummaryDetail] = useState(false)
   const [showSummaryBar, setShowSummaryBar] = useState(true)
+  // セル金額合計選択（読み取り専用セルのみ・Layer 1）key = item.id
+  const [sumSelection, setSumSelection] = useState<Map<string, number>>(new Map)
+  const sumSelRef = useRef<Map<string, number>>(new Map)
+  sumSelRef.current = sumSelection
+  const sumTotal = useMemo(() => { let t = 0; sumSelection.forEach(v => { t += v }); return t }, [sumSelection])
+
+  // ESC で合計選択クリア（編集中のキーハンドラが stopPropagation するため編集と競合しない）
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape' && sumSelRef.current.size > 0) setSumSelection(new Map) }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [])
 
   // activeGroupTab のグループが削除されたらリセット
   useEffect(() => {
@@ -3035,7 +3054,9 @@ export function EstimateTab({ projectId }: { projectId: string }) {
                                                   onIndent={() => setLocalIndent(p => ({ ...p, [item.id]: Math.min((p[item.id] ?? 0) + 1, 3) }))}
                                                   onUnindent={() => setLocalIndent(p => ({ ...p, [item.id]: Math.max((p[item.id] ?? 0) - 1, 0) }))}
                                                   isGhost={draggingId !== null && selectedIds.has(item.id) && item.id !== draggingId}
-                                                  saved={savedIds.has(item.id)} />
+                                                  saved={savedIds.has(item.id)}
+                                                  sumSelected={sumSelection.has(item.id)}
+                                                  onSumToggle={v => { if (v == null) return; setSumSelection(p => { const n = new Map(p); n.has(item.id) ? n.delete(item.id) : n.set(item.id, v); return n }) }} />
                                                 {nextPb && !is.isDragging && (
                                                   <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 30 }}>
                                                     <PageBreakRow pageNum={nextPb.pageNum} pageTotal={nextPb.pageTotal} pageCostTotal={nextPb.pageCostTotal} />
@@ -3131,7 +3152,9 @@ export function EstimateTab({ projectId }: { projectId: string }) {
                                   onIndent={() => setLocalIndent(p => ({ ...p, [item.id]: Math.min((p[item.id] ?? 0) + 1, 3) }))}
                                   onUnindent={() => setLocalIndent(p => ({ ...p, [item.id]: Math.max((p[item.id] ?? 0) - 1, 0) }))}
                                   isGhost={draggingId !== null && selectedIds.has(item.id) && item.id !== draggingId}
-                                  saved={savedIds.has(item.id)} />
+                                  saved={savedIds.has(item.id)}
+                                  sumSelected={sumSelection.has(item.id)}
+                                  onSumToggle={v => { if (v == null) return; setSumSelection(p => { const n = new Map(p); n.has(item.id) ? n.delete(item.id) : n.set(item.id, v); return n }) }} />
                               </div>
                             )}
                           </Draggable>
@@ -3149,6 +3172,30 @@ export function EstimateTab({ projectId }: { projectId: string }) {
           </div>
         </div>
 
+      {/* ── セル金額合計バー（選択時のみ表示） ── */}
+      {sumSelection.size > 0 && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '7px 16px',
+          borderTop: `1px solid ${C.accentTint}`,
+          background: C.accentLight,
+          flexShrink: 0,
+          fontSize: 13, fontFamily: FONT,
+        }}>
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={C.accentMid} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          <span style={{ color: C.textMuted, fontSize: 12 }}>{sumSelection.size}セル選択</span>
+          <span style={{ fontWeight: 700, color: C.green, fontVariantNumeric: 'tabular-nums' }}>
+            合計 ¥{fmt(sumTotal)}
+          </span>
+          <button
+            onClick={() => setSumSelection(new Map)}
+            style={{ marginLeft: 'auto', background: 'none', border: 'none', cursor: 'pointer', color: C.textMuted, padding: '2px 6px', borderRadius: 4, fontSize: 13, lineHeight: '1' }}
+            title="選択解除（Esc）"
+          >✕</button>
+        </div>
+      )}
 
       </div>
 
