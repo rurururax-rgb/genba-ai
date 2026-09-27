@@ -15,6 +15,7 @@ import {
   type DropResult, type DraggableProvidedDragHandleProps, type DragStart,
 } from '@hello-pangea/dnd'
 import { getClient } from '@/lib/supabase/client'
+import { DEFAULT_MARKUP_RATE, getEffectiveMarkupRate, resolveSellingPrice, type SellingPriceMode } from '@/lib/estimate/pricing'
 import { EstimateImportTab } from './EstimateImportTab'
 
 // ── 型定義 ────────────────────────────────────────────────
@@ -45,6 +46,8 @@ type EstimateItem = {
   line_event_id: string | null
   memo: string | null
   row_type: RowType
+  selling_price_mode: SellingPriceMode
+  markup_rate_override: number | null
 }
 
 type ItemPatch = {
@@ -58,6 +61,7 @@ type ItemPatch = {
   vendor_name?: string | null
   memo?: string | null
   row_type?: RowType
+  selling_price_mode?: SellingPriceMode
 }
 
 type RevisionHeader = {
@@ -1670,8 +1674,8 @@ export function EstimateTab({ projectId }: { projectId: string }) {
   const [creating,    setCreating]    = useState(false)
   const [addingRow,   setAddingRow]   = useState(false)
   const [deleting,    setDeleting]    = useState<Record<string, boolean>>({})
-  // 手動で単価を上書き済みのアイテムID（このセットに含まれる行は原価変更でも単価を自動更新しない）
-  const [manualSelling, setManualSelling] = useState<Set<string>>(new Set())
+  // 案件の掛け率（projects.markup_rate）。migration未適用環境ではDEFAULT_MARKUP_RATEにフォールバック
+  const [projectMarkupRate, setProjectMarkupRate] = useState<number>(DEFAULT_MARKUP_RATE)
   // 諸経費・端数値引（projects テーブルに保存）
   const [miscExpenseOverride, setMiscExpenseOverride] = useState<number | null>(null)
   const [roundingDiscount,    setRoundingDiscount]    = useState<number>(0)
@@ -1776,10 +1780,10 @@ export function EstimateTab({ projectId }: { projectId: string }) {
       supabase.from('estimate_groups').select('id,label,display_mode,sort_order')
         .eq('project_id', projectId).is('deleted_at', null).order('sort_order'),
       supabase.from('estimate_items')
-        .select('id,name,category,quantity,unit,selling_price,amount,retail_price,cost_price,vendor_name,group_id,sort_order,source,line_event_id,memo,row_type')
+        .select('id,name,category,quantity,unit,selling_price,amount,retail_price,cost_price,vendor_name,group_id,sort_order,source,line_event_id,memo,row_type,selling_price_mode,markup_rate_override')
         .eq('project_id', projectId).is('deleted_at', null).order('sort_order'),
       supabase.from('projects')
-        .select('misc_expense_override,rounding_discount')
+        .select('misc_expense_override,rounding_discount,markup_rate')
         .eq('id', projectId).single(),
     ]).then(([{ data: g, error: gErr }, { data: i, error: iErr }, { data: p }]) => {
       if (iErr) {
@@ -1793,8 +1797,10 @@ export function EstimateTab({ projectId }: { projectId: string }) {
       setGroups((g ?? []) as EstimateGroup[])
       setItems((i ?? []) as EstimateItem[])
       if (p) {
-        setMiscExpenseOverride((p as { misc_expense_override: number | null }).misc_expense_override ?? null)
-        setRoundingDiscount((p as { rounding_discount: number | null }).rounding_discount ?? 0)
+        const proj = p as { misc_expense_override: number | null; rounding_discount: number | null; markup_rate?: number }
+        setMiscExpenseOverride(proj.misc_expense_override ?? null)
+        setRoundingDiscount(proj.rounding_discount ?? 0)
+        setProjectMarkupRate(proj.markup_rate ?? DEFAULT_MARKUP_RATE)
       }
       hasLoadedRef.current = true
       setLoading(false)
@@ -2330,14 +2336,21 @@ export function EstimateTab({ projectId }: { projectId: string }) {
   async function handleSave(itemId: string, changes: ItemPatch) {
     let finalChanges: ItemPatch = { ...changes }
 
+    const item = items.find(i => i.id === itemId)
+    const currentMode: SellingPriceMode = item?.selling_price_mode ?? 'auto'
+
     if ('cost_price' in changes && changes.cost_price != null) {
-      // 手動上書きされていない限り selling_price を原価×1.45 で自動計算
-      if (!manualSelling.has(itemId)) {
-        finalChanges = { ...finalChanges, selling_price: Math.round(changes.cost_price * 1.45) }
+      if (currentMode === 'auto') {
+        const rate = getEffectiveMarkupRate(projectMarkupRate, item?.markup_rate_override)
+        const newSelling = resolveSellingPrice('auto', null, changes.cost_price, rate)
+        if (newSelling != null) {
+          finalChanges = { ...finalChanges, selling_price: newSelling }
+        }
       }
+      // manual mode: selling_price は変更しない
     } else if ('selling_price' in changes) {
-      // 手動で単価を編集 → 以降の原価変更でも上書きしない
-      setManualSelling(prev => new Set([...prev, itemId]))
+      // 売価を直接編集 → selling_price_mode を 'manual' に更新してDBへ永続化
+      finalChanges = { ...finalChanges, selling_price_mode: 'manual' }
     }
 
     // 楽観的更新でUIを即時反映
