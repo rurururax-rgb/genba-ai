@@ -91,5 +91,100 @@ export function markupToMarginRate(markupRate: number): number | null {
   return (markupRate - 1) / markupRate
 }
 
+/**
+ * 粗利率から掛け率へ変換する（markupToMarginRate の逆関数）。
+ * markup = 1 / (1 - margin)
+ *
+ * 丸めない。DB (markup_rate_override: NUMERIC) へそのまま保存することで、
+ * calculateSellingPrice(cost, markup) = Math.round(cost / (1 - margin)) が成立する。
+ * 例: margin 0.30 → 1.428571… → 原価100,000 の売価 142,857
+ *
+ * margin >= 1 や無効値は null を返す。
+ */
+export function marginRateToMarkup(marginRate: number): number | null {
+  if (!Number.isFinite(marginRate) || marginRate >= 1) return null
+  return 1 / (1 - marginRate)
+}
+
+/**
+ * 原価と売価から実効掛け率を逆算する（MANUAL 行の表示用）。
+ * cost が 0 以下 / 無効値なら null。
+ */
+export function deriveMarkupRate(
+  costPrice:    number | null | undefined,
+  sellingPrice: number | null | undefined,
+): number | null {
+  if (costPrice == null || sellingPrice == null) return null
+  if (!Number.isFinite(costPrice) || !Number.isFinite(sellingPrice)) return null
+  if (costPrice <= 0) return null
+  return sellingPrice / costPrice
+}
+
+/** UI の入力範囲（DB CHECK 制約 0.01〜9.99 と一致） */
+export const MIN_MARKUP_RATE = 0.01
+export const MAX_MARKUP_RATE = 9.99
+
+export function isValidMarkupRate(rate: number): boolean {
+  return Number.isFinite(rate) && rate >= MIN_MARKUP_RATE && rate <= MAX_MARKUP_RATE
+}
+
+/**
+ * 明細に保存する override 値を正規化する。
+ * 案件標準と同じ値なら null（= 案件標準に従う）として保存し、
+ * 「個別」表示が実質的な差のない行に付かないようにする。
+ */
+export function normalizeMarkupOverride(
+  rate:              number,
+  projectMarkupRate: number | null | undefined,
+): number | null {
+  const projRate = projectMarkupRate ?? DEFAULT_MARKUP_RATE
+  return Math.abs(rate - projRate) < 1e-9 ? null : rate
+}
+
+/**
+ * 明細の価格状態（UI 表示用）。
+ *
+ * 表示する掛け率・粗利率は常に「実際の原価と売価」から逆算した値。
+ * これにより MANUAL 行で override が売価に反映されていなくても、
+ * 画面上の 掛け率 / 粗利率 / 売価 が数学的に矛盾しない。
+ *
+ * - basis 'no_cost' : 原価未入力（または 0 以下）→ 掛け率・粗利率から売価を計算できない
+ * - basis 'manual'  : 売価はユーザーが直接決定
+ * - basis 'override': AUTO + 明細の個別掛け率
+ * - basis 'project' : AUTO + 案件標準掛け率
+ */
+export type PricingBasis = 'no_cost' | 'manual' | 'override' | 'project'
+
+export type ItemPricingState = {
+  basis:          PricingBasis
+  /** AUTO 時に適用される掛け率（override → 案件標準 → デフォルト） */
+  configuredRate: number
+  /** 実際の 売価 ÷ 原価。算出不可なら null */
+  actualMarkup:   number | null
+  /** 実際の (売価 - 原価) ÷ 売価。算出不可なら null */
+  actualMargin:   number | null
+}
+
+export function getItemPricingState(
+  item: {
+    cost_price:            number | null | undefined
+    selling_price:         number | null | undefined
+    selling_price_mode?:   SellingPriceMode | null
+    markup_rate_override?: number | null
+  },
+  projectMarkupRate: number | null | undefined,
+): ItemPricingState {
+  const configuredRate = getEffectiveMarkupRate(projectMarkupRate, item.markup_rate_override)
+  const actualMarkup   = deriveMarkupRate(item.cost_price, item.selling_price)
+  const actualMargin   = calculateGrossMarginRate(item.cost_price, item.selling_price)
+  const hasCost        = item.cost_price != null && Number.isFinite(item.cost_price) && item.cost_price > 0
+  const basis: PricingBasis =
+    !hasCost                                   ? 'no_cost'
+    : (item.selling_price_mode ?? 'auto') === 'manual' ? 'manual'
+    : item.markup_rate_override != null        ? 'override'
+    : 'project'
+  return { basis, configuredRate, actualMarkup, actualMargin }
+}
+
 /** selling_price の権威を表す型（DB の selling_price_mode 列と対応） */
 export type SellingPriceMode = 'auto' | 'manual'
