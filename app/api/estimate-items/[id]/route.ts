@@ -57,17 +57,18 @@ export async function PATCH(
 ) {
   const { id } = await params
   const body = (await req.json()) as {
-    quantity?:           number
-    selling_price?:      number | null
-    retail_price?:       number | null
-    name?:               string
-    unit?:               string
-    memo?:               string | null
-    cost_price?:         number | null
-    vendor_name?:        string | null
-    category?:           string | null
-    row_type?:           'item' | 'header' | 'note'
-    selling_price_mode?: 'auto' | 'manual'
+    quantity?:              number
+    selling_price?:         number | null
+    retail_price?:          number | null
+    name?:                  string
+    unit?:                  string
+    memo?:                  string | null
+    cost_price?:            number | null
+    vendor_name?:           string | null
+    category?:              string | null
+    row_type?:              'item' | 'header' | 'note'
+    selling_price_mode?:    'auto' | 'manual'
+    markup_rate_override?:  number | null
   }
   const supabase = await getServerClient()
 
@@ -85,7 +86,8 @@ export async function PATCH(
   if (body.vendor_name        !== undefined) patch.vendor_name        = body.vendor_name
   if (body.category           !== undefined) patch.category           = body.category
   if (body.row_type           !== undefined) patch.row_type           = body.row_type
-  if (body.selling_price_mode !== undefined) patch.selling_price_mode = body.selling_price_mode
+  if (body.selling_price_mode    !== undefined) patch.selling_price_mode    = body.selling_price_mode
+  if (body.markup_rate_override  !== undefined) patch.markup_rate_override  = body.markup_rate_override
 
   const { data, error } = await supabase
     .from('estimate_items')
