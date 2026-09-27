@@ -11,6 +11,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
 import type { ConfirmableChange } from '@/lib/ai/chat/types'
+import { calculateSellingPrice, DEFAULT_MARKUP_RATE } from '@/lib/estimate/pricing'
 
 // ── 書き込み許可フィールドのホワイトリスト ────────────────────────────────
 
@@ -68,28 +69,48 @@ export async function POST(req: NextRequest) {
       const rawProjectId = proposed.project_id as string | undefined
       if (!rawProjectId) return NextResponse.json({ error: 'project_id missing in proposed' }, { status: 400 })
 
+      // 案件掛け率を取得（column 未存在 / RLS ブロック時は DEFAULT_MARKUP_RATE にフォールバック）
+      const { data: projectData } = await supabase
+        .from('projects')
+        .select('markup_rate')
+        .eq('id', rawProjectId)
+        .single()
+      const rawRate = (projectData as { markup_rate?: number | null } | null)?.markup_rate
+      const markupRate: number = rawRate != null && rawRate > 0 ? rawRate : DEFAULT_MARKUP_RATE
+
       // ユーザーがこの project に属する company_id を持つかを RLS が検証する
       const safeFields = pickAllowed(proposed, ESTIMATE_ITEM_ALLOWED)
 
-      // 原価があるのに単価が未設定(null/0)の場合は cost_price × 1.45 で自動計算
-      const rawSelling   = safeFields.selling_price as number | null | undefined
-      const rawCost      = safeFields.cost_price    as number | null | undefined
-      const autoSelling  =
-        (rawSelling == null || rawSelling === 0) && rawCost != null && rawCost > 0
-          ? Math.round(rawCost * 1.45)
-          : rawSelling
+      // 売価モード決定:
+      //   AI が selling_price を明示 → MANUAL（提案値を尊重）
+      //   selling_price なし / 0 → AUTO（案件掛け率で計算）
+      const rawSelling = safeFields.selling_price as number | null | undefined
+      const rawCost    = safeFields.cost_price    as number | null | undefined
+      let finalSelling: number | null
+      let sellingPriceMode: 'auto' | 'manual'
+      if (rawSelling != null && rawSelling !== 0) {
+        finalSelling     = rawSelling
+        sellingPriceMode = 'manual'
+      } else if (rawCost != null && rawCost > 0) {
+        finalSelling     = calculateSellingPrice(rawCost, markupRate)
+        sellingPriceMode = 'auto'
+      } else {
+        finalSelling     = rawSelling ?? null
+        sellingPriceMode = 'auto'
+      }
 
       const { data, error } = await supabase
         .from('estimate_items')
         .insert({
           ...safeFields,
-          selling_price: autoSelling ?? null,
-          project_id: rawProjectId,
-          company_id: membership.company_id,
-          source:     'manual',
-          sort_order: 9999,
+          selling_price:      finalSelling,
+          selling_price_mode: sellingPriceMode,
+          project_id:         rawProjectId,
+          company_id:         membership.company_id,
+          source:             'manual',
+          sort_order:         9999,
         })
-        .select('id, name, quantity, unit, selling_price, amount, cost_price, vendor_name, memo, group_id')
+        .select('id, name, quantity, unit, selling_price, amount, cost_price, vendor_name, memo, group_id, selling_price_mode')
         .single()
 
       if (error) return NextResponse.json({ error: error.message }, { status: 500 })
@@ -107,29 +128,49 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'items is empty' }, { status: 400 })
       }
 
+      // 案件掛け率を1回だけ取得（全行共通）
+      const { data: projectData } = await supabase
+        .from('projects')
+        .select('markup_rate')
+        .eq('id', rawProjectId)
+        .single()
+      const rawRate = (projectData as { markup_rate?: number | null } | null)?.markup_rate
+      const markupRate: number = rawRate != null && rawRate > 0 ? rawRate : DEFAULT_MARKUP_RATE
+
       const rows = srcItems.map((item, idx) => {
-        const safe        = pickAllowed(item, ESTIMATE_ITEM_ALLOWED)
-        const rawSelling  = safe.selling_price as number | null | undefined
-        const rawCost     = safe.cost_price    as number | null | undefined
-        const autoSelling =
-          (rawSelling == null || rawSelling === 0) && rawCost != null && rawCost > 0
-            ? Math.round(rawCost * 1.45)
-            : rawSelling
+        const safe       = pickAllowed(item, ESTIMATE_ITEM_ALLOWED)
+        const rawSelling = safe.selling_price as number | null | undefined
+        const rawCost    = safe.cost_price    as number | null | undefined
+        // コピー元に selling_price が存在すれば MANUAL（価格を維持）
+        // なければ案件掛け率で AUTO 計算
+        let finalSelling: number | null
+        let sellingPriceMode: 'auto' | 'manual'
+        if (rawSelling != null && rawSelling !== 0) {
+          finalSelling     = rawSelling
+          sellingPriceMode = 'manual'
+        } else if (rawCost != null && rawCost > 0) {
+          finalSelling     = calculateSellingPrice(rawCost, markupRate)
+          sellingPriceMode = 'auto'
+        } else {
+          finalSelling     = rawSelling ?? null
+          sellingPriceMode = 'auto'
+        }
         return {
           ...safe,
-          selling_price: autoSelling ?? null,
-          project_id: rawProjectId,
-          company_id: membership.company_id,
-          group_id:   targetGroupId ?? null,
-          source:     'manual',
-          sort_order: (idx + 1) * 100,
+          selling_price:      finalSelling,
+          selling_price_mode: sellingPriceMode,
+          project_id:         rawProjectId,
+          company_id:         membership.company_id,
+          group_id:           targetGroupId ?? null,
+          source:             'manual',
+          sort_order:         (idx + 1) * 100,
         }
       })
 
       const { data, error } = await supabase
         .from('estimate_items')
         .insert(rows)
-        .select('id, name, quantity, unit, selling_price, amount')
+        .select('id, name, quantity, unit, selling_price, amount, selling_price_mode')
 
       if (error) return NextResponse.json({ error: error.message }, { status: 500 })
       return NextResponse.json({ ok: true, change_id: change.id, inserted_count: data?.length ?? 0, data })

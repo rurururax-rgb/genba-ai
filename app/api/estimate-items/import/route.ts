@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
+import { calculateSellingPrice, DEFAULT_MARKUP_RATE } from '@/lib/estimate/pricing'
 
 type ImportItem = {
   name: string
@@ -43,6 +44,15 @@ export async function POST(request: NextRequest) {
 
     const company_id = membership.company_id
 
+    // 案件掛け率を取得（column 未存在 / RLS ブロック時は DEFAULT_MARKUP_RATE にフォールバック）
+    const { data: projectData } = await supabase
+      .from('projects')
+      .select('markup_rate')
+      .eq('id', project_id)
+      .single()
+    const rawRate = (projectData as { markup_rate?: number | null } | null)?.markup_rate
+    const markupRate: number = rawRate != null && rawRate > 0 ? rawRate : DEFAULT_MARKUP_RATE
+
     // 挿入位置を決定: sort_order が指定されていればそれを使う。なければ末尾に追加。
     let baseOrder: number
     if (requestedSortOrder !== undefined) {
@@ -62,23 +72,35 @@ export async function POST(request: NextRequest) {
     const rows = items.map((item, i) => {
       const costPrice  = item.cost_price ?? null
       const rawSelling = item.selling_price ?? null
-      const sellingPrice =
-        (rawSelling == null || rawSelling === 0) && costPrice != null && costPrice > 0
-          ? Math.round(costPrice * 1.45)
-          : rawSelling
+      // 売価モード決定:
+      //   インポート元に selling_price が存在すれば MANUAL（仕入元価格を維持）
+      //   selling_price なし / 0 → AUTO（案件掛け率で計算）
+      let sellingPrice: number | null
+      let sellingPriceMode: 'auto' | 'manual'
+      if (rawSelling != null && rawSelling !== 0) {
+        sellingPrice     = rawSelling
+        sellingPriceMode = 'manual'
+      } else if (costPrice != null && costPrice > 0) {
+        sellingPrice     = calculateSellingPrice(costPrice, markupRate)
+        sellingPriceMode = 'auto'
+      } else {
+        sellingPrice     = rawSelling
+        sellingPriceMode = 'auto'
+      }
       return {
         project_id,
         company_id,
-        group_id:      group_id ?? null,
-        name:          item.name,
-        unit:          item.unit ?? '式',
-        quantity:      item.quantity ?? 1,
-        cost_price:    costPrice,
-        selling_price: sellingPrice,
-        memo:          item.memo ?? null,
-        vendor_name:   item.vendor_name ?? null,
-        source:        'import' as const,
-        sort_order:    baseOrder + i,
+        group_id:           group_id ?? null,
+        name:               item.name,
+        unit:               item.unit ?? '式',
+        quantity:           item.quantity ?? 1,
+        cost_price:         costPrice,
+        selling_price:      sellingPrice,
+        selling_price_mode: sellingPriceMode,
+        memo:               item.memo ?? null,
+        vendor_name:        item.vendor_name ?? null,
+        source:             'import' as const,
+        sort_order:         baseOrder + i,
       }
     })
 
