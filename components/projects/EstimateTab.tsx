@@ -15,7 +15,7 @@ import {
   type DropResult, type DraggableProvidedDragHandleProps, type DragStart,
 } from '@hello-pangea/dnd'
 import { getClient } from '@/lib/supabase/client'
-import { DEFAULT_MARKUP_RATE, getEffectiveMarkupRate, resolveSellingPrice, type SellingPriceMode } from '@/lib/estimate/pricing'
+import { DEFAULT_MARKUP_RATE, getEffectiveMarkupRate, markupToMarginRate, resolveSellingPrice, type SellingPriceMode } from '@/lib/estimate/pricing'
 import { EstimateImportTab } from './EstimateImportTab'
 
 // ── 型定義 ────────────────────────────────────────────────
@@ -1676,6 +1676,11 @@ export function EstimateTab({ projectId }: { projectId: string }) {
   const [deleting,    setDeleting]    = useState<Record<string, boolean>>({})
   // 案件の掛け率（projects.markup_rate）。migration未適用環境ではDEFAULT_MARKUP_RATEにフォールバック
   const [projectMarkupRate, setProjectMarkupRate] = useState<number>(DEFAULT_MARKUP_RATE)
+  // 掛け率変更ダイアログ
+  const [showMarkupDialog, setShowMarkupDialog] = useState(false)
+  const [markupDraft, setMarkupDraft] = useState<string>('')
+  const [markupApplying, setMarkupApplying] = useState(false)
+  const [markupError, setMarkupError] = useState<string | null>(null)
   // 諸経費・端数値引（projects テーブルに保存）
   const [miscExpenseOverride, setMiscExpenseOverride] = useState<number | null>(null)
   const [roundingDiscount,    setRoundingDiscount]    = useState<number>(0)
@@ -2376,6 +2381,31 @@ export function EstimateTab({ projectId }: { projectId: string }) {
     } finally { setDeleting(p => { const n = { ...p }; delete n[itemId]; return n }) }
   }
 
+  async function handleApplyMarkupRate() {
+    const newRate = parseFloat(markupDraft)
+    if (!Number.isFinite(newRate) || newRate < 0.01 || newRate > 9.99) {
+      setMarkupError('掛け率は 0.01〜9.99 の範囲で入力してください。')
+      return
+    }
+    setMarkupApplying(true)
+    setMarkupError(null)
+    try {
+      const res = await fetch(`/api/projects/${projectId}/apply-markup-rate`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ new_rate: newRate }),
+      })
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({})) as { error?: string }
+        setMarkupError(json.error ?? '変更に失敗しました。')
+        return
+      }
+      setShowMarkupDialog(false)
+      reload()
+    } finally {
+      setMarkupApplying(false)
+    }
+  }
+
   async function saveMiscExpense(value: number | null) {
     setMiscExpenseOverride(value)
     await fetch(`/api/projects/${projectId}`, {
@@ -2852,6 +2882,33 @@ export function EstimateTab({ projectId }: { projectId: string }) {
                 `= ¥${fmt(itemCostTotal)} + ¥${fmt(miscExpenseCost)}`,
               ] : undefined}
             />
+
+            {/* ── 案件標準掛け率バッジ ── */}
+            <button
+              onClick={() => {
+                setMarkupDraft(projectMarkupRate.toString())
+                setMarkupError(null)
+                setShowMarkupDialog(true)
+              }}
+              title="案件標準掛け率を変更"
+              style={{
+                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2,
+                padding: '4px 10px', borderRadius: 7, cursor: 'pointer', flexShrink: 0,
+                border: `1px solid ${C.accentTint}`,
+                background: C.accentLight,
+                fontFamily: FONT,
+              }}
+            >
+              <span style={{ fontSize: 9, color: C.textMuted, letterSpacing: '0.04em', lineHeight: 1 }}>
+                案件掛け率
+              </span>
+              <span style={{ fontSize: 13, fontWeight: 700, color: C.green, fontVariantNumeric: 'tabular-nums', lineHeight: 1.2 }}>
+                {projectMarkupRate.toFixed(2)}
+              </span>
+              <span style={{ fontSize: 9, color: C.textMuted, lineHeight: 1 }}>
+                粗利{((markupToMarginRate(projectMarkupRate) ?? 0) * 100).toFixed(1)}%
+              </span>
+            </button>
           </div>
 
           {/* 詳細行（諸経費・端数値引き編集）展開時のみ */}
@@ -3405,6 +3462,139 @@ export function EstimateTab({ projectId }: { projectId: string }) {
           </div>
         </div>
       </div>,
+      document.body
+    )}
+
+    {/* ── 案件標準掛け率変更ダイアログ ── */}
+    {showMarkupDialog && createPortal(
+      (() => {
+        const draftRate   = parseFloat(markupDraft)
+        const draftValid  = Number.isFinite(draftRate) && draftRate >= 0.01 && draftRate <= 9.99
+        const draftMargin = draftValid ? markupToMarginRate(draftRate) : null
+        const curMargin   = markupToMarginRate(projectMarkupRate)
+        const changed     = draftValid && draftRate !== projectMarkupRate
+        const autoCount   = items.filter(i =>
+          i.row_type === 'item' &&
+          (i.selling_price_mode ?? 'auto') === 'auto' &&
+          i.markup_rate_override == null &&
+          i.cost_price != null
+        ).length
+        const manualCount = items.filter(i =>
+          i.row_type === 'item' && (
+            i.selling_price_mode === 'manual' ||
+            i.markup_rate_override != null
+          )
+        ).length
+
+        return (
+          <div
+            style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.35)', zIndex: 9000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+            onClick={e => { if (e.target === e.currentTarget && !markupApplying) setShowMarkupDialog(false) }}
+          >
+            <div style={{ background: '#fff', borderRadius: 14, padding: '28px 28px 24px', width: 380, boxShadow: '0 8px 40px rgba(26,35,50,0.18)', fontFamily: FONT }}>
+              <h2 style={{ fontSize: 16, fontWeight: 700, color: C.text, margin: '0 0 4px' }}>
+                案件標準掛け率を変更
+              </h2>
+              <p style={{ fontSize: 12, color: C.textMuted, margin: '0 0 20px', lineHeight: 1.6 }}>
+                自動計算モードの明細に適用される掛け率です。
+              </p>
+
+              {/* 現在値 */}
+              <div style={{ background: C.accentLight, borderRadius: 8, padding: '10px 14px', marginBottom: 16, display: 'flex', gap: 20, alignItems: 'center' }}>
+                <div>
+                  <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 2 }}>現在</div>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: C.green, fontVariantNumeric: 'tabular-nums' }}>
+                    {projectMarkupRate.toFixed(2)}
+                  </div>
+                  <div style={{ fontSize: 11, color: C.textMuted }}>
+                    粗利 {curMargin != null ? `${(curMargin * 100).toFixed(1)}%` : '─'}
+                  </div>
+                </div>
+                {changed && (
+                  <>
+                    <span style={{ fontSize: 18, color: C.textMuted }}>→</span>
+                    <div>
+                      <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 2 }}>変更後</div>
+                      <div style={{ fontSize: 20, fontWeight: 700, color: '#1D4ED8', fontVariantNumeric: 'tabular-nums' }}>
+                        {draftRate.toFixed(2)}
+                      </div>
+                      <div style={{ fontSize: 11, color: '#1D4ED8' }}>
+                        粗利 {draftMargin != null ? `${(draftMargin * 100).toFixed(1)}%` : '─'}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* 入力 */}
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ fontSize: 11, fontWeight: 600, color: C.textSub, display: 'block', marginBottom: 6 }}>
+                  新しい掛け率（0.01〜9.99）
+                </label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Input
+                    inputSize="compact"
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    max="9.99"
+                    value={markupDraft}
+                    onChange={e => { setMarkupDraft(e.target.value); setMarkupError(null) }}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter' && !e.nativeEvent.isComposing && draftValid && !markupApplying)
+                        handleApplyMarkupRate()
+                    }}
+                    autoFocus
+                    className="w-28"
+                    aria-label="新しい掛け率"
+                  />
+                  {draftValid && (
+                    <span style={{ fontSize: 12, color: C.textSub }}>
+                      → 粗利 {draftMargin != null ? `${(draftMargin * 100).toFixed(1)}%` : '─'}
+                    </span>
+                  )}
+                </div>
+                {markupError && (
+                  <p style={{ fontSize: 11, color: C.red, margin: '6px 0 0' }}>{markupError}</p>
+                )}
+              </div>
+
+              {/* 影響範囲 */}
+              <div style={{ background: '#F8F9FA', borderRadius: 7, padding: '10px 14px', marginBottom: 20, fontSize: 12 }}>
+                <div style={{ color: C.green, fontWeight: 600, marginBottom: 4 }}>
+                  自動計算の明細 {autoCount} 件の売価が更新されます
+                </div>
+                {manualCount > 0 && (
+                  <div style={{ color: C.textMuted }}>
+                    手動設定・個別override の明細 {manualCount} 件は変更対象外
+                  </div>
+                )}
+              </div>
+
+              <div style={{ display: 'flex', gap: 10 }}>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  onClick={() => setShowMarkupDialog(false)}
+                  disabled={markupApplying}
+                  className="flex-1"
+                >
+                  キャンセル
+                </Button>
+                <Button
+                  type="button"
+                  variant="primary"
+                  onClick={handleApplyMarkupRate}
+                  disabled={!draftValid || markupApplying}
+                  className="flex-[2]"
+                >
+                  {markupApplying ? '更新中…' : '確定して更新'}
+                </Button>
+              </div>
+            </div>
+          </div>
+        )
+      })(),
       document.body
     )}
 
