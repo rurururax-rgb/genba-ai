@@ -40,7 +40,7 @@ export function ProjectMarkupDialog({
   const changed = draft.rate != null && Math.abs(draft.rate - currentRate) > 1e-9
 
   async function submit() {
-    if (draft.rate == null) { setError(RATE_RANGE_ERROR); return }
+    if (draft.rate == null) { setError(draft.invalid ? null : RATE_RANGE_ERROR); return }
     if (!changed || applying) return
     setApplying(true); setError(null)
     try {
@@ -56,7 +56,7 @@ export function ProjectMarkupDialog({
       <div style={{ fontSize: 20, fontWeight: 700, color, fontVariantNumeric: 'tabular-nums' }}>
         粗利 {fmtMarginPct(markupToMarginRate(rate))}
       </div>
-      <div style={{ fontSize: 11, color: T.textMuted, fontVariantNumeric: 'tabular-nums' }}>掛け率 ×{fmtMarkup(rate)}</div>
+      <div style={{ fontSize: 11, color: T.textMuted, fontVariantNumeric: 'tabular-nums' }}>掛け率 {fmtMarkup(rate)}</div>
     </div>
   )
 

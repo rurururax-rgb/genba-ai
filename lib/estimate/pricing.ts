@@ -129,16 +129,30 @@ export function isValidMarkupRate(rate: number): boolean {
 }
 
 /**
+ * 画面表示上「同じ掛け率」と見なせるか。
+ * 掛け率（小数2桁）と粗利率（0.1%単位）の表示がどちらも一致すれば同じとする。
+ * 例: 粗利31%入力 → ×1.4493 は、案件標準 ×1.45（粗利31.0%）と同じ
+ */
+export function isSameDisplayedRate(a: number, b: number): boolean {
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return false
+  if (Math.abs(a - b) < 1e-9) return true
+  const ma = markupToMarginRate(a)
+  const mb = markupToMarginRate(b)
+  if (ma == null || mb == null) return false
+  return Math.round(a * 100) === Math.round(b * 100) && Math.round(ma * 1000) === Math.round(mb * 1000)
+}
+
+/**
  * 明細に保存する override 値を正規化する。
- * 案件標準と同じ値なら null（= 案件標準に従う）として保存し、
- * 「個別」表示が実質的な差のない行に付かないようにする。
+ * 案件標準と（表示上）同じ値なら null（= 案件標準に従う）として保存する。
+ * 掛け率から入力しても粗利率から入力しても、同じ見た目の値なら同じ状態になる。
  */
 export function normalizeMarkupOverride(
   rate:              number,
   projectMarkupRate: number | null | undefined,
 ): number | null {
   const projRate = projectMarkupRate ?? DEFAULT_MARKUP_RATE
-  return Math.abs(rate - projRate) < 1e-9 ? null : rate
+  return isSameDisplayedRate(rate, projRate) ? null : rate
 }
 
 /**

@@ -43,33 +43,53 @@ const yen = (v: number) => `¥${v.toLocaleString('ja-JP')}`
 export const fmtMarkup = (rate: number) => rate.toFixed(2)
 export const fmtMarginPct = (margin: number | null) => margin != null ? `${(margin * 100).toFixed(1)}%` : '─'
 
-export const RATE_RANGE_ERROR = '掛け率は 0.01〜9.99（粗利率は 89.9% 以下）の範囲で入力してください。'
+export const RATE_RANGE_ERROR = '粗利率（89.9% 以下）または掛け率（0.01〜9.99）を入力してください。'
 
 // ── 掛け率 ⇄ 粗利率 連動入力 ─────────────────────────────────
 
 /**
  * 掛け率・粗利率のどちらを編集しても、もう一方と rate（保存する掛け率）が追従する。
  * rate は丸めない実数（粗利率入力時は 1 / (1 - margin)）。
+ * 計算できない入力のときは、もう一方の欄を空にして「古い値が隣に残る」矛盾表示を防ぐ。
  */
 export function useLinkedRateDraft(initialRate: number) {
   const [rate,       setRate]       = useState<number | null>(initialRate)
   const [markupText, setMarkupText] = useState(fmtMarkup(initialRate))
   const [marginText, setMarginText] = useState(marginTextOf(initialRate))
+  const [invalid,    setInvalid]    = useState<string | null>(null)
 
   function editMarkup(text: string) {
     setMarkupText(text)
-    const r = parseFloat(text)
-    if (isValidMarkupRate(r)) { setRate(r); setMarginText(marginTextOf(r)) }
-    else setRate(null)
+    const r = parseRateInput(text)
+    const reason = r == null ? (text.trim() === '' ? null : '数値を入力してください')
+      : isValidMarkupRate(r) ? null : '掛け率は 0.01〜9.99 で入力してください'
+    if (r != null && reason == null) { setRate(r); setMarginText(marginTextOf(r)); setInvalid(null) }
+    else { setRate(null); setMarginText(''); setInvalid(reason) }
   }
   function editMargin(text: string) {
     setMarginText(text)
-    const p = parseFloat(text)
-    const r = Number.isFinite(p) ? marginRateToMarkup(p / 100) : null
-    if (r != null && isValidMarkupRate(r)) { setRate(r); setMarkupText(fmtMarkup(r)) }
-    else setRate(null)
+    const p = parseRateInput(text)
+    const r = p != null ? marginRateToMarkup(p / 100) : null
+    const reason = p == null ? (text.trim() === '' ? null : '数値を入力してください')
+      : p >= 100 ? '粗利率 100% 以上では単価を計算できません'
+      : r == null || !isValidMarkupRate(r) ? (p > 0 ? '粗利率は 89.9% 以下で入力してください' : '粗利率が低すぎます（掛け率 0.01 未満）')
+      : null
+    if (r != null && reason == null) { setRate(r); setMarkupText(fmtMarkup(r)); setInvalid(null) }
+    else { setRate(null); setMarkupText(''); setInvalid(reason) }
   }
-  return { rate, markupText, marginText, editMarkup, editMargin }
+  return { rate, markupText, marginText, invalid, editMarkup, editMargin }
+}
+
+/** 全角数字・全角マイナス・長音符・「%」混じりの入力も数値として解釈する（IME入力対策） */
+export function parseRateInput(text: string): number | null {
+  const t = text
+    .replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
+    .replace(/[．。]/g, '.')
+    .replace(/[−－ー‐]/g, '-')
+    .replace(/[%％×xX\s]/g, '')
+  if (t === '' || t === '-' || t === '.') return null
+  const n = Number(t)
+  return Number.isFinite(n) ? n : null
 }
 
 function marginTextOf(rate: number): string {
@@ -92,6 +112,7 @@ export function LinkedRateFields({
   }
   const label: React.CSSProperties = { fontSize: 11, fontWeight: 600, color: T.textSub, display: 'block', marginBottom: 4 }
   return (
+    <div>
     <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8 }}>
       <div style={{ flex: 1 }}>
         <label style={label}>粗利率</label>
@@ -126,6 +147,10 @@ export function LinkedRateFields({
           />
         </div>
       </div>
+      </div>
+      {draft.invalid && (
+        <p role="alert" style={{ fontSize: 11, color: T.red, margin: '6px 0 0', lineHeight: 1.5 }}>{draft.invalid}</p>
+      )}
     </div>
   )
 }
@@ -151,9 +176,10 @@ export function MarginCell({
     )
   }
 
+  // セルには「実際の原価・単価から計算した粗利率」だけを出す。
+  // 計算方法（案件標準 / この明細だけ / 手入力）は popover 内で表示する
   const margin = state.actualMargin
   const warn   = margin != null && margin < MARGIN_WARN
-  const tag    = state.basis === 'override' ? '個別' : state.basis === 'manual' ? '手入力' : null
 
   return (
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', height: '100%', paddingRight: 4 }}>
@@ -162,7 +188,7 @@ export function MarginCell({
         onClick={e => { e.stopPropagation(); onOpen(e.currentTarget.getBoundingClientRect()) }}
         onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
         title="クリックして粗利率・掛け率を調整"
-        aria-label={`粗利率 ${fmtMarginPct(margin)}${tag ? `（${tag}）` : ''}。クリックして調整`}
+        aria-label={`粗利率 ${fmtMarginPct(margin)}。クリックして調整`}
         style={{
           display: 'flex', alignItems: 'center', gap: 3,
           height: 32, padding: '0 4px', borderRadius: 8,
@@ -172,17 +198,6 @@ export function MarginCell({
           transition: 'border-color 0.1s, background 0.1s',
         }}
       >
-        {tag && (
-          <span style={{
-            // 個別は目立たせる（少数・意図的な設定）。手入力は既存データの大半を占めるため控えめに
-            fontSize: 9, lineHeight: 1.4, padding: '0 3px', borderRadius: 3,
-            fontWeight: state.basis === 'override' ? 700 : 500,
-            color:      state.basis === 'override' ? T.blue   : T.textMuted,
-            background: state.basis === 'override' ? T.blueBg : 'transparent',
-          }}>
-            {tag}
-          </span>
-        )}
         <span style={{
           padding: '3px 5px', borderRadius: 20,
           fontSize: 11, fontWeight: 700, fontVariantNumeric: 'tabular-nums',
@@ -220,6 +235,11 @@ export function ItemPricingPopover({
   const nextSelling = draft.rate != null ? calculateSellingPrice(costPrice, draft.rate) : null
   const changed     = nextSelling != null && nextSelling !== sellingPrice
   const projMargin  = markupToMarginRate(projectMarkupRate)
+  // いまの計算方法（DB の selling_price_mode / markup_rate_override を利用者の言葉で説明する）
+  const modeLabel =
+    isManual                     ? '単価を手入力（原価を変えても単価は変わりません）'
+    : state.basis === 'override' ? `この明細だけ 粗利 ${fmtMarginPct(markupToMarginRate(state.configuredRate))}（掛け率 ${fmtMarkup(state.configuredRate)}）で自動計算`
+    : '案件標準で自動計算'
 
   // 行は楽観的更新で即時反映されるため、保存完了を待たずに閉じる（古いプレビューを見せない）
   function apply(rate: number | null) {
@@ -229,13 +249,13 @@ export function ItemPricingPopover({
     void onApply(rate)
   }
   function submit() {
-    if (draft.rate == null) { setError(RATE_RANGE_ERROR); return }
+    if (draft.rate == null) { setError(draft.invalid ? null : RATE_RANGE_ERROR); return }
     setError(null)
     apply(draft.rate)
   }
 
   const W = 300
-  const H = 330
+  const H = 360
   const top  = anchor.bottom + 6 + H > window.innerHeight ? Math.max(8, anchor.top - H - 6) : anchor.bottom + 6
   const left = Math.min(Math.max(8, anchor.right - W), window.innerWidth - W - 8)
 
@@ -265,8 +285,11 @@ export function ItemPricingPopover({
           <div style={row}>
             <span style={{ color: T.textMuted }}>案件標準</span>
             <span style={{ color: T.textSub, fontVariantNumeric: 'tabular-nums' }}>
-              粗利 {fmtMarginPct(projMargin)}（×{fmtMarkup(projectMarkupRate)}）
+              粗利 {fmtMarginPct(projMargin)}（掛け率 {fmtMarkup(projectMarkupRate)}）
             </span>
+          </div>
+          <div style={{ fontSize: 11, color: T.textSub, lineHeight: 1.5, marginTop: 2 }}>
+            <span style={{ color: T.textMuted }}>いまの計算：</span>{modeLabel}
           </div>
         </div>
 
@@ -294,7 +317,7 @@ export function ItemPricingPopover({
           </div>
           {isManual && (
             <p style={{ fontSize: 10, color: T.textMuted, margin: '2px 0 0', lineHeight: 1.5 }}>
-              いまの単価は手入力です。適用すると原価からの自動計算に切り替わります。
+              適用すると、原価からの自動計算に切り替わります。
             </p>
           )}
         </div>
