@@ -1383,9 +1383,10 @@ function ItemRow({
                 e.stopPropagation()
                 setMemoAnchor((e.currentTarget as HTMLElement).closest('.edit-cell')!.getBoundingClientRect())
               }}
+              // 社内メモ本文はセル・ツールチップには出さない（本文は備考パネルを開いたときだけ）
               title={[
                 item.memo ? `お客様向け備考: ${item.memo}` : null,
-                item.internal_memo ? `社内メモ（お客様には表示されません）: ${item.internal_memo}` : null,
+                item.internal_memo ? '社内メモあり（クリックで確認）' : null,
               ].filter(Boolean).join('\n') || '備考を入力'}
               aria-label="備考を編集"
               style={{ flex: 1, minWidth: 0, height: '100%', display: 'flex', alignItems: 'center', gap: 4, padding: '0 8px', border: 'none', background: 'transparent', cursor: 'pointer', fontFamily: FONT, fontSize: 12, textAlign: 'left' }}
@@ -1393,10 +1394,10 @@ function ItemRow({
               {item.memo ? (
                 <span style={{ flex: 1, minWidth: 0, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.memo}</span>
               ) : item.internal_memo ? (
-                // お客様向け備考が空で社内メモだけある行：鍵＋灰色で「お客様には出ない情報」と分かるように表示
-                <span style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 4, color: C.textMuted, overflow: 'hidden' }}>
+                // お客様向け備考が空で社内メモだけある行：本文は出さず「社内メモあり」の状態表示のみ
+                <span style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 4, color: C.textMuted, fontSize: 11, overflow: 'hidden', whiteSpace: 'nowrap' }}>
                   <LockIcon size={11} color={C.textMuted} />
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.internal_memo}</span>
+                  社内メモあり
                 </span>
               ) : (
                 <span style={{ flex: 1, color: C.textMuted, fontStyle: 'italic', opacity: 0.55 }}>─</span>
