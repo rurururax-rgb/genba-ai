@@ -8,7 +8,10 @@ type ImportItem = {
   unit: string | null
   cost_price: number | null
   selling_price?: number | null
-  memo: string | null
+  /** 元見積書の備考（社内メモとして保存する） */
+  internal_memo?: string | null
+  /** @deprecated 旧クライアント互換。受け取っても社内メモとして扱う（お客様向け備考には入れない） */
+  memo?: string | null
   vendor_name?: string | null
 }
 
@@ -22,6 +25,9 @@ type RequestBody = {
 // POST /api/estimate-items/import
 // 仕入れ見積書からインポートした項目を estimate_items に追加する。
 // line_event_id 不要・source='import'。
+//
+// 元見積書の備考欄には見積No.・社内管理番号・担当者メモなど、お客様に見せない情報が含まれるため、
+// 取込時の備考は必ず internal_memo（社内メモ）に保存し、memo（お客様向け備考）には書き込まない。
 export async function POST(request: NextRequest) {
   try {
     const body = (await request.json()) as RequestBody
@@ -97,7 +103,8 @@ export async function POST(request: NextRequest) {
         cost_price:         costPrice,
         selling_price:      sellingPrice,
         selling_price_mode: sellingPriceMode,
-        memo:               item.memo ?? null,
+        // お客様向け備考（memo）は空のまま。取込元の備考は社内メモへ（安全側）
+        internal_memo:      (item.internal_memo ?? item.memo)?.trim() || null,
         vendor_name:        item.vendor_name ?? null,
         source:             'import' as const,
         sort_order:         baseOrder + i,
@@ -107,6 +114,10 @@ export async function POST(request: NextRequest) {
     const { error } = await supabase.from('estimate_items').insert(rows)
     if (error) {
       console.error('[estimate-items/import] insert error:', error.message)
+      // 42703 = undefined_column（internal_memo の migration 未適用）。備考をお客様向けへ回避させず、取込自体を止める
+      if (error.code === '42703') {
+        return NextResponse.json({ error: '社内メモ欄のデータベース更新が未適用のため取り込めません。管理者に連絡してください。' }, { status: 500 })
+      }
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
 

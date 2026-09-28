@@ -159,7 +159,7 @@ export function EstimateImportTab({ projectId }: Props) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           project_id: projectId,
-          items: [{ name: row.name, quantity: row.quantity, unit: row.unit, cost_price: row.cost_price, vendor_name: row.vendor_name || null, memo: row.memo || null }],
+          items: [{ name: row.name, quantity: row.quantity, unit: row.unit, cost_price: row.cost_price, vendor_name: row.vendor_name || null, internal_memo: row.memo || null }],
         }),
       })
       if (res.ok) {
@@ -185,7 +185,7 @@ export function EstimateImportTab({ projectId }: Props) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           project_id: projectId,
-          items: rows.map(r => ({ name: r.name, quantity: r.quantity, unit: r.unit, cost_price: r.cost_price, vendor_name: r.vendor_name || null, memo: r.memo || null })),
+          items: rows.map(r => ({ name: r.name, quantity: r.quantity, unit: r.unit, cost_price: r.cost_price, vendor_name: r.vendor_name || null, internal_memo: r.memo || null })),
         }),
       })
       if (res.ok) {
@@ -540,16 +540,17 @@ function ItemCard({ row, removing, adding, onAdd }: {
             />
           )}
 
-          {/* 備考 */}
+          {/* 元見積書の備考 → 取込後は「社内メモ」（お客様向け見積書には出ない） */}
           {row.memo && (
             <MetaChip
               icon={
-                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                  <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
-                  <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <rect x="4" y="11" width="16" height="10" rx="2"/>
+                  <path d="M8 11V7a4 4 0 018 0v4"/>
                 </svg>
               }
-              label={row.memo}
+              label={`社内メモ: ${row.memo}`}
+              title={`社内メモとして取り込みます（お客様には表示されません）\n${row.memo}`}
               color={G.textSec}
             />
           )}
@@ -595,11 +596,11 @@ function ItemCard({ row, removing, adding, onAdd }: {
   )
 }
 
-function MetaChip({ icon, label, color, bg }: {
-  icon: React.ReactNode; label: string; color: string; bg?: string
+function MetaChip({ icon, label, color, bg, title }: {
+  icon: React.ReactNode; label: string; color: string; bg?: string; title?: string
 }) {
   return (
-    <div style={{
+    <div title={title} style={{
       display: 'inline-flex', alignItems: 'center', gap: 4,
       padding: bg ? '2px 7px' : '0',
       borderRadius: bg ? 20 : 0,

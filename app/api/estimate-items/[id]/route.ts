@@ -69,6 +69,7 @@ export async function PATCH(
     row_type?:              'item' | 'header' | 'note'
     selling_price_mode?:    'auto' | 'manual'
     markup_rate_override?:  number | null
+    internal_memo?:         string | null
   }
   const supabase = await getServerClient()
 
@@ -88,13 +89,14 @@ export async function PATCH(
   if (body.row_type           !== undefined) patch.row_type           = body.row_type
   if (body.selling_price_mode    !== undefined) patch.selling_price_mode    = body.selling_price_mode
   if (body.markup_rate_override  !== undefined) patch.markup_rate_override  = body.markup_rate_override
+  if (body.internal_memo         !== undefined) patch.internal_memo         = body.internal_memo
 
   const { data, error } = await supabase
     .from('estimate_items')
     .update(patch)
     .eq('id', id)
     .is('deleted_at', null)
-    .select('id, name, quantity, unit, selling_price, amount, retail_price, cost_price, vendor_name, category, source, line_event_id, memo, row_type, selling_price_mode, markup_rate_override')
+    .select('id, name, quantity, unit, selling_price, amount, retail_price, cost_price, vendor_name, category, source, line_event_id, memo, internal_memo, row_type, selling_price_mode, markup_rate_override')
     .single()
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })

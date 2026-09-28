@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
-import { fillTemplateV2, type FillInputV2, type FillGroupV2 } from '@/lib/excel/fill-template-v2'
+import { fillTemplateV2 } from '@/lib/excel/fill-template-v2'
+import { buildEstimateExcelInput } from '@/lib/excel/estimate-excel-input'
+import { CUSTOMER_ESTIMATE_ITEM_COLUMNS, toCustomerEstimateItems } from '@/lib/estimate/customer-output'
 
 export async function GET(
   _req: NextRequest,
@@ -41,49 +43,22 @@ export async function GET(
   if (groupsErr) return NextResponse.json({ error: groupsErr.message }, { status: 500 })
 
   // 見積項目取得
-  const { data: items, error: itemsErr } = await supabase
+  // お客様に渡す書類なので、許可リスト（CUSTOMER_ESTIMATE_ITEM_COLUMNS）の列だけを取得し、
+  // toCustomerEstimateItems() を通す。社内メモ（internal_memo）・原価・業者名は出力しない
+  const { data: rawItems, error: itemsErr } = await supabase
     .from('estimate_items')
-    .select('id, name, quantity, unit, selling_price, amount, group_id, sort_order, memo')
+    .select(CUSTOMER_ESTIMATE_ITEM_COLUMNS)
     .eq('project_id', projectId)
     .is('deleted_at', null)
     .order('sort_order')
 
   if (itemsErr) return NextResponse.json({ error: itemsErr.message }, { status: 500 })
+  const items = toCustomerEstimateItems(rawItems as Record<string, unknown>[] | null)
   if (!items?.length) {
     return NextResponse.json({ error: '見積項目がありません' }, { status: 400 })
   }
 
-  // FillInputV2 を構築
-  const fillGroups: FillGroupV2[] = (groups ?? []).map(g => ({
-    label:        g.label || '（グループ名未設定）',
-    display_mode: g.display_mode as 'detailed' | 'lump_sum',
-    sort_order:   g.sort_order,
-    items:        items
-      .filter(i => i.group_id === g.id)
-      .sort((a, b) => a.sort_order - b.sort_order)
-      .map(i => ({
-        name:          i.name,
-        quantity:      i.quantity,
-        unit:          i.unit,
-        selling_price: i.selling_price,
-        amount:        i.amount,
-        memo:          i.memo ?? null,
-      })),
-  }))
-
-  const ungrouped = items
-    .filter(i => !i.group_id)
-    .map(i => ({
-      name:          i.name,
-      quantity:      i.quantity,
-      unit:          i.unit,
-      selling_price: i.selling_price,
-      amount:        i.amount,
-      memo:          i.memo ?? null,
-      sort_order:    i.sort_order,
-    }))
-
-  const fillInput: FillInputV2 = { groups: fillGroups, ungrouped, tax_rate: taxRate }
+  const fillInput = buildEstimateExcelInput(groups ?? [], items, taxRate)
 
   let result
   try {

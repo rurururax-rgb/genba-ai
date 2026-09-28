@@ -12,10 +12,13 @@ export function EstimateFixture() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '6px 12px', background: '#FEF3C7', color: '#92400E', fontSize: 12 }}>
         <strong>QA FIXTURE</strong>
         <span>本番DBには接続しません（書き込みは sessionStorage 上の Fixture に対して行われます）</span>
+        <a href="/qa/estimate/document" style={{ marginLeft: 'auto', color: '#92400E', textDecoration: 'underline' }}>
+          見積書プレビュー（Fixture）
+        </a>
         <button
           type="button"
           onClick={() => { resetFixture(); window.location.reload() }}
-          style={{ marginLeft: 'auto', border: '1px solid #92400E', borderRadius: 6, padding: '2px 10px', background: '#fff', cursor: 'pointer' }}
+          style={{ border: '1px solid #92400E', borderRadius: 6, padding: '2px 10px', background: '#fff', cursor: 'pointer' }}
         >
           初期データに戻す
         </button>
