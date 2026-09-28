@@ -1750,14 +1750,24 @@ export function EstimateTab({ projectId }: { projectId: string }) {
   const sumSelKeys = useMemo(() => new Set(sumSelection.keys()), [sumSelection])
   const sumTotal = useMemo(() => { let t = 0; sumSelection.forEach(v => { t += v }); return t }, [sumSelection])
 
-  // ESC で合計選択クリア（編集中のキーハンドラが stopPropagation するため編集と競合しない）
-  useEffect(() => {
-    const h = (e: KeyboardEvent) => { if (e.key === 'Escape' && sumSelRef.current.size > 0) setSumSelection(new Map) }
-    document.addEventListener('keydown', h)
-    return () => document.removeEventListener('keydown', h)
+  // 合計モードの終了はここに一本化する（✕ボタン・Esc）。
+  //   sumMode        … 上部「∑ 合計」ボタンの active 表示の唯一の根拠
+  //   sumSelection   … 右下合計バーの表示根拠（size > 0 で表示）
+  // 以前は ✕ / Esc が sumSelection だけをクリアしていたため、バーは消えても
+  // sumMode=true のまま残り、ボタンが押下状態に見えていた。
+  const exitSumMode = useCallback(() => {
+    setSumMode(false)
+    setSumSelection(new Map)
   }, [])
 
-  // sumMode OFF → 選択をクリア
+  // ESC で合計モード終了（編集中のキーハンドラが stopPropagation するため編集と競合しない）
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape' && sumSelRef.current.size > 0) exitSumMode() }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [exitSumMode])
+
+  // sumMode OFF（ボタンでトグル）→ 選択をクリア
   useEffect(() => { if (!sumMode) setSumSelection(new Map) }, [sumMode])
 
   // activeGroupTab のグループが削除されたらリセット
@@ -3543,9 +3553,9 @@ export function EstimateTab({ projectId }: { projectId: string }) {
             合計 ¥{fmt(sumTotal)}
           </span>
           <button
-            onClick={() => setSumSelection(new Map)}
+            onClick={exitSumMode}
             style={{ marginLeft: 4, background: 'none', border: 'none', cursor: 'pointer', color: C.textMuted, padding: '2px 6px', borderRadius: 4, fontSize: 13, lineHeight: '1' }}
-            title="選択解除（Esc）"
+            title="合計を閉じる（Esc）"
           >✕</button>
         </div>
       ) : null,
