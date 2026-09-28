@@ -10,6 +10,7 @@ import {
   deriveMarkupRate,
   isValidMarkupRate,
   normalizeMarkupOverride,
+  isSameDisplayedRate,
   getItemPricingState,
 } from '@/lib/estimate/pricing'
 
@@ -273,6 +274,77 @@ describe('normalizeMarkupOverride', () => {
 
   it('異なる値はそのまま', () => {
     expect(normalizeMarkupOverride(1.6, 1.45)).toBe(1.6)
+  })
+
+  it('粗利31%入力（×1.4493）と掛け率1.45入力は同じ結果（案件標準に従う）', () => {
+    expect(normalizeMarkupOverride(marginRateToMarkup(0.31)!, 1.45)).toBeNull()
+    expect(normalizeMarkupOverride(1.45, 1.45)).toBeNull()
+  })
+
+  it('粗利40%（×1.6667）は案件標準1.45と異なる', () => {
+    expect(normalizeMarkupOverride(marginRateToMarkup(0.40)!, 1.45)).toBeCloseTo(1.6667, 4)
+  })
+
+  it('極端値: 案件標準0.20 と 粗利-400% 入力は同じ', () => {
+    expect(normalizeMarkupOverride(marginRateToMarkup(-4)!, 0.2)).toBeNull()
+  })
+})
+
+describe('isSameDisplayedRate', () => {
+  it('表示（×小数2桁・粗利0.1%）が一致すれば同じ', () => {
+    expect(isSameDisplayedRate(1.4493, 1.45)).toBe(true)
+  })
+  it('掛け率表示が同じでも粗利表示が違えば別', () => {
+    // 1.454 → ×1.45 / 粗利31.2%、1.45 → 粗利31.0%
+    expect(isSameDisplayedRate(1.454, 1.45)).toBe(false)
+  })
+  it('無効値は false', () => {
+    expect(isSameDisplayedRate(NaN, 1.45)).toBe(false)
+    expect(isSameDisplayedRate(1.45, Infinity)).toBe(false)
+  })
+})
+
+// ── 極端値（NaN / Infinity を返さない） ─────────────────────────
+
+describe('extreme values', () => {
+  const cases: Array<[number, number]> = [
+    // [掛け率, 期待する粗利率]
+    [1.45, (1.45 - 1) / 1.45],
+    [1.6, 0.375],
+    [1.2, 0.2 / 1.2],
+    [1.0, 0],
+    [0.8, -0.25],
+    [0.2, -4],
+  ]
+  it.each(cases)('掛け率 %s → 粗利率・売価が有限値', (rate, margin) => {
+    expect(markupToMarginRate(rate)).toBeCloseTo(margin, 10)
+    const sp = calculateSellingPrice(100000, rate)!
+    expect(Number.isFinite(sp)).toBe(true)
+    expect(calculateGrossMarginRate(100000, sp)).toBeCloseTo(margin, 4)
+  })
+
+  const margins: Array<[number, number]> = [
+    // [粗利率, 原価100,000 の売価]
+    [0.40, 166667],
+    [0.31, 144928],
+    [0,    100000],
+    [-0.2, 83333],
+    [-1,   50000],
+    [-4,   20000],
+  ]
+  it.each(margins)('粗利率 %s → 売価 %s', (m, expected) => {
+    const rate = marginRateToMarkup(m)!
+    expect(calculateSellingPrice(100000, rate)).toBe(expected)
+  })
+
+  it('粗利率 100% 以上は計算不能（null）', () => {
+    expect(marginRateToMarkup(1)).toBeNull()
+    expect(marginRateToMarkup(1.5)).toBeNull()
+  })
+
+  it('売価0・原価0 は粗利率/掛け率 null（0除算しない）', () => {
+    expect(calculateGrossMarginRate(100, 0)).toBeNull()
+    expect(deriveMarkupRate(0, 100)).toBeNull()
   })
 })
 

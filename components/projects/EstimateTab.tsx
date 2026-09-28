@@ -424,9 +424,11 @@ function PillAddBtn({ onClick, disabled, label }: { onClick: () => void; disable
 // サマリー上段の大きい数値（クリックで計算根拠表示）
 
 function TopFormulaCell({
-  label, value, valueColor, formula,
+  label, value, valueColor, formula, note,
 }: {
   label: string; value: string; valueColor: string; formula?: string[]
+  /** 値の前提条件の注記（例: 原価未入力の明細を含む） */
+  note?: string
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -446,7 +448,8 @@ function TopFormulaCell({
       onClick={() => formula && setOpen(p => !p)}
       title={formula ? 'クリックで計算根拠を表示' : undefined}
     >
-      <span style={{ fontSize: 11, color: open ? C.accent : C.textMuted, fontFamily: FONT, letterSpacing: '0.05em', textTransform: 'uppercase', flexShrink: 0 }}>
+      <span style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', gap: 2, flexShrink: 0 }}>
+      <span style={{ fontSize: 11, color: open ? C.accent : C.textMuted, fontFamily: FONT, letterSpacing: '0.05em', textTransform: 'uppercase' }}>
         {label}
         {formula && (
           <span style={{
@@ -458,6 +461,10 @@ function TopFormulaCell({
             ＝
           </span>
         )}
+      </span>
+      {note && (
+        <span style={{ fontSize: 10, color: C.orange, fontFamily: FONT, whiteSpace: 'nowrap' }}>{note}</span>
+      )}
       </span>
       <span style={{ fontSize: 26, fontWeight: 700, color: valueColor, fontFamily: FONT, fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.5px' }}>
         {value}
@@ -834,7 +841,7 @@ function GroupHeader({
 
 // ── GroupSubtotal ─────────────────────────────────────────
 
-function GroupSubtotal({ total, itemCount, costTotal }: { total: number; itemCount: number; costTotal: number }) {
+function GroupSubtotal({ total, itemCount, costTotal, missingCostCount = 0 }: { total: number; itemCount: number; costTotal: number; missingCostCount?: number }) {
   const gridCols = useContext(GridColsCtx)
   const margin = total > 0 && costTotal > 0 ? 1 - costTotal / total : null
   return (
@@ -872,8 +879,14 @@ function GroupSubtotal({ total, itemCount, costTotal }: { total: number; itemCou
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'flex-end', paddingRight: 10,
       }}>
+        {margin != null && missingCostCount > 0 && (
+          <span title={`原価未入力の明細 ${missingCostCount} 件を原価0円として計算しています`}
+            style={{ fontSize: 11, fontWeight: 700, color: C.orange, marginRight: 3, cursor: 'help', fontFamily: FONT }}>
+            ※
+          </span>
+        )}
         {margin != null && (
-          <span style={{
+          <span title={missingCostCount > 0 ? `原価未入力の明細 ${missingCostCount} 件を原価0円として計算しています` : undefined} style={{
             padding: '2px 8px', borderRadius: 12,
             fontSize: 11, fontWeight: 700, fontFamily: FONT,
             background: margin < 0.15 ? '#FEF2F2' : '#EBEBEC',
@@ -1737,14 +1750,24 @@ export function EstimateTab({ projectId }: { projectId: string }) {
   const sumSelKeys = useMemo(() => new Set(sumSelection.keys()), [sumSelection])
   const sumTotal = useMemo(() => { let t = 0; sumSelection.forEach(v => { t += v }); return t }, [sumSelection])
 
-  // ESC で合計選択クリア（編集中のキーハンドラが stopPropagation するため編集と競合しない）
-  useEffect(() => {
-    const h = (e: KeyboardEvent) => { if (e.key === 'Escape' && sumSelRef.current.size > 0) setSumSelection(new Map) }
-    document.addEventListener('keydown', h)
-    return () => document.removeEventListener('keydown', h)
+  // 合計モードの終了はここに一本化する（✕ボタン・Esc）。
+  //   sumMode        … 上部「∑ 合計」ボタンの active 表示の唯一の根拠
+  //   sumSelection   … 右下合計バーの表示根拠（size > 0 で表示）
+  // 以前は ✕ / Esc が sumSelection だけをクリアしていたため、バーは消えても
+  // sumMode=true のまま残り、ボタンが押下状態に見えていた。
+  const exitSumMode = useCallback(() => {
+    setSumMode(false)
+    setSumSelection(new Map)
   }, [])
 
-  // sumMode OFF → 選択をクリア
+  // ESC で合計モード終了（編集中のキーハンドラが stopPropagation するため編集と競合しない）
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => { if (e.key === 'Escape' && sumSelRef.current.size > 0) exitSumMode() }
+    document.addEventListener('keydown', h)
+    return () => document.removeEventListener('keydown', h)
+  }, [exitSumMode])
+
+  // sumMode OFF（ボタンでトグル）→ 選択をクリア
   useEffect(() => { if (!sumMode) setSumSelection(new Map) }, [sumMode])
 
   // activeGroupTab のグループが削除されたらリセット
@@ -1779,7 +1802,7 @@ export function EstimateTab({ projectId }: { projectId: string }) {
 
   const reload = useCallback(() => {
     if (!hasLoadedRef.current) setLoading(true)
-    Promise.all([
+    return Promise.all([
       supabase.from('estimate_groups').select('id,label,display_mode,sort_order')
         .eq('project_id', projectId).is('deleted_at', null).order('sort_order'),
       supabase.from('estimate_items')
@@ -1788,7 +1811,7 @@ export function EstimateTab({ projectId }: { projectId: string }) {
       supabase.from('projects')
         .select('misc_expense_override,rounding_discount,markup_rate')
         .eq('id', projectId).single(),
-    ]).then(([{ data: g, error: gErr }, { data: i, error: iErr }, { data: p }]) => {
+    ]).then(([{ data: g, error: gErr }, { data: i, error: iErr }, { data: p, error: pErr }]) => {
       if (iErr) {
         // クエリ失敗時はデータを消さず、コンソールにエラーを出す
         console.error('[EstimateTab] items query failed:', iErr.message)
@@ -1797,6 +1820,8 @@ export function EstimateTab({ projectId }: { projectId: string }) {
         return
       }
       if (gErr) console.error('[EstimateTab] groups query failed:', gErr.message)
+      // 案件標準（projects.markup_rate）の取得失敗を握りつぶさない。失敗時は直前の値を保持する
+      if (pErr) console.error('[EstimateTab] project query failed:', pErr.message)
       setGroups((g ?? []) as EstimateGroup[])
       setItems((i ?? []) as EstimateItem[])
       if (p) {
@@ -2087,6 +2112,10 @@ export function EstimateTab({ projectId }: { projectId: string }) {
   const grossProfit      = taxBase - totalCost
   // 全体粗利率
   const overallMargin    = taxBase > 0 && totalCost > 0 ? 1 - totalCost / taxBase : null
+  // 単価はあるが原価が未入力の明細（全体粗利率では原価0円として計算され、粗利が高く見える）
+  const missingCostCount = useMemo(() => items.filter(i =>
+    (i.row_type ?? 'item') === 'item' && (i.selling_price ?? 0) !== 0 && i.cost_price == null
+  ).length, [items])
   // 消費税・総合計
   const tax              = Math.floor(taxBase * 0.1)
   const total            = taxBase + tax
@@ -2403,7 +2432,10 @@ export function EstimateTab({ projectId }: { projectId: string }) {
       const json = await res.json().catch(() => ({})) as { error?: string }
       return json.error ?? '変更に失敗しました。'
     }
-    reload()
+    // 保存成功 = DB の projects.markup_rate は newRate。再取得を待たずに表示へ反映し、
+    // その後 reload で AUTO 明細の単価（RPC で再計算済み）と合わせて DB 値に揃える
+    setProjectMarkupRate(newRate)
+    await reload()
     return null
   }
 
@@ -2881,7 +2913,9 @@ export function EstimateTab({ projectId }: { projectId: string }) {
                 '─────────────────',
                 `原価合計 = 明細原価 + 諸経費原価`,
                 `= ¥${fmt(itemCostTotal)} + ¥${fmt(miscExpenseCost)}`,
+                ...(missingCostCount > 0 ? [`※ 原価未入力の明細 ${missingCostCount} 件は原価0円として計算`] : []),
               ] : undefined}
+              note={overallMargin != null && missingCostCount > 0 ? `原価未入力 ${missingCostCount}件を含む` : undefined}
             />
 
             {/* ── 案件標準（自動計算の基準）── 見積全体の実粗利とは別物 */}
@@ -2900,8 +2934,10 @@ export function EstimateTab({ projectId }: { projectId: string }) {
                 案件標準
               </span>
               <span style={{ fontSize: 12, fontWeight: 700, color: C.green, fontVariantNumeric: 'tabular-nums', lineHeight: 1.2, whiteSpace: 'nowrap' }}>
-                粗利 {fmtMarginPct(markupToMarginRate(projectMarkupRate))}
-                <span style={{ fontWeight: 500, color: C.textMuted, marginLeft: 4 }}>×{fmtMarkup(projectMarkupRate)}</span>
+                <span style={{ color: (markupToMarginRate(projectMarkupRate) ?? 0) < 0 ? C.red : undefined }}>
+                  粗利 {fmtMarginPct(markupToMarginRate(projectMarkupRate))}
+                </span>
+                <span style={{ fontWeight: 500, color: C.textMuted, marginLeft: 6 }}>掛け率 {fmtMarkup(projectMarkupRate)}</span>
               </span>
             </button>
           </div>
@@ -3086,6 +3122,7 @@ export function EstimateTab({ projectId }: { projectId: string }) {
                       const lastPageItems  = gItems.slice(lastPageStart)
                       const lastPageSubtotal  = lastPageItems.reduce((acc, i) => acc + liveAmount(i), 0)
                       const lastPageCostTotal = lastPageItems.reduce((acc, i) => acc + ((i.cost_price ?? 0) * i.quantity), 0)
+                      const lastPageMissingCost = lastPageItems.filter(i => (i.row_type ?? 'item') === 'item' && (i.selling_price ?? 0) !== 0 && i.cost_price == null).length
 
                       return (
                         <Draggable key={group.id} draggableId={`group-${group.id}`} index={gi}>
@@ -3251,7 +3288,7 @@ export function EstimateTab({ projectId }: { projectId: string }) {
                                 </div>
                               )}
 
-                              {isOpen && <GroupSubtotal total={lastPageSubtotal} itemCount={gItems.length} costTotal={lastPageCostTotal} />}
+                              {isOpen && <GroupSubtotal total={lastPageSubtotal} itemCount={gItems.length} costTotal={lastPageCostTotal} missingCostCount={lastPageMissingCost} />}
                               </div> {/* 枠線コンテナ閉じ */}
                             </div>
                           )}
@@ -3516,9 +3553,9 @@ export function EstimateTab({ projectId }: { projectId: string }) {
             合計 ¥{fmt(sumTotal)}
           </span>
           <button
-            onClick={() => setSumSelection(new Map)}
+            onClick={exitSumMode}
             style={{ marginLeft: 4, background: 'none', border: 'none', cursor: 'pointer', color: C.textMuted, padding: '2px 6px', borderRadius: 4, fontSize: 13, lineHeight: '1' }}
-            title="選択解除（Esc）"
+            title="合計を閉じる（Esc）"
           >✕</button>
         </div>
       ) : null,
