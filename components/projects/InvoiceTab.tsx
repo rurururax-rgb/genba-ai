@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { getClient } from '@/lib/supabase/client'
+import type { InvoiceIssuerProfile } from '@/lib/company/invoice-issuer'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 
@@ -113,7 +114,9 @@ function formatDateTime(iso: string | null): string {
   return `${era}${d.getMonth() + 1}月${d.getDate()}日 ${hh}:${mm}`
 }
 
-function printInvoice(invoice: Partial<Invoice>, subtotal: number, tax: number, total: number) {
+// 発行者情報（振込先・登録番号・住所）はサーバーから渡された issuer だけを使う。このファイルに固定値を書かないこと
+export function printInvoice(invoice: Partial<Invoice>, subtotal: number, tax: number, total: number, issuer: InvoiceIssuerProfile | null) {
+  if (!issuer) return
   const items = invoice.items ?? []
   // Excelに合わせて最低21行（rows 18-38）表示
   const MIN_ROWS = 21
@@ -122,7 +125,7 @@ function printInvoice(invoice: Partial<Invoice>, subtotal: number, tax: number, 
     : items
 
   const f = (v: number) => Math.round(v).toLocaleString('ja-JP')
-  const logoUrl = `${window.location.origin}/excel-images/image7.png`
+  const logoUrl = `${window.location.origin}${issuer.logoPath}`
   // 顧客名末尾の「様」が既に入っている場合は除去して重複を防ぐ
   const customerName = (invoice.customer_name || '').replace(/様$/, '').trim() || '　'
 
@@ -380,17 +383,17 @@ html, body {
       <div class="request-note">下記のとおり御請求申し上げます。</div>
       <div class="bank-box">
         <div class="bank-title">お支払いは下記口座までお願いします</div>
-        <div>　十六銀行　/　鏡島支店</div>
-        <div>　【普通】　1326345</div>
-        <div>　株式会社　ラグズ建築</div>
-        <div>　カ）　ラグズケンチク</div>
+        <div>　${escHtml(issuer.bank.branch)}</div>
+        <div>　【${escHtml(issuer.bank.accountType)}】　${escHtml(issuer.bank.accountNumber)}</div>
+        <div>　${escHtml(issuer.bank.holder)}</div>
+        <div>　${escHtml(issuer.bank.holderKana)}</div>
         <div class="bank-note">※振込手数料はお客様負担にてお願いいたします。</div>
       </div>
       <div class="amount-row">
         <span class="amount-label">お振込み金額（消費税込）</span>
         <span class="amount-value">¥${f(total)}</span>
       </div>
-      <div class="reg-no">登録番号　T2200001044783</div>
+      <div class="reg-no">登録番号　${escHtml(issuer.registrationNumber)}</div>
     </div>
 
     <!-- 右ブロック -->
@@ -399,13 +402,13 @@ html, body {
       ${invoice.payment_due_at
         ? `<div class="payment-due-row">お支払期限：${formatDate(invoice.payment_due_at)}</div>`
         : ''}
-      <img src="${logoUrl}" class="company-logo" alt="株式会社ラグズ建築" />
+      <img src="${logoUrl}" class="company-logo" alt="${escHtml(issuer.companyName)}" />
       <div class="company-addr">
-        〒500-8388<br>
-        岐阜県岐阜市今嶺４丁目5-20<br>
-        TEL　058-374-5318<br>
-        E-mail　info@rugs_reform.jp<br>
-        <span style="font-size:6.5pt;">岐阜県知事許可（般－8）第103774号</span>
+        〒${escHtml(issuer.postalCode)}<br>
+        ${escHtml(issuer.address)}<br>
+        TEL　${escHtml(issuer.tel)}<br>
+        E-mail　${escHtml(issuer.email)}<br>
+        <span style="font-size:6.5pt;">${escHtml(issuer.license)}</span>
       </div>
       <div class="seal-wrap"><div class="seal-box"></div></div>
     </div>
@@ -532,12 +535,13 @@ function PayTypeBadge({ type }: { type: PaymentType }) {
 // ── 請求書カード ──────────────────────────────────────────
 
 function InvoiceCard({
-  invoice, onEdit, onDelete, onPrint,
+  invoice, onEdit, onDelete, onPrint, issuer,
 }: {
   invoice: Invoice
   onEdit: () => void
   onDelete: () => void
   onPrint: (id: string) => void
+  issuer: InvoiceIssuerProfile
 }) {
   const subtotal = invoice.items.reduce((s, i) => s + i.amount, 0)
   const tax = Math.floor(subtotal * 0.1)
@@ -545,7 +549,7 @@ function InvoiceCard({
 
   const handlePrint = (e: React.MouseEvent) => {
     e.stopPropagation()
-    printInvoice(invoice, subtotal, tax, total)
+    printInvoice(invoice, subtotal, tax, total, issuer)
     onPrint(invoice.id)
   }
 
@@ -631,6 +635,7 @@ function InvoiceEditor({
   onSave,
   onClose,
   onPrint,
+  issuer,
 }: {
   invoice: Partial<Invoice> | null
   projectInfo: ProjectInfo
@@ -638,6 +643,7 @@ function InvoiceEditor({
   onSave: (data: Partial<Invoice>) => Promise<void>
   onClose: () => void
   onPrint: (id: string) => void
+  issuer: InvoiceIssuerProfile
 }) {
   const isNew = !initial?.id
 
@@ -776,7 +782,7 @@ function InvoiceEditor({
         {/* 印刷ボタン */}
         <button
           onClick={() => {
-            printInvoice(form, subtotal, tax, total)
+            printInvoice(form, subtotal, tax, total, issuer)
             if (form.id) onPrint(form.id)
           }}
           style={{
@@ -838,7 +844,7 @@ function InvoiceEditor({
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 140px 140px', gap: 16 }}>
           <div>
             <label style={labelSt}>顧客名（様）</label>
-            <Input inputSize="compact" value={form.customer_name ?? ''} onChange={e => setForm(p => ({ ...p, customer_name: e.target.value }))} placeholder="例：栗本" />
+            <Input inputSize="compact" value={form.customer_name ?? ''} onChange={e => setForm(p => ({ ...p, customer_name: e.target.value }))} placeholder="例：山田" />
           </div>
           <div>
             <label style={labelSt}>工事名</label>
@@ -978,9 +984,12 @@ function InvoiceEditor({
 export function InvoiceTab({
   projectId,
   projectInfo,
+  issuer,
 }: {
   projectId: string
   projectInfo: ProjectInfo
+  /** 請求書の発行者情報。サーバー（案件ページ）が対象会社のときだけ渡す */
+  issuer: InvoiceIssuerProfile
 }) {
   const [invoices, setInvoices] = useState<Invoice[]>([])
   const [loading, setLoading] = useState(true)
@@ -1109,6 +1118,7 @@ export function InvoiceTab({
       {/* ── エディタ or 一覧 ── */}
       {editing != null ? (
         <InvoiceEditor
+          issuer={issuer}
           invoice={editing === 'new' ? null : editing as Partial<Invoice>}
           projectInfo={projectInfo}
           estimateTotal={estimateTotal}
@@ -1132,7 +1142,7 @@ export function InvoiceTab({
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
           {invoices.map(inv => (
-            <InvoiceCard key={inv.id} invoice={inv} onEdit={() => setEditing(inv)} onDelete={() => handleDelete(inv.id)} onPrint={handlePrint} />
+            <InvoiceCard key={inv.id} issuer={issuer} invoice={inv} onEdit={() => setEditing(inv)} onDelete={() => handleDelete(inv.id)} onPrint={handlePrint} />
           ))}
         </div>
       )}

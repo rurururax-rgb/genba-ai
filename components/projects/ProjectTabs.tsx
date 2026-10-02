@@ -2,13 +2,14 @@
 
 import { useState, useEffect } from 'react'
 import dynamic from 'next/dynamic'
+import type { InvoiceIssuerProfile } from '@/lib/company/invoice-issuer'
 import { EstimateTab } from './EstimateTab'
 import { SpecImportTab } from './SpecImportTab'
 import { CostLedgerTab } from './CostLedgerTab'
 import { ProjectInfoPanel } from './ProjectInfoPanel'
 
-// 請求書はラグズ建築専用の legacy 帳票（振込先・登録番号・住所が埋め込まれている）。
-// 対象会社で実際に開いたときだけ読み込み、他社の画面には配信しない
+// 請求書はラグズ建築専用の legacy 帳票。対象会社で実際に開いたときだけ読み込む。
+// 振込先・登録番号・住所などの発行者情報はこのコードには含まれず、サーバーが対象会社にだけ props で渡す
 const InvoiceTab = dynamic(() => import('./InvoiceTab').then(m => m.InvoiceTab))
 import { ScheduleTab } from './ScheduleTab'
 
@@ -102,16 +103,20 @@ export function ProjectTabs({
   projectInfo,
   defaultTab,
   legacyRugsDocuments = false,
+  invoiceIssuer = null,
 }: {
   projectId: string
   projectInfo: ProjectInfo
   defaultTab?: string
   /** ラグズ建築専用の legacy 帳票（請求書・挨拶状）を使える会社か。既定は false */
   legacyRugsDocuments?: boolean
+  /** 請求書の発行者情報（振込先など）。サーバーが対象会社のときだけ渡す。他社・未設定では null */
+  invoiceIssuer?: InvoiceIssuerProfile | null
 }) {
   const [requestedTab, setTab] = useState<Tab>((defaultTab as Tab) || 'estimate')
   // 請求書タブは対象会社のみ。URL（?tab=invoice）やイベントで指定されても、他社では見積タブに戻す
-  const tab: Tab = requestedTab === 'invoice' && !legacyRugsDocuments ? 'estimate' : requestedTab
+  const invoiceAvailable = legacyRugsDocuments && invoiceIssuer != null
+  const tab: Tab = requestedTab === 'invoice' && !invoiceAvailable ? 'estimate' : requestedTab
 
   // グローバルサイドバーからのタブ切替イベントを受信
   useEffect(() => {
@@ -127,7 +132,7 @@ export function ProjectTabs({
     <>
       {tab === 'info'        && <ProjectInfoPanel project={projectInfo} legacyRugsDocuments={legacyRugsDocuments} />}
       {tab === 'estimate'    && <EstimateTab projectId={projectId} legacyRugsDocuments={legacyRugsDocuments} />}
-      {tab === 'invoice'     && legacyRugsDocuments && <InvoiceTab projectId={projectId} projectInfo={projectInfo} />}
+      {tab === 'invoice'     && invoiceAvailable && invoiceIssuer && <InvoiceTab projectId={projectId} projectInfo={projectInfo} issuer={invoiceIssuer} />}
       {tab === 'spec-import' && <SpecImportTab projectId={projectId} />}
       {tab === 'cost-ledger' && <CostLedgerTab projectId={projectId} />}
       {tab === 'schedule'    && <ScheduleTab projectId={projectId} />}

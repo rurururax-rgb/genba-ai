@@ -157,7 +157,7 @@ describe('ソース上の保証', () => {
 
   it('ラグズ建築の固有情報を含むのは、ゲート済みの legacy 帳票ファイルだけ', () => {
     const allowed = new Set([
-      'components/projects/InvoiceTab.tsx',                        // 請求書（rugs のみ読み込み・表示）
+      'lib/company/rugs-invoice-issuer.server.ts',                 // 請求書の発行者情報（サーバー専用。rugs の会社にだけ渡す）
       'app/(dashboard)/projects/[id]/greeting/GreetingDocument.tsx', // 挨拶状（rugs 以外は notFound）
       'components/estimate/EstimateDocument.tsx',                  // 表紙ロゴ（rugs のみ表示）
       'lib/excel/fill-template.ts',                                // 未使用の旧 Excel 生成（テンプレートファイル名）
