@@ -4,6 +4,8 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { VendorInvoiceImportTab } from './VendorInvoiceImportTab'
 import { Button } from '@/components/ui/button'
+import { parseNumericInput, resolveNumericCommit } from '@/lib/input/numeric-input'
+import { jsonInit, writeRequest } from '@/lib/api/write-request'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -149,16 +151,17 @@ function InvoicePanel({
     if (adding) setTimeout(() => amountRef.current?.focus(), 0)
   }, [adding])
 
+  // 書き込みは「成功した場合のみ画面へ反映・失敗は必ず通知」（lib/api/write-request.ts）
   async function handleAdd() {
-    const amount = parseFloat(draft.amount.replace(/[,¥]/g, ''))
-    if (isNaN(amount) || amount <= 0) return
-    const res = await fetch(`/api/cost-ledger/${itemId}/invoices`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ amount, invoice_date: draft.invoice_date || null, payment_date: draft.payment_date || null, note: draft.note || null }),
-    })
-    if (!res.ok) return
-    const { invoice, newActualCost } = await res.json() as { invoice: Invoice; newActualCost: number }
+    const amount = parseNumericInput(draft.amount)
+    if (amount == null || amount <= 0) { alert('金額を数字で入力してください。'); return }
+    const result = await writeRequest<{ invoice: Invoice; newActualCost: number }>(
+      `/api/cost-ledger/${itemId}/invoices`,
+      jsonInit('POST', { amount, invoice_date: draft.invoice_date || null, payment_date: draft.payment_date || null, note: draft.note || null }),
+      '請求の追加に失敗しました',
+    )
+    if (!result.ok || !result.data) { alert(`${result.ok ? '請求の追加に失敗しました' : result.message}\n追加されていません。`); return }
+    const { invoice, newActualCost } = result.data
     onInvoicesChange([...invoices, invoice])
     onActualCostChange(newActualCost)
     setDraft({ amount: '', invoice_date: '', payment_date: '', note: '' })
@@ -166,25 +169,29 @@ function InvoicePanel({
   }
 
   async function handleAmountEdit(inv: Invoice) {
-    const amount = parseFloat(editAmt.replace(/[,¥]/g, ''))
-    if (isNaN(amount) || amount <= 0) { setEditId(null); return }
-    if (amount === inv.amount) { setEditId(null); return }
-    const res = await fetch(`/api/cost-ledger/invoices/${inv.id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ amount }),
-    })
-    if (!res.ok) return
-    const { invoice: updated, newActualCost } = await res.json() as { invoice: Invoice; newActualCost: number }
+    const amount = parseNumericInput(editAmt)
+    // 解釈できない / 0 以下 / 変更なし → 保存せず元の値のまま
+    if (amount == null || amount <= 0 || amount === inv.amount) { setEditId(null); return }
+    const result = await writeRequest<{ invoice: Invoice; newActualCost: number }>(
+      `/api/cost-ledger/invoices/${inv.id}`, jsonInit('PATCH', { amount }), '金額の保存に失敗しました',
+    )
+    if (!result.ok || !result.data) {
+      setEditId(null)
+      alert(`${result.ok ? '金額の保存に失敗しました' : result.message}\n変更は保存されていません。`)
+      return
+    }
+    const { invoice: updated, newActualCost } = result.data
     onInvoicesChange(invoices.map(i => i.id === inv.id ? updated : i))
     onActualCostChange(newActualCost)
     setEditId(null)
   }
 
   async function handleDelete(inv: Invoice) {
-    const res = await fetch(`/api/cost-ledger/invoices/${inv.id}`, { method: 'DELETE' })
-    if (!res.ok) return
-    const { newActualCost } = await res.json() as { newActualCost: number | null }
+    const result = await writeRequest<{ newActualCost: number | null }>(
+      `/api/cost-ledger/invoices/${inv.id}`, jsonInit('DELETE'), '削除に失敗しました',
+    )
+    if (!result.ok || !result.data) { alert(`${result.ok ? '削除に失敗しました' : result.message}\n削除されていません。`); return }
+    const { newActualCost } = result.data
     onInvoicesChange(invoices.filter(i => i.id !== inv.id))
     onActualCostChange(newActualCost)
   }
@@ -542,39 +549,37 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
 
   async function saveBillingCell(id: string, field: string, raw: string) {
     const numFields = ['invoice_amount', 'payment_amount', 'fee']
-    const val = numFields.includes(field)
-      ? (raw === '' ? null : Number(raw.replace(/,/g, '')))
-      : (raw === '' ? null : raw)
-    const res = await fetch(`/api/project-billing/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ [field]: val }),
-    })
-    if (res.ok) {
-      const updated = await res.json() as BillingMilestone
-      setBillingMilestones(prev => prev.map(m => m.id === id ? updated : m))
+    let val: string | number | null = raw === '' ? null : raw
+    if (numFields.includes(field)) {
+      const commit = resolveNumericCommit(raw)
+      // 解釈できない数値は保存しない（以前は NaN → null として保存され、値が消えていた）
+      if (commit.action === 'revert') { setEditingBilling(null); return }
+      val = commit.action === 'clear' ? null : commit.value
     }
+    const result = await writeRequest<BillingMilestone>(`/api/project-billing/${id}`, jsonInit('PATCH', { [field]: val }), '保存に失敗しました')
     setEditingBilling(null)
+    if (!result.ok || !result.data) { alert(`${result.ok ? '保存に失敗しました' : result.message}\n変更は保存されていません。`); return }
+    const updated = result.data
+    setBillingMilestones(prev => prev.map(m => m.id === id ? updated : m))
   }
 
   async function saveAdditionalAmount(idx: number, raw: string) {
-    const val = raw === '' ? null : Number(raw.replace(/,/g, ''))
+    const commit = resolveNumericCommit(raw)
+    if (commit.action === 'revert') { setEditingAdditional(null); return }  // 解釈できない数値は保存しない
+    const val = commit.action === 'clear' ? null : commit.value
     const key = `additional_amount_${idx + 1}` as 'additional_amount_1'
-    const res = await fetch('/api/project-billing', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project_id: projectId, [key]: val }),
-    })
-    if (res.ok) {
-      const updated = await res.json()
-      setAdditionalAmounts(prev => {
-        const next = [...prev] as [number|null, number|null, number|null]
-        next[idx] = updated[key] ?? null
-        return next
-      })
-      load() // サマリー再計算
-    }
+    const result = await writeRequest<Record<string, number | null>>(
+      '/api/project-billing', jsonInit('POST', { project_id: projectId, [key]: val }), '保存に失敗しました',
+    )
     setEditingAdditional(null)
+    if (!result.ok || !result.data) { alert(`${result.ok ? '保存に失敗しました' : result.message}\n変更は保存されていません。`); return }
+    const updated = result.data
+    setAdditionalAmounts(prev => {
+      const next = [...prev] as [number|null, number|null, number|null]
+      next[idx] = updated[key] ?? null
+      return next
+    })
+    load() // サマリー再計算
   }
 
   // ── 内訳パネル開閉 ───────────────────────────────────────
@@ -600,22 +605,20 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
     if (!confirm('見積エディタの最新内容を原価台帳に反映します。\n※ 実行予算・実績・注意点の入力済み値は変更されません。')) return
     setSyncing(true)
     try {
-      const res = await fetch('/api/cost-ledger/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_id: projectId }),
-      })
-      const data = await res.json()
-      if (res.ok) {
+      const result = await writeRequest<{ added: number; updated: number; removed: number }>(
+        '/api/cost-ledger/sync', jsonInit('POST', { project_id: projectId }), '同期に失敗しました',
+      )
+      if (result.ok && result.data) {
         await load()
-        const { added, updated, removed } = data as { added: number; updated: number; removed: number }
+        const { added, updated, removed } = result.data
         const parts = []
         if (added)   parts.push(`追加 ${added}件`)
         if (updated) parts.push(`更新 ${updated}件`)
         if (removed) parts.push(`削除 ${removed}件`)
         alert(parts.length ? `同期完了：${parts.join('・')}` : '差分なし（変更はありませんでした）')
       } else {
-        alert(data.error ?? '同期に失敗しました')
+        alert(result.ok ? '同期に失敗しました' : result.message)
+        void load()  // 途中まで反映された可能性があるため DB の値で再同期する
       }
     } finally {
       setSyncing(false)
@@ -627,17 +630,9 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
     if (!confirm('見積エディタの原価データを原価台帳に取り込みます。よろしいですか？')) return
     setInit(true)
     try {
-      const res = await fetch('/api/cost-ledger/init', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_id: projectId }),
-      })
-      if (res.ok) {
-        await load()
-      } else {
-        const err = await res.json()
-        alert(err.error ?? '初期化に失敗しました')
-      }
+      const result = await writeRequest('/api/cost-ledger/init', jsonInit('POST', { project_id: projectId }), '初期化に失敗しました')
+      if (!result.ok) alert(result.message)
+      await load()  // 成功・失敗どちらでも DB の値で表示を確定する
     } finally {
       setInit(false)
     }
@@ -665,10 +660,16 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
     const isNumField = field === 'budget_cost' || field === 'completion_cost' || field === 'actual_cost'
     let parsed: string | number | null = value.trim()
     if (isNumField) {
-      const n = parseFloat(value.replace(/[¥,]/g, ''))
-      parsed = value.trim() === '' || isNaN(n) ? null : n
+      const commit = resolveNumericCommit(value)
+      // 解釈できない数値は保存しない（以前は空欄として保存され、金額が消えていた）
+      if (commit.action === 'revert') return
+      parsed = commit.action === 'clear' ? null : commit.value
     }
     if (parsed === null && field === 'name') return
+
+    // 失敗時に戻すための編集前スナップショット
+    const prevItems   = items
+    const prevSummary = summary
 
     setItems(prev => prev.map(i => i.id === id ? { ...i, [field]: parsed } : i))
 
@@ -694,29 +695,34 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
       })
     }
 
-    await fetch(`/api/cost-ledger/${id}`, {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ [field]: parsed }),
-    })
+    const result = await writeRequest(`/api/cost-ledger/${id}`, jsonInit('PATCH', { [field]: parsed }), '保存に失敗しました')
+    if (!result.ok) {
+      // 保存できていない値・合計を画面に残さない：編集前へ戻し、通知し、DB の値で再同期する
+      setItems(prevItems)
+      setSummary(prevSummary)
+      alert(`${result.message}\n変更は保存されていません。`)
+      void load()
+    }
   }
 
   // ── 行追加・削除 ─────────────────────────────────────────
   async function addRow() {
     const maxOrder = items.reduce((m, i) => Math.max(m, i.sort_order), 0)
-    const res = await fetch('/api/cost-ledger', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project_id: projectId, sort_order: maxOrder + 1 }),
-    })
-    if (res.ok) {
-      const item = await res.json()
+    const result = await writeRequest<CostItem>('/api/cost-ledger', jsonInit('POST', { project_id: projectId, sort_order: maxOrder + 1 }), '行の追加に失敗しました')
+    if (result.ok && result.data) {
+      const item = result.data
       setItems(prev => [...prev, item])
+    } else {
+      alert(`${result.ok ? '行の追加に失敗しました' : result.message}\n行は追加されていません。`)
     }
   }
 
   async function deleteRow(id: string) {
     const old = items.find(i => i.id === id)
+    // 失敗時に戻すための削除前スナップショット
+    const prevItems   = items
+    const prevSummary = summary
+    const prevChecked = checked
     setItems(prev => prev.filter(i => i.id !== id))
     setChecked(p => { const n = { ...p }; delete n[id]; return n })
     if (old) {
@@ -726,7 +732,15 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
         actual_cost_total: prev.actual_cost_total - (old.actual_cost ?? 0),
       } : prev)
     }
-    await fetch(`/api/cost-ledger/${id}`, { method: 'DELETE' })
+    const result = await writeRequest(`/api/cost-ledger/${id}`, jsonInit('DELETE'), '削除に失敗しました')
+    if (!result.ok) {
+      // 削除できていない行を画面から消したままにしない
+      setItems(prevItems)
+      setSummary(prevSummary)
+      setChecked(prevChecked)
+      alert(`${result.message}\n行は削除されていません。`)
+      void load()
+    }
   }
 
   // ── チェックボックス ──────────────────────────────────────
@@ -773,7 +787,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
           {loadError}
           <br />
           <span style={{ fontSize: 12 }}>
-            データベースのマイグレーション（列追加SQL）がまだ実行されていない可能性があります。
+            通信状況を確認して、再読み込みしてください。
           </span>
         </p>
         <button
