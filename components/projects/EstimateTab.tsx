@@ -15,6 +15,8 @@ import {
   type DropResult, type DraggableProvidedDragHandleProps, type DragStart,
 } from '@hello-pangea/dnd'
 import { getClient } from '@/lib/supabase/client'
+import { resolveNumericCommit } from '@/lib/input/numeric-input'
+import { jsonInit, writeRequest } from '@/lib/api/write-request'
 import { calculateSellingPrice, DEFAULT_MARKUP_RATE, getEffectiveMarkupRate, getItemPricingState, markupToMarginRate, normalizeMarkupOverride, resolveSellingPrice, type SellingPriceMode } from '@/lib/estimate/pricing'
 import { ItemPricingPopover, MarginCell, fmtMarginPct, fmtMarkup } from './ItemPricingPopover'
 import { ProjectMarkupDialog } from './ProjectMarkupDialog'
@@ -239,6 +241,11 @@ function DeleteBtn({ onClick, disabled }: { onClick: () => void; disabled?: bool
   )
 }
 
+// IME 変換中のキー入力か（Chrome/Edge: isComposing、Safari: 変換確定 Enter は keyCode 229）
+function isImeComposing(e: React.KeyboardEvent): boolean {
+  return e.nativeEvent.isComposing || e.keyCode === 229
+}
+
 // ── NumInput ──────────────────────────────────────────────
 
 function NumInput({
@@ -262,8 +269,11 @@ function NumInput({
   }
   function commit() {
     setEditing(false)
-    const n = draft === '' ? null : parseFloat(draft)
-    onChange(n != null && !isNaN(n) ? n : null)
+    // 数値の解釈は lib/input/numeric-input.ts に一本化（全角・桁区切り・¥ を受け付ける）。
+    // 解釈できない入力は保存せず、元の値のまま表示に戻す（空欄や 0 に変換しない）
+    const result = resolveNumericCommit(draft)
+    if (result.action === 'revert') return
+    onChange(result.action === 'clear' ? null : result.value)
   }
 
   if (editing) {
@@ -273,9 +283,11 @@ function NumInput({
         onChange={e => setDraft(e.target.value)}
         onBlur={commit}
         onKeyDown={e => {
+          e.stopPropagation()
+          // 日本語IMEの変換確定 Enter では確定しない（変換中の文字列を保存しない）
+          if (isImeComposing(e)) return
           if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); commit() }
           if (e.key === 'Escape') setEditing(false)
-          e.stopPropagation()
         }}
         style={{
           width: '100%', height: CELL_H,
@@ -358,9 +370,11 @@ function TextInput({ value, onChange, placeholder = '─' }: {
       <input ref={ref} autoFocus type="text" value={draft}
         onChange={e => setDraft(e.target.value)} onBlur={commit}
         onKeyDown={e => {
+          e.stopPropagation()
+          // 日本語IMEの変換確定 Enter では確定しない（変換中の文字列を保存しない）
+          if (isImeComposing(e)) return
           if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); commit() }
           if (e.key === 'Escape') setEditing(false)
-          e.stopPropagation()
         }}
         style={{
           width: '100%', height: CELL_H,
@@ -622,8 +636,10 @@ function SummaryEditCell({
   }
   function commit() {
     setEditing(false)
-    const n = draft === '' ? 0 : parseFloat(draft)
-    onCommit(isNaN(n) ? 0 : Math.round(Math.abs(n)))
+    // 解釈できない入力は保存しない（以前は 0 として保存していた）。空欄は従来どおり 0
+    const result = resolveNumericCommit(draft)
+    if (result.action === 'revert') return
+    onCommit(result.action === 'clear' ? 0 : Math.round(Math.abs(result.value)))
   }
 
   const displayColor = negative && value > 0 ? C.red : highlight ? C.accent : C.textSub
@@ -652,6 +668,7 @@ function SummaryEditCell({
           onChange={e => setDraft(e.target.value)}
           onBlur={commit}
           onKeyDown={e => {
+            if (isImeComposing(e)) return
             if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); commit() }
             if (e.key === 'Escape') setEditing(false)
           }}
@@ -783,7 +800,7 @@ function GroupHeader({
             onChange={e => setLabelDraft(e.target.value)}
             onBlur={commitLabel}
             onKeyDown={e => {
-              if (e.key === 'Enter') commitLabel()
+              if (e.key === 'Enter' && !isImeComposing(e)) commitLabel()
               if (e.key === 'Escape') { setLabelDraft(group.label); setEditingLabel(false) }
               e.stopPropagation()
             }}
@@ -1012,6 +1029,8 @@ function ItemRow({
   }
 
   function handleKey(e: React.KeyboardEvent, field: string) {
+    // 日本語IMEの変換確定 Enter / 変換中の Tab ではセルを確定しない
+    if (isImeComposing(e)) { e.stopPropagation(); return }
     if (e.key === 'Tab') {
       e.preventDefault(); e.stopPropagation()
       const idx  = FIELD_ORDER.indexOf(field as typeof FIELD_ORDER[number])
@@ -2264,17 +2283,18 @@ export function EstimateTab({ projectId }: { projectId: string }) {
       } else {
         newOrder = scope.length > 0 ? Math.max(...scope.map(i => i.sort_order)) + 1000 : 0
       }
-      const res = await fetch('/api/estimate-items/manual', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_id: projectId, sort_order: newOrder, group_id: groupId ?? null, row_type: rowType }),
-      })
-      if (res.ok) {
-        const item = await res.json() as EstimateItem
+      const result = await writeRequest<EstimateItem>(
+        '/api/estimate-items/manual',
+        jsonInit('POST', { project_id: projectId, sort_order: newOrder, group_id: groupId ?? null, row_type: rowType }),
+        '行の追加に失敗しました',
+      )
+      if (result.ok && result.data) {
+        const item = result.data
         setItems(prev => [...prev, { ...item, row_type: item.row_type ?? 'item' }])
       } else {
-        const body = await res.json().catch(() => ({})) as { error?: string }
-        console.error('[EstimateTab] handleAddRow failed:', body.error)
-        alert('行の追加に失敗しました。\n' + (body.error ?? '不明なエラー'))
+        const message = result.ok ? '行の追加に失敗しました' : result.message
+        console.error('[EstimateTab] handleAddRow failed:', message)
+        alert(`${message}\n行は追加されていません。`)
       }
     } finally { setAddingRow(false) }
   }
@@ -2323,46 +2343,54 @@ export function EstimateTab({ projectId }: { projectId: string }) {
     setCreating(true)
     try {
       const maxOrder = groups.length > 0 ? Math.max(...groups.map(g => g.sort_order)) + 1000 : 0
-      const res = await fetch('/api/estimate-groups', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_id: projectId, label: '', sort_order: maxOrder }),
-      })
-      if (res.ok) { const group = await res.json() as EstimateGroup; setGroups(prev => [...prev, group]); setNewlyCreatedGroupId(group.id) }
+      const result = await writeRequest<EstimateGroup>(
+        '/api/estimate-groups', jsonInit('POST', { project_id: projectId, label: '', sort_order: maxOrder }), '工種グループの追加に失敗しました',
+      )
+      if (result.ok && result.data) { const group = result.data; setGroups(prev => [...prev, group]); setNewlyCreatedGroupId(group.id) }
+      else alert(`${result.ok ? '工種グループの追加に失敗しました' : result.message}\nグループは追加されていません。`)
     } finally { setCreating(false) }
   }
 
+  // 工種グループの更新（名称・表示モード）。失敗時は編集前のグループへ戻して再同期する
+  async function patchGroup(gid: string, patch: Partial<Pick<EstimateGroup, 'label' | 'display_mode'>>) {
+    const before = groups.find(g => g.id === gid)
+    setGroups(prev => prev.map(g => g.id === gid ? { ...g, ...patch } : g))
+    const result = await writeRequest(`/api/estimate-groups/${gid}`, jsonInit('PATCH', patch), '工種グループの保存に失敗しました')
+    if (!result.ok) {
+      if (before) setGroups(prev => prev.map(g => g.id === gid ? before : g))
+      alert(`${result.message}\n変更は保存されていません。`)
+      void reload()
+    }
+  }
+
   async function handleGroupLabelChange(gid: string, label: string) {
-    setGroups(prev => prev.map(g => g.id === gid ? { ...g, label } : g))
     if (gid === newlyCreatedGroupId && label.trim() !== '') setNewlyCreatedGroupId(null)
-    await fetch(`/api/estimate-groups/${gid}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label }),
-    })
+    await patchGroup(gid, { label })
   }
 
   async function handleDisplayModeToggle(gid: string) {
     const g  = groups.find(x => x.id === gid); if (!g) return
     const nm = g.display_mode === 'detailed' ? 'lump_sum' : 'detailed'
-    setGroups(prev => prev.map(x => x.id === gid ? { ...x, display_mode: nm } : x))
-    await fetch(`/api/estimate-groups/${gid}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ display_mode: nm }),
-    })
+    await patchGroup(gid, { display_mode: nm })
   }
 
   async function handleDeleteGroup(gid: string) {
     if (!confirm('グループを削除しますか？\n項目はグループなしに移動されます。')) return
-    const res = await fetch(`/api/estimate-groups/${gid}`, { method: 'DELETE' })
-    if (res.ok) {
+    const result = await writeRequest(`/api/estimate-groups/${gid}`, jsonInit('DELETE'), 'グループの削除に失敗しました')
+    if (result.ok) {
       setGroups(prev => prev.filter(g => g.id !== gid))
       setItems(prev => prev.map(i => i.group_id === gid ? { ...i, group_id: null } : i))
+    } else {
+      alert(`${result.message}\nグループは削除されていません。`)
     }
   }
 
+  // 名称未入力のまま離れた新規グループの自動削除。失敗しても画面からは消さず、次回の再読み込みで DB に揃う
   async function handleDeleteEmptyGroup(gid: string) {
     setNewlyCreatedGroupId(null)
-    const res = await fetch(`/api/estimate-groups/${gid}`, { method: 'DELETE' })
-    if (res.ok) setGroups(prev => prev.filter(g => g.id !== gid))
+    const result = await writeRequest(`/api/estimate-groups/${gid}`, jsonInit('DELETE'), 'グループの削除に失敗しました')
+    if (result.ok) setGroups(prev => prev.filter(g => g.id !== gid))
+    else console.error('[EstimateTab] handleDeleteEmptyGroup failed:', result.message)
   }
 
   async function handleSave(itemId: string, changes: ItemPatch) {
@@ -2399,15 +2427,21 @@ export function EstimateTab({ projectId }: { projectId: string }) {
       finalChanges = { ...finalChanges, selling_price_mode: 'manual' }
     }
 
-    // 楽観的更新でUIを即時反映
+    // 楽観的更新でUIを即時反映（失敗時は下で必ず元に戻す）
     setItems(prev => prev.map(i => i.id === itemId ? { ...i, ...finalChanges } : i))
 
-    const res = await fetch(`/api/estimate-items/${itemId}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(finalChanges),
-    })
-    if (!res.ok) { alert('保存に失敗しました'); return }
-    const updated = await res.json() as Partial<EstimateItem>
+    const result = await writeRequest<Partial<EstimateItem>>(
+      `/api/estimate-items/${itemId}`, jsonInit('PATCH', finalChanges), '保存に失敗しました',
+    )
+    if (!result.ok) {
+      // 保存できていない値を画面に残さない：編集前の行へ戻し、通知し、DB の値で再同期する
+      if (item) setItems(prev => prev.map(i => i.id === itemId ? item : i))
+      alert(`${result.message}\n変更は保存されていません。`)
+      void reload()
+      return
+    }
+    // 成功：サーバーが返した行（DB の値）で確定する
+    const updated = result.data ?? {}
     setItems(prev => prev.map(i => i.id === itemId ? { ...i, ...updated } : i))
     setSavedIds(prev => new Set([...prev, itemId]))
     setTimeout(() => setSavedIds(prev => { const n = new Set(prev); n.delete(itemId); return n }), 400)
@@ -2416,22 +2450,19 @@ export function EstimateTab({ projectId }: { projectId: string }) {
   async function handleDelete(itemId: string) {
     setDeleting(p => ({ ...p, [itemId]: true }))
     try {
-      const res = await fetch(`/api/estimate-items/${itemId}`, { method: 'DELETE' })
-      if (res.ok) setItems(prev => prev.filter(i => i.id !== itemId))
-      else alert('削除に失敗しました')
+      const result = await writeRequest(`/api/estimate-items/${itemId}`, jsonInit('DELETE'), '削除に失敗しました')
+      // 成功した場合のみ画面から消す
+      if (result.ok) setItems(prev => prev.filter(i => i.id !== itemId))
+      else alert(`${result.message}\n行は削除されていません。`)
     } finally { setDeleting(p => { const n = { ...p }; delete n[itemId]; return n }) }
   }
 
   // 案件標準掛け率を変更（AUTO明細の単価を一括再計算）。成功時 null、失敗時エラーメッセージ
   async function handleApplyMarkupRate(newRate: number): Promise<string | null> {
-    const res = await fetch(`/api/projects/${projectId}/apply-markup-rate`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ new_rate: newRate }),
-    })
-    if (!res.ok) {
-      const json = await res.json().catch(() => ({})) as { error?: string }
-      return json.error ?? '変更に失敗しました。'
-    }
+    const result = await writeRequest(
+      `/api/projects/${projectId}/apply-markup-rate`, jsonInit('POST', { new_rate: newRate }), '変更に失敗しました',
+    )
+    if (!result.ok) return result.message
     // 保存成功 = DB の projects.markup_rate は newRate。再取得を待たずに表示へ反映し、
     // その後 reload で AUTO 明細の単価（RPC で再計算済み）と合わせて DB 値に揃える
     setProjectMarkupRate(newRate)
@@ -2439,20 +2470,27 @@ export function EstimateTab({ projectId }: { projectId: string }) {
     return null
   }
 
+  // 諸経費・端数値引（projects テーブル）。合計金額に直結するため、失敗時は編集前の値へ戻して再同期する
   async function saveMiscExpense(value: number | null) {
+    const before = miscExpenseOverride
     setMiscExpenseOverride(value)
-    await fetch(`/api/projects/${projectId}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ misc_expense_override: value }),
-    })
+    const result = await writeRequest(`/api/projects/${projectId}`, jsonInit('PATCH', { misc_expense_override: value }), '諸経費の保存に失敗しました')
+    if (!result.ok) {
+      setMiscExpenseOverride(before)
+      alert(`${result.message}\n変更は保存されていません。`)
+      void reload()
+    }
   }
 
   async function saveRoundingDiscount(value: number) {
+    const before = roundingDiscount
     setRoundingDiscount(value)
-    await fetch(`/api/projects/${projectId}`, {
-      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ rounding_discount: value }),
-    })
+    const result = await writeRequest(`/api/projects/${projectId}`, jsonInit('PATCH', { rounding_discount: value }), '端数値引の保存に失敗しました')
+    if (!result.ok) {
+      setRoundingDiscount(before)
+      alert(`${result.message}\n変更は保存されていません。`)
+      void reload()
+    }
   }
 
   // ── 複数選択 → グループ移動 ───────────────────────────────
@@ -2519,12 +2557,20 @@ export function EstimateTab({ projectId }: { projectId: string }) {
     if (!confirm(`選択中の ${selectedIds.size} 件を削除しますか？`)) return
     const ids = Array.from(selectedIds)
     setSelectedIds(new Set())
-    await Promise.all(
-      ids.map(id =>
-        fetch(`/api/estimate-items/${id}`, { method: 'DELETE' })
-          .then(res => { if (res.ok) setItems(prev => prev.filter(i => i.id !== id)) })
-      )
+    // 成功した行だけ画面から消す。1件でも失敗したら件数を通知し、DB の値で再同期する
+    const results = await Promise.all(
+      ids.map(async id => {
+        const result = await writeRequest(`/api/estimate-items/${id}`, jsonInit('DELETE'), '削除に失敗しました')
+        if (result.ok) setItems(prev => prev.filter(i => i.id !== id))
+        return result
+      })
     )
+    const failed = results.filter(r => !r.ok)
+    if (failed.length > 0) {
+      const first = failed[0]
+      alert(`${ids.length} 件中 ${failed.length} 件を削除できませんでした。\n${first.ok ? '' : first.message}`)
+      void reload()
+    }
   }
 
   async function moveSelectedToGroup(targetGroupId: string | null) {
@@ -3470,7 +3516,7 @@ export function EstimateTab({ projectId }: { projectId: string }) {
               autoFocus
               value={revLabel}
               onChange={e => setRevLabel(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleCreateRevision() }}
+              onKeyDown={e => { if (e.key === 'Enter' && !isImeComposing(e)) handleCreateRevision() }}
               placeholder="例：初版、設計変更1回目、追加工事後"
               className="w-full"
             />

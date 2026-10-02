@@ -15,6 +15,7 @@ import React, { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { parseNumericInput } from '@/lib/input/numeric-input'
 import {
   calculateSellingPrice,
   isValidMarkupRate,
@@ -60,7 +61,7 @@ export function useLinkedRateDraft(initialRate: number) {
 
   function editMarkup(text: string) {
     setMarkupText(text)
-    const r = parseRateInput(text)
+    const r = parseNumericInput(text)
     const reason = r == null ? (text.trim() === '' ? null : '数値を入力してください')
       : isValidMarkupRate(r) ? null : '掛け率は 0.01〜9.99 で入力してください'
     if (r != null && reason == null) { setRate(r); setMarginText(marginTextOf(r)); setInvalid(null) }
@@ -68,7 +69,7 @@ export function useLinkedRateDraft(initialRate: number) {
   }
   function editMargin(text: string) {
     setMarginText(text)
-    const p = parseRateInput(text)
+    const p = parseNumericInput(text)
     const r = p != null ? marginRateToMarkup(p / 100) : null
     const reason = p == null ? (text.trim() === '' ? null : '数値を入力してください')
       : p >= 100 ? '粗利率 100% 以上では単価を計算できません'
@@ -78,18 +79,6 @@ export function useLinkedRateDraft(initialRate: number) {
     else { setRate(null); setMarkupText(''); setInvalid(reason) }
   }
   return { rate, markupText, marginText, invalid, editMarkup, editMargin }
-}
-
-/** 全角数字・全角マイナス・長音符・「%」混じりの入力も数値として解釈する（IME入力対策） */
-export function parseRateInput(text: string): number | null {
-  const t = text
-    .replace(/[０-９]/g, c => String.fromCharCode(c.charCodeAt(0) - 0xFEE0))
-    .replace(/[．。]/g, '.')
-    .replace(/[−－ー‐]/g, '-')
-    .replace(/[%％×xX\s]/g, '')
-  if (t === '' || t === '-' || t === '.') return null
-  const n = Number(t)
-  return Number.isFinite(n) ? n : null
 }
 
 function marginTextOf(rate: number): string {
