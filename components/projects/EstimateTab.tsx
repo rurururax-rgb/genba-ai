@@ -20,6 +20,7 @@ import { jsonInit, writeRequest } from '@/lib/api/write-request'
 import { calculateSellingPrice, DEFAULT_MARKUP_RATE, getEffectiveMarkupRate, getItemPricingState, markupToMarginRate, normalizeMarkupOverride, resolveSellingPrice, type SellingPriceMode } from '@/lib/estimate/pricing'
 import { ItemPricingPopover, MarginCell, fmtMarginPct, fmtMarkup } from './ItemPricingPopover'
 import { ProjectMarkupDialog } from './ProjectMarkupDialog'
+import { ItemMemoPopover, LockIcon } from './ItemMemoPopover'
 import { EstimateImportTab } from './EstimateImportTab'
 
 // ── 型定義 ────────────────────────────────────────────────
@@ -52,6 +53,8 @@ type EstimateItem = {
   row_type: RowType
   selling_price_mode: SellingPriceMode
   markup_rate_override: number | null
+  /** 社内メモ（お客様向け見積書・Excel には出力しない）。migration 未適用環境では undefined */
+  internal_memo?: string | null
 }
 
 type ItemPatch = {
@@ -67,6 +70,7 @@ type ItemPatch = {
   row_type?: RowType
   selling_price_mode?: SellingPriceMode
   markup_rate_override?: number | null
+  internal_memo?: string | null
 }
 
 type RevisionHeader = {
@@ -176,6 +180,8 @@ const PRE_EST_CNT  = COL_DEFS.findIndex(c => c.meta.group === 'estimate')      /
 
 // 列幅リサイズ用コンテキスト（EstimateTab → 子コンポーネントへ動的 gridTemplateColumns を配信）
 const GridColsCtx = createContext(GRID_COLS)
+// 社内メモ列（estimate_items.internal_memo）が DB に存在するか（migration 未適用環境では false）
+const InternalMemoAvailableCtx = createContext(true)
 
 // ── ユーティリティ ────────────────────────────────────────
 
@@ -990,6 +996,9 @@ function ItemRow({
   const [hovered,   setHovered]   = useState(false)
   // 利益調整 popover（anchor は開く時点の粗利率セルの BoundingClientRect）
   const [pricingAnchor, setPricingAnchor] = useState<DOMRect | null>(null)
+  // 備考パネル（お客様向け備考 / 社内メモ）
+  const [memoAnchor, setMemoAnchor] = useState<DOMRect | null>(null)
+  const internalMemoAvailable = useContext(InternalMemoAvailableCtx)
   const nameRef    = useRef<HTMLInputElement>(null)
   const portalRef  = useRef<HTMLInputElement>(null)
 
@@ -1386,20 +1395,47 @@ function ItemRow({
               style={{ flex: 1, border: 'none', background: 'transparent', padding: '0 8px', fontSize: 12, fontFamily: FONT, outline: 'none', color: C.text }}
             />
           ) : (
-            <span
+            // クリック → 備考パネル（お客様向け備考 / 社内メモ）。Tab 移動時は上の inline 入力でお客様向け備考を編集
+            <button
+              type="button"
               onClick={e => {
                 e.stopPropagation()
-                const rect = (e.currentTarget as HTMLElement).closest('div')!.getBoundingClientRect()
-                setEditRect(rect); setEditField('memo'); setEditValue(item.memo ?? '')
-                setTimeout(() => portalRef.current?.select(), 0)
+                setMemoAnchor((e.currentTarget as HTMLElement).closest('.edit-cell')!.getBoundingClientRect())
               }}
-              title={item.memo ?? undefined}
-              style={{ flex: 1, padding: '0 8px', fontSize: 12, color: item.memo ? C.text : C.textMuted, fontStyle: item.memo ? undefined : 'italic', opacity: item.memo ? 1 : 0.55, cursor: 'pointer', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: FONT }}>
-              {item.memo || '─'}
-            </span>
+              // 社内メモ本文はセル・ツールチップには出さない（本文は備考パネルを開いたときだけ）
+              title={[
+                item.memo ? `お客様向け備考: ${item.memo}` : null,
+                item.internal_memo ? '社内メモあり（クリックで確認）' : null,
+              ].filter(Boolean).join('\n') || '備考を入力'}
+              aria-label="備考を編集"
+              style={{ flex: 1, minWidth: 0, height: '100%', display: 'flex', alignItems: 'center', gap: 4, padding: '0 8px', border: 'none', background: 'transparent', cursor: 'pointer', fontFamily: FONT, fontSize: 12, textAlign: 'left' }}
+            >
+              {item.memo ? (
+                <span style={{ flex: 1, minWidth: 0, color: C.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.memo}</span>
+              ) : item.internal_memo ? (
+                // お客様向け備考が空で社内メモだけある行：本文は出さず「社内メモあり」の状態表示のみ
+                <span style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 4, color: C.textMuted, fontSize: 11, overflow: 'hidden', whiteSpace: 'nowrap' }}>
+                  <LockIcon size={11} color={C.textMuted} />
+                  社内メモあり
+                </span>
+              ) : (
+                <span style={{ flex: 1, color: C.textMuted, fontStyle: 'italic', opacity: 0.55 }}>─</span>
+              )}
+              {item.memo && item.internal_memo && <LockIcon size={11} color={C.textMuted} />}
+            </button>
           )}
         </div>
       </div>
+      {memoAnchor && (
+        <ItemMemoPopover
+          anchor={memoAnchor}
+          memo={item.memo}
+          internalMemo={item.internal_memo ?? null}
+          internalAvailable={internalMemoAvailable}
+          onSave={patch => onSave(patch)}
+          onClose={() => setMemoAnchor(null)}
+        />
+      )}
 
       {/* 業者名（内部専用） */}
       <div style={{ display: 'flex', alignItems: 'center', paddingLeft: 4, paddingRight: 4, height: '100%', overflow: 'hidden' }}>
@@ -1819,14 +1855,28 @@ export function EstimateTab({ projectId }: { projectId: string }) {
   // EstimateImportTab などの子コンポーネントがアンマウントされないようにする
   const hasLoadedRef = useRef(false)
 
+  // internal_memo 列は migration（20260928000001）適用後に存在する。
+  // 未適用環境（42703 = undefined_column）では列なしで再取得し、見積表が空にならないようにする
+  const [internalMemoAvailable, setInternalMemoAvailable] = useState(true)
+  const loadItems = useCallback(async () => {
+    const base = 'id,name,category,quantity,unit,selling_price,amount,retail_price,cost_price,vendor_name,group_id,sort_order,source,line_event_id,memo,row_type,selling_price_mode,markup_rate_override'
+    const withInternal = await supabase.from('estimate_items')
+      .select(`${base},internal_memo`)
+      .eq('project_id', projectId).is('deleted_at', null).order('sort_order')
+    if (withInternal.error?.code !== '42703') { setInternalMemoAvailable(true); return withInternal }
+    setInternalMemoAvailable(false)
+    console.warn('[EstimateTab] internal_memo 列が未作成のため社内メモなしで読み込みます（migration 未適用）')
+    return supabase.from('estimate_items')
+      .select(base)
+      .eq('project_id', projectId).is('deleted_at', null).order('sort_order')
+  }, [projectId, supabase])
+
   const reload = useCallback(() => {
     if (!hasLoadedRef.current) setLoading(true)
     return Promise.all([
       supabase.from('estimate_groups').select('id,label,display_mode,sort_order')
         .eq('project_id', projectId).is('deleted_at', null).order('sort_order'),
-      supabase.from('estimate_items')
-        .select('id,name,category,quantity,unit,selling_price,amount,retail_price,cost_price,vendor_name,group_id,sort_order,source,line_event_id,memo,row_type,selling_price_mode,markup_rate_override')
-        .eq('project_id', projectId).is('deleted_at', null).order('sort_order'),
+      loadItems(),
       supabase.from('projects')
         .select('misc_expense_override,rounding_discount,markup_rate')
         .eq('id', projectId).single(),
@@ -2328,7 +2378,7 @@ export function EstimateTab({ projectId }: { projectId: string }) {
       body: JSON.stringify({
         project_id: projectId, group_id: groupId,
         ...(insertSortOrder !== undefined ? { sort_order: insertSortOrder } : {}),
-        items: [{ name: row.name, quantity: row.quantity, unit: row.unit, cost_price: row.cost_price, vendor_name: row.vendor_name || null, memo: row.memo || null }],
+        items: [{ name: row.name, quantity: row.quantity, unit: row.unit, cost_price: row.cost_price, vendor_name: row.vendor_name || null, internal_memo: row.memo || null }],
       }),
     })
     if (res.ok) {
@@ -2651,6 +2701,7 @@ export function EstimateTab({ projectId }: { projectId: string }) {
 
   return (
     <GridColsCtx.Provider value={GRID_COLS}>
+    <InternalMemoAvailableCtx.Provider value={internalMemoAvailable}>
     <style>{`
       @keyframes tab-drag-fill {
         from { width: 0%; }
@@ -3649,6 +3700,7 @@ export function EstimateTab({ projectId }: { projectId: string }) {
       </>
     )}
 
+    </InternalMemoAvailableCtx.Provider>
     </GridColsCtx.Provider>
   )
 }

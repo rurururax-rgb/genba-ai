@@ -18,7 +18,8 @@
 import { MAX_MARKUP_RATE, MIN_MARKUP_RATE } from '@/lib/estimate/pricing'
 
 export const FIXTURE_PROJECT_ID = '00000000-0000-4000-8000-000000000a01'
-const STORAGE_KEY = 'ragz-qa-estimate-fixture-v1'
+// v2: internal_memo（社内メモ）を追加。v1 のデータは破棄して再シードする
+const STORAGE_KEY = 'ragz-qa-estimate-fixture-v2'
 
 type FixtureItem = {
   id: string
@@ -36,6 +37,7 @@ type FixtureItem = {
   source: string
   line_event_id: string | null
   memo: string | null
+  internal_memo: string | null
   row_type: 'item' | 'header' | 'note'
   selling_price_mode: 'auto' | 'manual'
   markup_rate_override: number | null
@@ -55,7 +57,7 @@ function item(n: number, p: Partial<FixtureItem>): FixtureItem {
     id: `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`,
     name: '新規項目', category: null, quantity: 1, unit: '式',
     selling_price: null, amount: null, retail_price: null, cost_price: null, vendor_name: null,
-    group_id: GROUP_ID, sort_order: n, source: 'manual', line_event_id: null, memo: null,
+    group_id: GROUP_ID, sort_order: n, source: 'manual', line_event_id: null, memo: null, internal_memo: null,
     row_type: 'item', selling_price_mode: 'auto', markup_rate_override: null,
   }
   const r = { ...base, ...p }
@@ -82,6 +84,15 @@ export function createSeed(): FixtureState {
       // AUTO + override（案件標準変更の対象外）
       item(6, { name: 'QA-6 庭石ハツリ', cost_price: 60000, selling_price: 72000, markup_rate_override: 1.2, vendor_name: 'QA土木' }),
       item(7, { name: 'QA-7 クロス施工', quantity: 42, unit: '㎡', cost_price: 1000, selling_price: 1450, vendor_name: 'QA内装' }),
+      // 備考シナリオ（お客様向け備考 / 社内メモ）
+      //   N1: 両方あり  N2: お客様向けのみ  N3: 社内メモのみ  N4: 両方なし
+      item(8,  { name: 'QA-N1 外壁塗装', cost_price: 300000, selling_price: 435000, vendor_name: 'QA塗装',
+                 memo: '工事期間中は駐車スペースをお借りします', internal_memo: '見積No. ABC-123' }),
+      item(9,  { name: 'QA-N2 雨樋交換', cost_price: 50000, selling_price: 72500, vendor_name: 'QA板金',
+                 memo: '既存雨樋は撤去処分いたします' }),
+      item(10, { name: 'QA-N3 足場', cost_price: 120000, selling_price: 174000, vendor_name: 'QA足場',
+                 internal_memo: '仕入先管理番号 SK-0912 / 田中さん確認済' }),
+      item(11, { name: 'QA-N4 養生', cost_price: 20000, selling_price: 29000 }),
     ],
     blocked: [],
   }
@@ -115,12 +126,13 @@ const pgRound = (x: number) => Math.sign(x) * Math.round(Math.abs(x))
 
 const ITEM_PATCH_FIELDS = [
   'quantity', 'selling_price', 'retail_price', 'name', 'unit', 'memo', 'cost_price',
-  'vendor_name', 'category', 'row_type', 'selling_price_mode', 'markup_rate_override',
+  'vendor_name', 'category', 'row_type', 'selling_price_mode', 'markup_rate_override', 'internal_memo',
 ] as const
 
 async function handle(url: URL, method: string, init: RequestInit | undefined, accept: string): Promise<Response | null> {
   const s = load()
-  const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {}
+  // JSON 以外（FormData 等：OCR のファイル送信）は本文を解釈しない
+  const body = typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : {}
 
   // ── Supabase REST（読み取りのみ） ──
   if (url.pathname.startsWith('/rest/v1/')) {
@@ -161,6 +173,33 @@ async function handle(url: URL, method: string, init: RequestInit | undefined, a
     s.items.push(it); save(s)
     // 実APIの select と同じ列だけ返す（selling_price_mode / markup_rate_override / retail_price は返らない）
     return json(omit(it, ['selling_price_mode', 'markup_rate_override', 'retail_price']))
+  }
+  // OCR / AI 読み取りの代替（Claude Vision は呼ばない）。元見積書の備考欄に社内情報が入っているケースを再現
+  if (p === '/api/ai/extract-estimate' && method === 'POST') {
+    const items = [
+      { name: 'QA-OCR 給湯器 GT-2460', quantity: 1, unit: '台', cost_price: 180000, vendor_name: 'QA設備商事', note: '見積No. 12345' },
+      { name: 'QA-OCR 配管工事',       quantity: 1, unit: '式', cost_price: 40000,  vendor_name: 'QA設備商事', note: '担当 佐藤 / 社内確認済' },
+    ]
+    return json({ files: [{ fileName: 'qa.png', supplier: 'QA設備商事', document_type: '御見積書', items, subtotal: 220000, raw_warning: null }], items })
+  }
+  // 実 API と同じ規則：取込の備考は internal_memo（社内メモ）のみ。memo（お客様向け備考）には入れない
+  if (p === '/api/estimate-items/import' && method === 'POST') {
+    const rows = (body.items as Array<Record<string, unknown>>) ?? []
+    let n = Math.max(0, ...s.items.map(i => Number(i.id.slice(-12))))
+    const base = typeof body.sort_order === 'number' ? body.sort_order : Math.max(-1, ...s.items.map(i => i.sort_order)) + 1
+    rows.forEach((r, i) => {
+      const cost = typeof r.cost_price === 'number' ? r.cost_price : null
+      const selling = cost != null && cost > 0 ? pgRound(cost * s.project.markup_rate) : null
+      const note = String((r.internal_memo ?? r.memo ?? '') as string).trim() || null
+      s.items.push(item(++n, {
+        name: String(r.name ?? ''), quantity: Number(r.quantity ?? 1), unit: String(r.unit ?? '式'),
+        cost_price: cost, selling_price: selling, vendor_name: (r.vendor_name as string | null) ?? null,
+        group_id: (body.group_id as string | null) ?? GROUP_ID, sort_order: base + i, source: 'import',
+        memo: null, internal_memo: note,
+      }))
+    })
+    save(s)
+    return json({ created: rows.length })
   }
   if (p === `/api/projects/${FIXTURE_PROJECT_ID}/apply-markup-rate` && method === 'POST') {
     const rate = Number(body.new_rate)

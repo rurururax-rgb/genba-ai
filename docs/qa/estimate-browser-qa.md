@@ -65,3 +65,18 @@ DOM 表示値と DB 値（REST GET）の突合は読み取りのみで実施す�
 - 解除後に再開したとき、前回の選択が残っていない
 - 例：合計モード … ON → セル選択 → 右下 ✕ → 「∑ 合計」ボタンが非 active・合計バー非表示
   → 再度押すと新しい合計モードが 0 セルから開始
+
+## 備考（お客様向け備考 / 社内メモ）の公開範囲チェック
+
+- `estimate_items.memo` = お客様向け備考（見積書・Excel に出る）
+- `estimate_items.internal_memo` = 社内メモ（お客様向け出力には出ない）
+- お客様向け出力は `lib/estimate/customer-output.ts`（許可リスト）を必ず通す
+
+Fixture：`/qa/estimate`（編集）と `/qa/estimate/document`（本番と同じ見積書描画）。
+
+1. 社内メモの文字列が見積書の **HTML 全体**（`document.documentElement.outerHTML`）に含まれないこと
+   （表示テキストだけでなく属性・隠し要素も対象）。「社内メモ」という見出しも出さない
+2. OCR 取込（Fixture は `/api/ai/extract-estimate` を模擬）の備考が社内メモに入り、お客様向け備考が空であること
+3. 社内メモだけの行・両方空の行は、見積書の備考セルが通常の空欄になること（余計な枠や文言を出さない）
+4. 編集 → 保存 → 見積書 → 戻る → 再読み込み後も、保存先の値と画面表示が一致すること
+5. Excel は `__tests__/estimate-excel-internal-memo.test.ts` が実ファイルを生成して検査する
