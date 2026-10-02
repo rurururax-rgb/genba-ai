@@ -9,6 +9,7 @@
 import React from 'react'
 import { PrintButton } from './PrintButton'
 import type { CustomerEstimateItem } from '@/lib/estimate/customer-output'
+import { supportsLegacyRugsDocuments } from '@/lib/company/templates'
 
 // お客様向け明細（社内メモ・原価・業者名を含まない）。toCustomerEstimateItems() を通したもののみ
 type Item = CustomerEstimateItem
@@ -126,6 +127,8 @@ function EmptyRow() {
 }
 
 function CompanyName({ name }: { name: string }) {
+  // 会社名が取得できない場合は欄ごと省略する（他社名を代わりに出さない）
+  if (!name) return null
   return (
     <div style={{ textAlign: 'right', marginTop: 5, fontSize: 11, fontWeight: 700, fontFamily: FONT }}>
       {name}
@@ -153,7 +156,7 @@ export type EstimateDocumentProject = {
 export function EstimateDocument({ projectId, project, company, groups, items }: {
   projectId: string
   project:   EstimateDocumentProject
-  company:   { name: string; display_name: string | null; tax_rate: number } | null
+  company:   { name: string; display_name: string | null; tax_rate: number | null; template_id?: string | null } | null
   groups:    Array<{ id: string; label: string; sort_order: number }>
   /** お客様向け明細。必ず toCustomerEstimateItems() を通したものを渡すこと */
   items:     CustomerEstimateItem[]
@@ -187,7 +190,10 @@ export function EstimateDocument({ projectId, project, company, groups, items }:
   const taxAmount       = Math.floor(taxBase * taxRate)
   const grandTotal      = taxBase + taxAmount
 
-  const companyName = company?.display_name ?? company?.name ?? 'ラグズ建築'
+  // 会社名は会社設定（display_name → name）のみから出す。特定会社名を fallback にしない
+  const companyName = (company?.display_name ?? company?.name ?? '').trim()
+  // ラグズ建築専用の表紙ロゴは template_id = 'rugs' の会社だけ（lib/company/templates.ts）
+  const showRugsLogo = supportsLegacyRugsDocuments(company)
 
   // 表紙用の日付計算
   const now = new Date()
@@ -495,12 +501,19 @@ export function EstimateDocument({ projectId, project, company, groups, items }:
               </div>
               {/* ロゴ（上）+ 捺印（「建築」の下・右寄せ）：縦並びで右端に揃える */}
               <div style={{ flex: '0 0 52%', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', paddingLeft: 18 }}>
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src="/excel-images/cover-logo.png"
-                  alt="株式会社ラグズ建築"
-                  style={{ width: '100%', height: 76, objectFit: 'contain', objectPosition: 'right top' }}
-                />
+                {showRugsLogo ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src="/excel-images/cover-logo.png"
+                    alt="株式会社ラグズ建築"
+                    style={{ width: '100%', height: 76, objectFit: 'contain', objectPosition: 'right top' }}
+                  />
+                ) : (
+                  // 汎用帳票：ロゴは出さず、会社の表示名を文字で出す（未設定なら空欄）
+                  <div style={{ width: '100%', minHeight: 76, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', fontSize: 20, fontWeight: 700, fontFamily: FONT, textAlign: 'right' }}>
+                    {companyName}
+                  </div>
+                )}
                 {/* 捺印欄：「建築」の2文字の下 = 右端に配置 */}
                 <div style={{
                   width: 60, height: 60, marginTop: 4,
