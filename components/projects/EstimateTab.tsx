@@ -1733,7 +1733,11 @@ function RevDiffModal({ rev, currentItems, fmt, onClose, fontFamily }: {
 
 // ── EstimateTab ───────────────────────────────────────────
 
-export function EstimateTab({ projectId }: { projectId: string }) {
+export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
+  projectId: string
+  /** ラグズ建築専用の legacy 帳票（請求書）への導線を出すか。既定は false */
+  legacyRugsDocuments?: boolean
+}) {
   const supabase = useRef(getClient()).current
 
   const [groups,      setGroups]      = useState<EstimateGroup[]>([])
@@ -2824,18 +2828,22 @@ export function EstimateTab({ projectId }: { projectId: string }) {
             見積書を表示
           </a>
           <div style={{ width: 1, height: 18, background: C.divider }} />
-          <button
-            onClick={() => window.dispatchEvent(new CustomEvent('genba:tab', { detail: 'invoice' }))}
-            className="est-tb-invoice"
-            style={{ ...st.tbBtn, display: 'inline-flex', alignItems: 'center', gap: 5, borderColor: '#A0BFD8', color: '#1E3A5F', background: '#EFF6FF' }}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/>
-              <line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="11" x2="15" y2="11"/>
-            </svg>
-            請求書を作成
-          </button>
-          <div style={{ width: 1, height: 18, background: C.divider }} />
+          {legacyRugsDocuments && (
+            <>
+            <button
+              onClick={() => window.dispatchEvent(new CustomEvent('genba:tab', { detail: 'invoice' }))}
+              className="est-tb-invoice"
+              style={{ ...st.tbBtn, display: 'inline-flex', alignItems: 'center', gap: 5, borderColor: '#A0BFD8', color: '#1E3A5F', background: '#EFF6FF' }}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/>
+                <line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="11" x2="15" y2="11"/>
+              </svg>
+              請求書を作成
+            </button>
+            <div style={{ width: 1, height: 18, background: C.divider }} />
+            </>
+          )}
           <Button
             type="button"
             variant="secondary"

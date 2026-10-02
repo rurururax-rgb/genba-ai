@@ -1,11 +1,15 @@
 'use client'
 
 import { useState, useEffect } from 'react'
+import dynamic from 'next/dynamic'
 import { EstimateTab } from './EstimateTab'
 import { SpecImportTab } from './SpecImportTab'
 import { CostLedgerTab } from './CostLedgerTab'
 import { ProjectInfoPanel } from './ProjectInfoPanel'
-import { InvoiceTab } from './InvoiceTab'
+
+// 請求書はラグズ建築専用の legacy 帳票（振込先・登録番号・住所が埋め込まれている）。
+// 対象会社で実際に開いたときだけ読み込み、他社の画面には配信しない
+const InvoiceTab = dynamic(() => import('./InvoiceTab').then(m => m.InvoiceTab))
 import { ScheduleTab } from './ScheduleTab'
 
 type Tab = 'estimate' | 'spec-import' | 'cost-ledger' | 'info' | 'invoice' | 'schedule'
@@ -97,12 +101,17 @@ export function ProjectTabs({
   projectId,
   projectInfo,
   defaultTab,
+  legacyRugsDocuments = false,
 }: {
   projectId: string
   projectInfo: ProjectInfo
   defaultTab?: string
+  /** ラグズ建築専用の legacy 帳票（請求書・挨拶状）を使える会社か。既定は false */
+  legacyRugsDocuments?: boolean
 }) {
-  const [tab, setTab] = useState<Tab>((defaultTab as Tab) || 'estimate')
+  const [requestedTab, setTab] = useState<Tab>((defaultTab as Tab) || 'estimate')
+  // 請求書タブは対象会社のみ。URL（?tab=invoice）やイベントで指定されても、他社では見積タブに戻す
+  const tab: Tab = requestedTab === 'invoice' && !legacyRugsDocuments ? 'estimate' : requestedTab
 
   // グローバルサイドバーからのタブ切替イベントを受信
   useEffect(() => {
@@ -116,9 +125,9 @@ export function ProjectTabs({
 
   const content = (
     <>
-      {tab === 'info'        && <ProjectInfoPanel project={projectInfo} />}
-      {tab === 'estimate'    && <EstimateTab projectId={projectId} />}
-      {tab === 'invoice'     && <InvoiceTab projectId={projectId} projectInfo={projectInfo} />}
+      {tab === 'info'        && <ProjectInfoPanel project={projectInfo} legacyRugsDocuments={legacyRugsDocuments} />}
+      {tab === 'estimate'    && <EstimateTab projectId={projectId} legacyRugsDocuments={legacyRugsDocuments} />}
+      {tab === 'invoice'     && legacyRugsDocuments && <InvoiceTab projectId={projectId} projectInfo={projectInfo} />}
       {tab === 'spec-import' && <SpecImportTab projectId={projectId} />}
       {tab === 'cost-ledger' && <CostLedgerTab projectId={projectId} />}
       {tab === 'schedule'    && <ScheduleTab projectId={projectId} />}

@@ -1,5 +1,6 @@
 import { getServerClient } from '@/lib/supabase/server'
-import { redirect } from 'next/navigation'
+import { notFound, redirect } from 'next/navigation'
+import { supportsLegacyRugsDocuments } from '@/lib/company/templates'
 import { GreetingDocument } from './GreetingDocument'
 
 type Params = Promise<{ id: string }>
@@ -19,14 +20,17 @@ export default async function GreetingPage({ params }: { params: Params }) {
       .single(),
     supabase
       .from('company_members')
-      .select('company_id, companies(name, display_name)')
+      .select('company_id, companies(name, display_name, template_id)')
       .eq('user_id', user.id)
       .single(),
   ])
 
   if (!project) redirect('/projects')
 
-  const co = membership?.companies as { name?: string; display_name?: string | null } | null
+  const co = membership?.companies as { name?: string; display_name?: string | null; template_id?: string | null } | null
+  // 挨拶回り文書はラグズ建築専用の legacy 帳票（ロゴ・住所・代表者名が埋め込まれている）。
+  // 対象会社以外では、直接 URL を開いても表示しない
+  if (!supportsLegacyRugsDocuments(co)) notFound()
   const companyName = co?.display_name ?? co?.name ?? ''
 
   return (

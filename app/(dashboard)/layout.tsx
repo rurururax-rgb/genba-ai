@@ -1,11 +1,21 @@
 import { Sidebar }   from '@/components/shell/Sidebar'
 import { BottomNav } from '@/components/shell/BottomNav'
+import { getServerClient } from '@/lib/supabase/server'
+import { getCurrentCompany } from '@/lib/company/current-company'
+import { supportsLegacyRugsDocuments } from '@/lib/company/templates'
 
-export default function DashboardLayout({
+export default async function DashboardLayout({
   children,
 }: {
   children: React.ReactNode
 }) {
+  // ラグズ建築専用の legacy 帳票（請求書など）への導線は、対象会社にだけ出す。
+  // 未ログイン・会社情報が取れない場合は出さない（Fail Closed）
+  const supabase = await getServerClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  const company = user ? await getCurrentCompany(supabase, user.id) : null
+  const legacyRugsDocuments = supportsLegacyRugsDocuments(company)
+
   return (
     /*
      * lg 以上: サイドバー（240px固定）+ コンテンツエリア（flex-1）の横並び
@@ -15,7 +25,7 @@ export default function DashboardLayout({
 
       {/* ── デスクトップ サイドバー（lg 以上のみ表示） ── */}
       <div className="hidden lg:flex no-print">
-        <Sidebar />
+        <Sidebar legacyRugsDocuments={legacyRugsDocuments} />
       </div>
 
       {/* ── メインコンテンツ ── */}
