@@ -18,6 +18,7 @@ import { getClient } from '@/lib/supabase/client'
 import { calculateSellingPrice, DEFAULT_MARKUP_RATE, getEffectiveMarkupRate, getItemPricingState, markupToMarginRate, normalizeMarkupOverride, resolveSellingPrice, type SellingPriceMode } from '@/lib/estimate/pricing'
 import { ItemPricingPopover, MarginCell, fmtMarginPct, fmtMarkup } from './ItemPricingPopover'
 import { ProjectMarkupDialog } from './ProjectMarkupDialog'
+import { resolveNumericCommit } from '@/lib/input/numeric-input'
 import { EstimateImportTab } from './EstimateImportTab'
 
 // ── 型定義 ────────────────────────────────────────────────
@@ -239,6 +240,11 @@ function DeleteBtn({ onClick, disabled }: { onClick: () => void; disabled?: bool
   )
 }
 
+// IME 変換中のキー入力か（Chrome/Edge: isComposing、Safari: 変換確定 Enter は keyCode 229）
+function isImeComposing(e: React.KeyboardEvent): boolean {
+  return e.nativeEvent.isComposing || e.keyCode === 229
+}
+
 // ── NumInput ──────────────────────────────────────────────
 
 function NumInput({
@@ -262,8 +268,11 @@ function NumInput({
   }
   function commit() {
     setEditing(false)
-    const n = draft === '' ? null : parseFloat(draft)
-    onChange(n != null && !isNaN(n) ? n : null)
+    // 数値の解釈は lib/input/numeric-input.ts に一本化（全角・桁区切り・¥ を受け付ける）。
+    // 解釈できない入力は保存せず、元の値のまま表示に戻す（空欄や 0 に変換しない）
+    const result = resolveNumericCommit(draft)
+    if (result.action === 'revert') return
+    onChange(result.action === 'clear' ? null : result.value)
   }
 
   if (editing) {
@@ -273,9 +282,11 @@ function NumInput({
         onChange={e => setDraft(e.target.value)}
         onBlur={commit}
         onKeyDown={e => {
+          e.stopPropagation()
+          // 日本語IMEの変換確定 Enter では確定しない（変換中の文字列を保存しない）
+          if (isImeComposing(e)) return
           if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); commit() }
           if (e.key === 'Escape') setEditing(false)
-          e.stopPropagation()
         }}
         style={{
           width: '100%', height: CELL_H,
@@ -358,9 +369,11 @@ function TextInput({ value, onChange, placeholder = '─' }: {
       <input ref={ref} autoFocus type="text" value={draft}
         onChange={e => setDraft(e.target.value)} onBlur={commit}
         onKeyDown={e => {
+          e.stopPropagation()
+          // 日本語IMEの変換確定 Enter では確定しない（変換中の文字列を保存しない）
+          if (isImeComposing(e)) return
           if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); commit() }
           if (e.key === 'Escape') setEditing(false)
-          e.stopPropagation()
         }}
         style={{
           width: '100%', height: CELL_H,
@@ -783,7 +796,7 @@ function GroupHeader({
             onChange={e => setLabelDraft(e.target.value)}
             onBlur={commitLabel}
             onKeyDown={e => {
-              if (e.key === 'Enter') commitLabel()
+              if (e.key === 'Enter' && !isImeComposing(e)) commitLabel()
               if (e.key === 'Escape') { setLabelDraft(group.label); setEditingLabel(false) }
               e.stopPropagation()
             }}
@@ -1012,6 +1025,8 @@ function ItemRow({
   }
 
   function handleKey(e: React.KeyboardEvent, field: string) {
+    // 日本語IMEの変換確定 Enter / 変換中の Tab ではセルを確定しない
+    if (isImeComposing(e)) { e.stopPropagation(); return }
     if (e.key === 'Tab') {
       e.preventDefault(); e.stopPropagation()
       const idx  = FIELD_ORDER.indexOf(field as typeof FIELD_ORDER[number])
@@ -3470,7 +3485,7 @@ export function EstimateTab({ projectId }: { projectId: string }) {
               autoFocus
               value={revLabel}
               onChange={e => setRevLabel(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') handleCreateRevision() }}
+              onKeyDown={e => { if (e.key === 'Enter' && !isImeComposing(e)) handleCreateRevision() }}
               placeholder="例：初版、設計変更1回目、追加工事後"
               className="w-full"
             />
