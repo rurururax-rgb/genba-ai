@@ -9,7 +9,7 @@ const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 const SYSTEM_PROMPT = `あなたはリフォーム会社の見積書画像から明細項目を抽出する専門アシスタントです。
 
 ## 最重要ルール
-- 抽出するのは「仕入れ原価（業者からラグズ建築への請求金額）」です
+- 抽出するのは「仕入れ原価（業者から自社への請求金額）」です
 - 「顧客向け販売価格」は絶対に出力しません
 - selling_price という項目は出力しません
 - 必ず以下のJSON形式のみで回答してください。説明文は不要です

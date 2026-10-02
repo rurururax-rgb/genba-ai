@@ -2,7 +2,7 @@ import { redirect } from 'next/navigation'
 import { getServerClient } from '@/lib/supabase/server'
 import { MaterialMasterList } from '@/components/materials/MaterialMasterList'
 
-export const metadata = { title: '資材マスター — 現場AI' }
+export const metadata = { title: '資材マスター — RAGZ' }
 
 export default async function MaterialsPage() {
   const supabase = await getServerClient()

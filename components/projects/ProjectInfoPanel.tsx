@@ -264,7 +264,7 @@ export function ProjectInfoPanel({ project }: { project: ProjectInfo }) {
               style={s.input}
               value={form.person_in_charge ?? ''}
               onChange={e => set('person_in_charge', e.target.value || null)}
-              placeholder="例：栗本 佳一"
+              placeholder="例：山田 太郎"
             />
           </Field>
         </div>
