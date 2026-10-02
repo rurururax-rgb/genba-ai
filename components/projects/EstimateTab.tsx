@@ -635,8 +635,10 @@ function SummaryEditCell({
   }
   function commit() {
     setEditing(false)
-    const n = draft === '' ? 0 : parseFloat(draft)
-    onCommit(isNaN(n) ? 0 : Math.round(Math.abs(n)))
+    // 解釈できない入力は保存しない（以前は 0 として保存していた）。空欄は従来どおり 0
+    const result = resolveNumericCommit(draft)
+    if (result.action === 'revert') return
+    onCommit(result.action === 'clear' ? 0 : Math.round(Math.abs(result.value)))
   }
 
   const displayColor = negative && value > 0 ? C.red : highlight ? C.accent : C.textSub
@@ -665,6 +667,7 @@ function SummaryEditCell({
           onChange={e => setDraft(e.target.value)}
           onBlur={commit}
           onKeyDown={e => {
+            if (isImeComposing(e)) return
             if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); commit() }
             if (e.key === 'Escape') setEditing(false)
           }}
