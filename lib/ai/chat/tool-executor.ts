@@ -54,6 +54,7 @@ import {
   listCompanyProjects,
 } from '@/lib/services/company-summary'
 import { getCompanyBillingStatus } from '@/lib/services/billing-status'
+import { executeGetEstimateTotal } from './estimate-total'
 
 // ─────────────────────────────────────────────────────────
 // 実行コンテキスト（route.ts から渡される認証済み情報）
@@ -919,6 +920,9 @@ export async function dispatchTool(
     case TOOL_NAME.SEARCH_ESTIMATES:
       result = await executeSearchEstimates(toolInput as SearchEstimatesArgs, ctx)
       break
+    case TOOL_NAME.GET_ESTIMATE_TOTAL:
+      // projectId はスコープ保護により非 null。入力は受け取らない（AI に ID・金額を渡させない）
+      return { serialized: JSON.stringify(await executeGetEstimateTotal(ctx.supabase, ctx.projectId!)) }
     case TOOL_NAME.SEARCH_CATALOG:
       result = await executeSearchCatalog(toolInput as SearchCatalogArgs, ctx)
       break

@@ -20,7 +20,8 @@ export const TOOL_NAME = {
   // ── project-scoped（project_id 必須） ──────────────────
   // read系
   SEARCH_ESTIMATES:         'search_estimates',
-  SEARCH_CATALOG:           'search_catalog',
+  GET_ESTIMATE_TOTAL:       'get_estimate_total',
+  SEARCH_CATALOG:          'search_catalog',
   SEARCH_COST_LEDGER:       'search_cost_ledger',
   // 外部検索
   SEARCH_MATERIAL_WEB:      'search_material_web',
@@ -45,6 +46,7 @@ export type ToolName = typeof TOOL_NAME[keyof typeof TOOL_NAME]
 /** project-scoped ツール名セット（会社全体モードでの誤呼び出し防止用） */
 export const PROJECT_SCOPED_TOOLS = new Set<string>([
   TOOL_NAME.SEARCH_ESTIMATES,
+  TOOL_NAME.GET_ESTIMATE_TOTAL,
   TOOL_NAME.SEARCH_COST_LEDGER,
   TOOL_NAME.SEARCH_MATERIAL_WEB,
   TOOL_NAME.ADD_ESTIMATE_ITEM,
@@ -80,8 +82,13 @@ export const chatTools: Tool[] = [
       '',
       '【使用タイミング】',
       '- 「○○という工事はいくら？」「△△の単価を確認したい」',
-      '- 見積の合計や特定グループの小計を確認したいとき',
+      '- 特定グループの小計を確認したいとき',
       '- 特定項目の存在確認（「防水工事は入っているか」等）',
+      '- 案件全体の見積金額・税込/税抜合計・諸経費には使わない（get_estimate_total を使う）',
+      '',
+      '【結果の意味】',
+      '- not_found は「検索語に一致する項目がなかった」という意味であり、',
+      '  「見積項目が存在しない」ことを意味しない',
       '',
       '【制約】',
       '- 閲覧専用。このツールは変更を行いません',
@@ -122,6 +129,33 @@ export const chatTools: Tool[] = [
         },
       },
       required: ['query'],
+    },
+  },
+
+  // ── 1b. get_estimate_total ───────────────────────────
+  {
+    name: TOOL_NAME.GET_ESTIMATE_TOTAL,
+    description: [
+      '現在開いている案件の見積合計を取得します（見積画面の「合計（税込）」と同じ計算）。',
+      '案件の全見積明細を対象に、RAGZ が計算済みの金額を返します。',
+      '',
+      '【使用タイミング】',
+      '- 「この案件の見積はいくら？」「見積金額を教えて」「今の見積総額は？」',
+      '- 「税込総額は？」「税抜はいくら？」「諸経費はいくら？」「諸経費込みでいくら？」',
+      '',
+      '【使用しない】',
+      '- 特定商品・品目の検索（search_estimates）',
+      '- 過去案件・カタログの検索（search_catalog）',
+      '',
+      '【結果の使い方】',
+      '- 返された数値をそのまま回答に使う。AI 側で再計算・補正しない',
+      '- item_count が 0 のときだけ「見積明細が0件」と判断してよい',
+      '- status が error のときは金額を推測せず、取得できなかったと伝える',
+      '- 閲覧専用。このツールは変更を行いません',
+    ].join('\n'),
+    input_schema: {
+      type: 'object' as const,
+      properties: {},
     },
   },
 
@@ -571,6 +605,16 @@ export const chatTools: Tool[] = [
   },
 
 ]
+
+/** project mode のシステムプロンプトに入れる見積合計の回答ルール */
+export const ESTIMATE_TOTAL_PROMPT_RULES = `
+## 見積金額・合計の質問
+- 「この案件の見積はいくら？」「見積金額」「税込総額」「税抜」「諸経費」「見積総額」などの質問には必ず get_estimate_total を使う
+- get_estimate_total が返した数値をそのまま答える。AI 側で再計算・補正・推測しない
+- 税込は total_including_tax、税抜は pre_tax_total、諸経費は overhead、明細小計は item_subtotal、端数値引は rounding_discount を使う
+- 「見積項目が登録されていない」と答えてよいのは get_estimate_total の item_count が 0 のときだけ
+- search_estimates の not_found は「検索語に一致する項目がなかった」という意味であり、見積項目が存在しないことを意味しない
+`.trim()
 
 // ─────────────────────────────────────────────────────────
 // 会社全体モード用ツール定義（project_id 不要）
