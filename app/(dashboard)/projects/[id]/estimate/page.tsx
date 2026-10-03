@@ -30,10 +30,10 @@ export default async function EstimateDocumentPage({ params }: Params) {
 
   const { data: membership } = await supabase
     .from('company_members')
-    .select('company_id, companies(name, display_name, tax_rate)')
+    .select('company_id, companies(name, display_name, tax_rate, template_id)')
     .eq('user_id', user.id)
     .single()
-  const company = membership?.companies as unknown as { name: string; display_name: string | null; tax_rate: number } | null
+  const company = membership?.companies as unknown as { name: string; display_name: string | null; tax_rate: number; template_id: string | null } | null
 
   const { data: groups } = await supabase
     .from('estimate_groups')

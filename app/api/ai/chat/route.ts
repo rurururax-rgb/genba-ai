@@ -248,7 +248,7 @@ function buildSystemPrompt(
 ): string {
   const catalogContext = buildCatalogContext(catalogItems)
   return `
-あなたは工務店向け業務補助ツール「現場AI」のチャットアシスタントです。
+あなたは工務店向け業務補助ツール「RAGZ」のチャットアシスタントです。
 担当者が現在開いている案件の見積・原価・カタログを検索・確認する際のサポートを行います。
 
 ## 現在の案件
@@ -327,7 +327,7 @@ ${catalogContext ? '\n' + catalogContext : ''}
 function buildCompanySystemPrompt(catalogItems: CatalogItem[]): string {
   const catalogContext = buildCatalogContext(catalogItems)
   return `
-あなたは工務店向け業務補助ツール「現場AI」の会社全体アシスタントです。
+あなたは工務店向け業務補助ツール「RAGZ」の会社全体アシスタントです。
 担当者が全案件の状況・請求・入金を横断的に確認する際のサポートを行います。
 
 ## あなたの役割

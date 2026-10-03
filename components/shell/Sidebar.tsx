@@ -275,7 +275,10 @@ function IconBtn({
 
 // ── Sidebar ─────────────────────────────────────────────────
 
-export function Sidebar() {
+export function Sidebar({ legacyRugsDocuments = false }: {
+  /** ラグズ建築専用の legacy 帳票（請求書）を使える会社か。既定は false（導線を出さない） */
+  legacyRugsDocuments?: boolean
+}) {
   const pathname   = usePathname()
   const projectId  = getProjectId(pathname)
   const inProject  = Boolean(projectId)
@@ -317,7 +320,7 @@ export function Sidebar() {
             <div style={s.subDivider} />
 
             {/* プロジェクトタブアイコン */}
-            {PROJECT_TABS.map(t => (
+            {PROJECT_TABS.filter(t => t.id !== 'invoice' || legacyRugsDocuments).map(t => (
               <IconBtn
                 key={t.id}
                 icon={t.icon}

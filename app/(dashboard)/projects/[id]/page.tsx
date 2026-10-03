@@ -3,6 +3,9 @@ import { redirect } from 'next/navigation'
 import { ProjectTabs } from '@/components/projects/ProjectTabs'
 import { ProjectHeader } from '@/components/projects/ProjectHeader'
 import { ChatPanel } from '@/components/projects/ChatPanel'
+import { getCurrentCompany } from '@/lib/company/current-company'
+import { supportsLegacyRugsDocuments } from '@/lib/company/templates'
+import { getInvoiceIssuerProfile } from '@/lib/company/rugs-invoice-issuer.server'
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
   collecting: { label: '情報収集中', color: '#6B7280', bg: '#F3F4F6' },
@@ -33,6 +36,12 @@ export default async function ProjectDetailPage({ params, searchParams }: Props)
     .single()
 
   if (!project) redirect('/projects')
+
+  // ラグズ建築専用の legacy 帳票（請求書・挨拶状）を使える会社か（lib/company/templates.ts）
+  const company = await getCurrentCompany(supabase, user.id)
+  const legacyRugsDocuments = supportsLegacyRugsDocuments(company)
+  // 請求書の発行者情報（振込先など）はサーバー専用。対象会社のときだけクライアントへ渡す（他社は null）
+  const invoiceIssuer = getInvoiceIssuerProfile(company)
 
   // 請求書・見積データから実績ステータスを導出
   const [{ data: invoices }, { data: estimates }] = await Promise.all([
@@ -101,6 +110,8 @@ export default async function ProjectDetailPage({ params, searchParams }: Props)
           payment_completion_pct: (project as Record<string, unknown>).payment_completion_pct as number | null ?? null,
         }}
         defaultTab={defaultTab}
+        legacyRugsDocuments={legacyRugsDocuments}
+        invoiceIssuer={invoiceIssuer}
       />
 
       {/* ── AIチャットパネル（固定FAB） ── */}

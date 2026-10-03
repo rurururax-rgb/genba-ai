@@ -30,6 +30,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getAdminClient } from '@/lib/supabase/admin'
+import { getBriefingTargetCompany } from '@/lib/services/briefing-target'
 import { getDailyBriefingItems, filterHighPriorityItems, formatBriefingMessage } from '@/lib/services/daily-briefing'
 import { summarizeBriefingWithAI } from '@/lib/services/briefing-summarizer'
 import { sendLinePushMessage, maskUserId } from '@/lib/line/push'
@@ -230,35 +231,31 @@ async function runDailyBriefing(request: NextRequest): Promise<NextResponse> {
   const jstDate = getJstDate()
   console.log(`[Cron] daily-briefing 開始 date=${jstDate}`)
 
-  const { data: companies, error: compErr } = await supabaseAdmin
-    .from('companies')
-    .select('id, name')
+  // 対象は LINE_COMPANY_ID に明示された 1 社だけ（lib/services/briefing-target.ts）。
+  // 全社を取得して送ることはしない：通知先（LINE_BRIEFING_USER_ID）は 1 社のものであり、
+  // 他社の案件情報を送ると会社間の情報流出になる。未設定・不正・不存在はすべて 0 社（Fail Closed）。
+  const target = await getBriefingTargetCompany(supabaseAdmin, process.env.LINE_COMPANY_ID)
 
-  if (compErr || !companies || companies.length === 0) {
-    console.error('[Cron] 会社一覧取得失敗:', compErr?.message ?? 'no data')
-    return NextResponse.json({ error: 'Failed to fetch companies' }, { status: 500 })
-  }
-
-  console.log(`[Cron] 対象会社: ${companies.length}件`)
-
-  const results: Array<{
-    company_id:   string
-    company_name: string
-    result:       string
-    reason?:      string
-    item_count?:  number
-  }> = []
-
-  for (const company of companies as Array<{ id: string; name: string }>) {
-    const r = await processBriefingForCompany(company.id, jstDate)
-    results.push({
-      company_id:   company.id,
-      company_name: company.name,
-      result:       r.result,
-      reason:       r.reason,
-      item_count:   r.itemCount,
+  if (!target) {
+    console.log(`[Cron] LINE company is not configured; skipped date=${jstDate}`)
+    return NextResponse.json({
+      date:    jstDate,
+      summary: { sent: 0, skipped: 0, failed: 0 },
+      results: [],
+      note:    'LINE company is not configured; skipped',
     })
   }
+
+  console.log('[Cron] 対象会社: 1件')
+
+  const r = await processBriefingForCompany(target.id, jstDate)
+  const results = [{
+    company_id:   target.id,
+    company_name: target.name,
+    result:       r.result as string,
+    reason:       r.reason,
+    item_count:   r.itemCount,
+  }]
 
   const sentCount    = results.filter(r => r.result === 'sent').length
   const skippedCount = results.filter(r => r.result === 'skipped' || r.result === 'already_done').length

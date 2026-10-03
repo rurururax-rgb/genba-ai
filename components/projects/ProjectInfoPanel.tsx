@@ -194,7 +194,11 @@ function Field({
 
 // ── メインコンポーネント ────────────────────────────────────
 
-export function ProjectInfoPanel({ project }: { project: ProjectInfo }) {
+export function ProjectInfoPanel({ project, legacyRugsDocuments = false }: {
+  project: ProjectInfo
+  /** ラグズ建築専用の legacy 帳票（挨拶回り文書）への導線を出すか。既定は false */
+  legacyRugsDocuments?: boolean
+}) {
   const [form, setForm] = useState<ProjectInfo>({ ...project })
   const [saving, setSaving] = useState(false)
   const [toast, setToast] = useState('')
@@ -264,7 +268,7 @@ export function ProjectInfoPanel({ project }: { project: ProjectInfo }) {
               style={s.input}
               value={form.person_in_charge ?? ''}
               onChange={e => set('person_in_charge', e.target.value || null)}
-              placeholder="例：栗本 佳一"
+              placeholder="例：山田 太郎"
             />
           </Field>
         </div>
@@ -374,8 +378,8 @@ export function ProjectInfoPanel({ project }: { project: ProjectInfo }) {
       </div>
 
       {/* ── 保存 + 挨拶回り出力 ── */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
-        <a
+      <div style={{ display: 'flex', justifyContent: legacyRugsDocuments ? 'space-between' : 'flex-end', alignItems: 'center', marginTop: 8 }}>
+        {legacyRugsDocuments && <a
           href={`/projects/${form.id}/greeting`}
           target="_blank"
           rel="noreferrer"
@@ -394,7 +398,7 @@ export function ProjectInfoPanel({ project }: { project: ProjectInfo }) {
             <line x1="16" y1="17" x2="8" y2="17"/>
           </svg>
           挨拶回り文書を出力
-        </a>
+        </a>}
         <button
           style={{ ...s.saveBtn, ...(saving ? s.saveBtnDisabled : {}) }}
           onClick={save}

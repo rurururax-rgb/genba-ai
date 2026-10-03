@@ -3,6 +3,7 @@ import { getServerClient } from '@/lib/supabase/server'
 import { fillTemplateV2 } from '@/lib/excel/fill-template-v2'
 import { buildEstimateExcelInput } from '@/lib/excel/estimate-excel-input'
 import { CUSTOMER_ESTIMATE_ITEM_COLUMNS, toCustomerEstimateItems } from '@/lib/estimate/customer-output'
+import { supportsLegacyRugsDocuments } from '@/lib/company/templates'
 
 export async function GET(
   _req: NextRequest,
@@ -17,7 +18,7 @@ export async function GET(
   // プロジェクト + 会社情報（tax_rate を含む）
   const { data: project, error: projErr } = await supabase
     .from('projects')
-    .select('name, customer_name, site_address, companies(name, tax_rate)')
+    .select('name, customer_name, site_address, companies(name, tax_rate, template_id)')
     .eq('id', projectId)
     .single()
 
@@ -26,6 +27,12 @@ export async function GET(
   }
 
   const companiesRaw = project.companies as unknown
+
+  // Excel テンプレートはラグズ建築専用（社名・住所・電話・登録番号・画像が埋め込まれている）。
+  // 対象 project → company → template_id を確認し、対象会社以外には生成しない
+  if (!supportsLegacyRugsDocuments(companiesRaw as { template_id?: string | null } | null)) {
+    return NextResponse.json({ error: 'この会社では Excel 出力は利用できません' }, { status: 403 })
+  }
   const taxRate = (
     companiesRaw && typeof companiesRaw === 'object' && 'tax_rate' in companiesRaw
       ? (companiesRaw as { tax_rate: number }).tax_rate
