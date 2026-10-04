@@ -157,7 +157,7 @@ export function ProjectTabs({
 
   return (
     <>
-      <nav aria-label="案件内の画面" className="lg:hidden no-print" style={s.tabBar}>
+      <nav aria-label="案件内の画面" className="flex lg:hidden no-print" style={s.tabBar}>
         {mobileTabs.map(t => {
           const active = tab === t.id
           return (
@@ -187,8 +187,8 @@ export function ProjectTabs({
 // ── スタイル ───────────────────────────────────────────────
 
 const s: Record<string, React.CSSProperties> = {
+  // display はクラス（flex lg:hidden）で切り替える。inline に書くと lg:hidden が効かない
   tabBar: {
-    display: 'flex',
     overflowX: 'auto',
     background: '#FFFFFF',
     borderBottom: '1px solid #E8ECF6',

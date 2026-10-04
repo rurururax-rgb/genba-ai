@@ -46,7 +46,10 @@ describe('スマホ：案件内の画面へ既存タブで移動できる', () =
   const src = read('components/projects/ProjectTabs.tsx')
 
   it('lg 未満のみ表示・印刷時は非表示', () => {
-    expect(src).toMatch(/className="lg:hidden no-print"/)
+    expect(src).toMatch(/className="flex lg:hidden no-print"/)
+    // inline の display は lg:hidden を上書きしてデスクトップにも出てしまう
+    const tabBar = src.slice(src.indexOf('tabBar: {'), src.indexOf('}', src.indexOf('tabBar: {')))
+    expect(tabBar).not.toMatch(/display:/)
   })
 
   it('見積・原価・工程・基本情報を持つ', () => {
