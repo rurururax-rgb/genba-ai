@@ -7,6 +7,8 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { calculateEstimateTotals } from '@/lib/estimate/totals'
 import {
   toBillingFact,
+  formatBillingFact,
+  fetchCurrentSchedule,
   fetchNextSchedule,
   getEstimateAndSchedule,
   todayInJapan,
@@ -44,6 +46,7 @@ function mockSupabase(tables: Record<string, Row[]>, failTable?: string) {
         eq:  (col: string, v: unknown) => { filters.push(r => r[col] === v); return builder },
         is:  (col: string) => { filters.push(r => r[col] == null); return builder },
         gte: (col: string, v: string) => { filters.push(r => r[col] != null && (r[col] as string) >= v); return builder },
+        lte: (col: string, v: string) => { filters.push(r => r[col] != null && (r[col] as string) <= v); return builder },
         order: (col: string, o?: { ascending?: boolean }) => { orders.push([col, o?.ascending !== false]); return builder },
         limit: (n: number) => { limit = n; return builder },
         maybeSingle: async () => {
@@ -92,20 +95,39 @@ describe('見積：共有計算と一致', () => {
   })
 
   it('表示：null は「—」で金額を出さない / 値はカンマ区切り税込', () => {
-    const none = renderToStaticMarkup(<ProjectCheckedSummary estimateTotal={null} billing={null} nextSchedule={null} />)
+    const none = renderToStaticMarkup(<ProjectCheckedSummary estimateTotal={null} estimateItemCount={null} billing={null} schedule={null} />)
     expect(none).toContain('RAGZが確認しました')
     expect(none).not.toContain('0円')
     expect((none.match(/—/g) ?? []).length).toBe(3)
-    const html = renderToStaticMarkup(<ProjectCheckedSummary estimateTotal={7_996_802} billing="下書きあり" nextSchedule={{ name: '内装解体', start_date: '2026-10-08' }} />)
+    const html = renderToStaticMarkup(<ProjectCheckedSummary estimateTotal={7_996_802} estimateItemCount={12} billing="下書きあり" schedule={{ kind: 'next', name: '内装解体', start_date: '2026-10-08' }} />)
     expect(html).toContain('7,996,802円（税込）')
     expect(html).toContain('下書きあり')
+    expect(html).toContain('次の工程')
     expect(html).toContain('10/8 内装解体')
   })
 
+  it('見積明細 0 件は「0円（税込）」ではなく「見積なし」', () => {
+    const html = renderToStaticMarkup(<ProjectCheckedSummary estimateTotal={0} estimateItemCount={0} billing="未作成" schedule={null} />)
+    expect(html).toContain('見積なし')
+    expect(html).not.toContain('0円')
+  })
+
+  it('施工中の工程：期間と工程名、複数あれば「ほかN件」', () => {
+    const one = renderToStaticMarkup(<ProjectCheckedSummary estimateTotal={1} estimateItemCount={1} billing="未作成"
+      schedule={{ kind: 'current', name: '庭石ハツリ', start_date: '2026-10-01', end_date: '2026-10-09', others: 0 }} />)
+    expect(one).toContain('施工中')
+    expect(one).toContain('10/1〜10/9 庭石ハツリ')
+    expect(one).not.toContain('ほか')
+    expect(one).not.toContain('次の工程')
+    const two = renderToStaticMarkup(<ProjectCheckedSummary estimateTotal={1} estimateItemCount={1} billing="未作成"
+      schedule={{ kind: 'current', name: '庭石ハツリ', start_date: '2026-10-01', end_date: '2026-10-09', others: 1 }} />)
+    expect(two).toContain('10/1〜10/9 庭石ハツリ ほか1件')
+  })
+
   it('表示のみ：ボタン・リンク・判断語を含まない', () => {
-    const html = renderToStaticMarkup(<ProjectCheckedSummary estimateTotal={1} billing="未作成" nextSchedule={null} />)
+    const html = renderToStaticMarkup(<ProjectCheckedSummary estimateTotal={1} estimateItemCount={1} billing="発行済み（支払期限 9/3）" schedule={null} />)
     expect(html).not.toMatch(/<button|<a /)
-    for (const word of ['請求漏れ', '遅れ', '注意', '危険', 'おすすめ', '原価未入力']) expect(html).not.toContain(word)
+    for (const word of ['請求漏れ', '遅れ', '注意', '危険', 'おすすめ', '原価未入力', '超過', '期限切れ']) expect(html).not.toContain(word)
   })
 
   it('見積エディタは明細の取得完了まで合計（genba:total）を通知しない', () => {
@@ -113,6 +135,14 @@ describe('見積：共有計算と一致', () => {
     const src = readFileSync(path.join(process.cwd(), 'components/projects/EstimateTab.tsx'), 'utf8')
     expect(src).toMatch(/if \(!itemsLoaded\) return\s*\n\s*window\.dispatchEvent\(new CustomEvent\('genba:total'/)
     expect(src).toContain('setItemsLoaded(true)')
+    expect(src).toContain("new CustomEvent('genba:estimate-count'")
+  })
+
+  it('取得結果に明細行数を含む（失敗時は null）', async () => {
+    const ok = await getEstimateAndSchedule(mockSupabase({ estimate_items: items, projects: [project], schedule_items: [] }), PROJECT_A, TODAY)
+    expect(ok.estimateItemCount).toBe(3)
+    const ng = await getEstimateAndSchedule(mockSupabase({ estimate_items: items, projects: [project], schedule_items: [] }, 'estimate_items'), PROJECT_A, TODAY)
+    expect(ng.estimateItemCount).toBeNull()
   })
 })
 
@@ -128,6 +158,52 @@ describe('請求：最新請求書の状態をそのまま', () => {
     [{ status: 'something_new' }, '作成済み'],
   ])('%j → %s', (latest, expected) => {
     expect(toBillingFact(latest as { status: string | null } | null | undefined)).toBe(expected)
+  })
+
+  it('発行済みは支払期限を添える（判断語なし）。期限なし・他状態・取得失敗はそのまま', () => {
+    expect(formatBillingFact('発行済み', '2026-09-03')).toBe('発行済み（支払期限 9/3）')
+    expect(formatBillingFact('発行済み', '2026-09-03T00:00:00+09:00')).toBe('発行済み（支払期限 9/3）')
+    expect(formatBillingFact('発行済み', null)).toBe('発行済み')
+    expect(formatBillingFact('発行済み', 'not-a-date')).toBe('発行済み')
+    expect(formatBillingFact('入金済み', '2026-09-03')).toBe('入金済み')
+    expect(formatBillingFact(null, '2026-09-03')).toBeNull()
+  })
+})
+
+// ── 施工中の工程 ────────────────────────────────────────────────────────
+describe('施工中：今日が開始日〜終了日に入る工程を優先', () => {
+  const base = { project_id: PROJECT_A, deleted_at: null, status: 'planned' }
+  const rows = [
+    { ...base, name: '既設デッキ撤去', start_date: '2026-10-01', end_date: '2026-10-15', sort_order: 2 },
+    { ...base, name: '庭石ハツリ',     start_date: '2026-10-01', end_date: '2026-10-09', sort_order: 1 },
+    { ...base, name: '完了済み',       start_date: '2026-10-01', end_date: '2026-10-20', sort_order: 0, status: 'done' },
+    { ...base, name: '削除済み',       start_date: '2026-10-01', end_date: '2026-10-20', sort_order: 0, deleted_at: '2026-09-01' },
+    { ...base, name: '終了日未定',     start_date: '2026-10-01', end_date: null,         sort_order: 0 },
+    { ...base, name: '外構仕上げ',     start_date: '2026-10-19', end_date: '2026-10-25', sort_order: 3 },
+  ]
+
+  it('施工期間中が複数 → sort_order 先頭＋残り件数（完了・削除・日付未定は除く）', async () => {
+    const cur = await fetchCurrentSchedule(mockSupabase({ schedule_items: rows }), PROJECT_A, TODAY)
+    expect(cur).toEqual({ kind: 'current', name: '庭石ハツリ', start_date: '2026-10-01', end_date: '2026-10-09', others: 1 })
+  })
+
+  it('開始日・終了日当日も施工中に含む', async () => {
+    expect((await fetchCurrentSchedule(mockSupabase({ schedule_items: rows }), PROJECT_A, '2026-10-09'))?.others).toBe(1)
+    expect((await fetchCurrentSchedule(mockSupabase({ schedule_items: rows }), PROJECT_A, '2026-10-10'))?.name).toBe('既設デッキ撤去')
+  })
+
+  it('施工中がなければ次の工程にフォールバック', async () => {
+    const { schedule } = await getEstimateAndSchedule(mockSupabase({ estimate_items: [], projects: [], schedule_items: rows }), PROJECT_A, '2026-10-16')
+    expect(schedule).toEqual({ kind: 'next', name: '外構仕上げ', start_date: '2026-10-19' })
+  })
+
+  it('施工中があれば施工中を優先', async () => {
+    const { schedule } = await getEstimateAndSchedule(mockSupabase({ estimate_items: [], projects: [], schedule_items: rows }), PROJECT_A, TODAY)
+    expect(schedule?.kind).toBe('current')
+  })
+
+  it('取得失敗 → null', async () => {
+    expect(await fetchCurrentSchedule(mockSupabase({ schedule_items: rows }, 'schedule_items'), PROJECT_A, TODAY)).toBeNull()
   })
 })
 

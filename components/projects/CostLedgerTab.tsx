@@ -2041,6 +2041,12 @@ function SummaryCards({
           <span style={{ fontSize: 16, fontWeight: 800, color: C.text, fontVariantNumeric: 'tabular-nums' }}>
             {fmtYen(smry.base_contract_amount)}
           </span>
+          {/* 契約金額が未入力のときは見積明細の合計（諸経費・値引・消費税を含まない）。見積書の税込総額とは別の数字 */}
+          <span style={{ fontSize: 10, color: C.textMuted }}>
+            {smry.base_contract_amount === smry.estimate_revenue
+              ? '見積明細の合計（諸経費・値引前）'
+              : '入力済みの契約金額'}
+          </span>
         </div>
         <span style={{ color: C.textMuted, fontSize: 16, fontWeight: 300 }}>＋</span>
         {([0, 1, 2] as const).map(idx => (
