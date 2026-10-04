@@ -3,12 +3,14 @@
 /**
  * DashboardSummarySection.tsx
  *
- * 案件一覧ページの「今日やること」セクション。
+ * 案件一覧ページの「今日の確認」セクション。
  *
  * 設計方針:
  * - 数字・状態はサーバー側（lib/services/daily-briefing.ts）で決定論的に判定済み
  * - AIに数字を生成・推測させない。取得した値をそのまま表示する
- * - 各項目から「次にすべきアクション」へ直接進める導線を提供する
+ * - Action Honesty：ボタンには押した後に実際に起こることだけを書く。
+ *   item.actionUrl は案件画面（/projects/{id}）なので CTA は「案件を見る」。
+ *   recommendedAction（連絡する・発行する等）は RAGZ が実行しないためボタン文言に使わない
  * - チャットは補助機能。AIが主役のUIにしない
  */
 
@@ -151,11 +153,11 @@ function ActionCard({ item, onOpenChat }: CardProps) {
             <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
             </svg>
-            {item.recommendedAction}
+            AIに相談する
           </button>
         )}
 
-        {/* セカンダリ：案件を見る */}
+        {/* 案件画面へ移動するだけなので「案件を見る」（Action Honesty） */}
         <Link
           href={item.actionUrl}
           style={{
@@ -172,7 +174,7 @@ function ActionCard({ item, onOpenChat }: CardProps) {
             minHeight:    32,
           }}
         >
-          {showChat ? '案件を見る' : item.recommendedAction}
+          案件を見る
           <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
             <polyline points="9 18 15 12 9 6"/>
           </svg>
@@ -252,7 +254,7 @@ export function DashboardSummarySection({ summary, actionItems }: Props) {
               TODAY
             </p>
             <h2 style={{ fontSize: 15, fontWeight: 700, color: '#192C1F', margin: 0 }}>
-              今日やること
+              今日の確認
               {hasActions && (
                 <span style={{ fontSize: 14, fontWeight: 400, color: '#6B7280', marginLeft: 8 }}>
                   {actionItems.length}件

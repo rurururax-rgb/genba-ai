@@ -194,6 +194,29 @@ describe('Trial UI：自由チャットの入口を出さない（基盤は残�
     expect(html).toContain(`/projects/${PROJECT_A}`) // 案件への通常の導線は残る
   })
 
+  it('Action Honesty：見出しは「今日の確認」、全種別の CTA は遷移先どおり「案件を見る」で、実行しない行動を書かない', async () => {
+    const { DashboardSummarySection } = await import('@/components/projects/DashboardSummarySection')
+    const RECOMMENDED: Record<string, string> = {
+      invoice_overdue: '顧客に入金確認の連絡をする', invoice_issued_unpaid: '入金状況を確認する',
+      milestone_overdue: '請求書を作成して発行する', invoice_draft: '請求書を確認して発行する',
+      billing_missing: '請求書を作成する', schedule_mismatch: '工程を登録する', inactive: '案件状況を確認する',
+    }
+    const items = Object.entries(RECOMMENDED).map(([type, recommendedAction], i) => ({
+      type, priority: (i % 5) + 1, projectId: `p${i}`, projectName: `案件${i}`,
+      title: 'タイトル', reason: '理由', recommendedAction, actionUrl: `/projects/p${i}`,
+    }))
+    const html = renderToStaticMarkup(
+      <DashboardSummarySection summary={{ active_projects: 7 } as never} actionItems={items as never} />,
+    )
+    expect(html).toContain('今日の確認')
+    expect(html).not.toContain('今日やること')
+    for (const text of Object.values(RECOMMENDED)) expect(html).not.toContain(text)
+    // 各リンクは案件画面へ遷移し、文言は「案件を見る」
+    const links = [...html.matchAll(/<a [^>]*href="([^"]+)"[^>]*>(.*?)<\/a>/g)]
+    expect(links.map(m => m[1]).sort()).toEqual(items.map(i => i.actionUrl).sort()) // 表示は優先度順
+    for (const m of links) expect(m[2]).toContain('案件を見る')
+  })
+
   it('チャット API・UI・Tool 群は削除していない', () => {
     for (const f of [
       'app/api/ai/chat/route.ts',
