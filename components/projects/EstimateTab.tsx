@@ -18,6 +18,7 @@ import { getClient } from '@/lib/supabase/client'
 import { resolveNumericCommit } from '@/lib/input/numeric-input'
 import { jsonInit, writeRequest } from '@/lib/api/write-request'
 import { calculateSellingPrice, DEFAULT_MARKUP_RATE, getEffectiveMarkupRate, getItemPricingState, markupToMarginRate, normalizeMarkupOverride, resolveSellingPrice, type SellingPriceMode } from '@/lib/estimate/pricing'
+import { calculateEstimateTotals, liveAmount } from '@/lib/estimate/totals'
 import { ItemPricingPopover, MarginCell, fmtMarginPct, fmtMarkup } from './ItemPricingPopover'
 import { ProjectMarkupDialog } from './ProjectMarkupDialog'
 import { ItemMemoPopover, LockIcon } from './ItemMemoPopover'
@@ -144,11 +145,6 @@ const SUMMARY_DIVIDER_H = 1
 const SUMMARY_ROW1_H    = 64   // 見積金額フロー行（小計〜消費税）
 const SUMMARY_ROW2_H    = 60   // 原価・粗利行
 const SUMMARY_BOTTOM_H  = SUMMARY_ROW1_H + 1 + SUMMARY_ROW2_H  // 合計高さ（区切り線含む）
-
-// selling_price 変更の楽観的更新に対応するため、クライアント側で amount を再計算するヘルパー
-function liveAmount(item: { quantity: number; selling_price: number | null; amount: number | null }): number {
-  return item.selling_price != null ? Math.round(item.quantity * item.selling_price) : (item.amount ?? 0)
-}
 
 // ── カラム定義（react-table + CSS grid の共通ソース）────────
 
@@ -2169,14 +2165,18 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
     return result
   }, [visibleGroups, items])
 
-  const subtotal      = useMemo(() => items.reduce((acc, i) => acc + liveAmount(i), 0), [items])
+  const estimateTotals = useMemo(
+    () => calculateEstimateTotals(items, { miscExpenseOverride, roundingDiscount }),
+    [items, miscExpenseOverride, roundingDiscount],
+  )
+  const subtotal      = estimateTotals.itemSubtotal
   const selectedSum   = useMemo(() => items.filter(i => selectedIds.has(i.id)).reduce((acc, i) => acc + liveAmount(i), 0), [items, selectedIds])
   // 各明細の原価合計（quantity × cost_price）
   const itemCostTotal = useMemo(() => items.reduce((acc, i) => acc + ((i.cost_price ?? 0) * i.quantity), 0), [items])
   // 諸経費（見積金額）: 手動上書きがあればその値、なければ小計×8%
-  const miscExpense   = miscExpenseOverride != null ? miscExpenseOverride : Math.round(subtotal * 0.08)
+  const miscExpense   = estimateTotals.overhead
   // 税抜合計（見積書の「合計」欄に相当）
-  const taxBase       = subtotal + miscExpense - roundingDiscount
+  const taxBase       = estimateTotals.preTaxTotal
   // 諸経費の原価: 税抜合計×3%（Excelの S52 = H54×0.03 に対応）
   const miscExpenseCost  = Math.round(taxBase * 0.03)
   // 真の原価合計（明細原価 + 諸経費原価）
@@ -2190,8 +2190,8 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
     (i.row_type ?? 'item') === 'item' && (i.selling_price ?? 0) !== 0 && i.cost_price == null
   ).length, [items])
   // 消費税・総合計
-  const tax              = Math.floor(taxBase * 0.1)
-  const total            = taxBase + tax
+  const tax              = estimateTotals.tax
+  const total            = estimateTotals.totalIncludingTax
 
   // ヘッダーに合計金額を通知（genba:total イベント）
   useEffect(() => {

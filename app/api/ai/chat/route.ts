@@ -2,7 +2,7 @@ import { NextRequest } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { randomUUID } from 'crypto'
 import { getServerClient } from '@/lib/supabase/server'
-import { chatTools, companyTools } from '@/lib/ai/chat/tool-schemas'
+import { chatTools, companyTools, ESTIMATE_TOTAL_PROMPT_RULES } from '@/lib/ai/chat/tool-schemas'
 import { dispatchTool, type ExecutorContext } from '@/lib/ai/chat/tool-executor'
 import type { ConfirmableChange, QuickReply } from '@/lib/ai/chat/types'
 
@@ -265,6 +265,7 @@ function buildSystemPrompt(
 
 ## 利用可能なツール
 - search_estimates: この案件の見積項目（estimate_items）を検索
+- get_estimate_total: この案件の見積合計（税込・税抜・諸経費・端数値引）を取得
 - search_catalog: 自社カタログ（company_estimate_items）を検索 ※ 見積項目とは別テーブル
 - insert_catalog_item: カタログから見積に追加（内部でカタログのみ検索。estimate_items は参照しない）
 - search_cost_ledger: この案件の原価台帳を検索
@@ -276,6 +277,8 @@ function buildSystemPrompt(
 - 見積項目（estimate_items）: この案件に既に追加されている品目。search_estimates で検索する
 - カタログに同じ品目が見積にも存在することは正常（過去に使った品目がカタログに登録されているため）
 - 「カタログから追加して」の指示では insert_catalog_item のみを使うこと。search_estimates と混在させない
+
+${ESTIMATE_TOTAL_PROMPT_RULES}
 
 ## 内部専用フィールド（顧客向け回答・画面に含めてはいけない）
 - cost_price（原価・仕入れ価格）
