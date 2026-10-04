@@ -9,6 +9,7 @@
 import React from 'react'
 import { PrintButton } from './PrintButton'
 import type { CustomerEstimateItem } from '@/lib/estimate/customer-output'
+import { formatEstimateValidity } from '@/lib/estimate/validity'
 import { supportsLegacyRugsDocuments } from '@/lib/company/templates'
 
 // お客様向け明細（社内メモ・原価・業者名を含まない）。toCustomerEstimateItems() を通したもののみ
@@ -195,19 +196,11 @@ export function EstimateDocument({ projectId, project, company, groups, items }:
   // ラグズ建築専用の表紙ロゴは template_id = 'rugs' の会社だけ（lib/company/templates.ts）
   const showRugsLogo = supportsLegacyRugsDocuments(company)
 
-  // 表紙用の日付計算
-  const now = new Date()
-  const issuedDateStr = `${now.getFullYear()}年${now.getMonth() + 1}月${now.getDate()}日`
-  // 見積有効期間: estimate_valid_from + estimate_valid_months ヶ月、または発行日からNヶ月
-  const validMonths = (project as typeof project & { estimate_valid_months?: number | null }).estimate_valid_months
-  const validFrom   = (project as typeof project & { estimate_valid_from?: string | null }).estimate_valid_from
-  let validStr = '—'
-  if (validMonths) {
-    const base = validFrom ? new Date(validFrom) : now
-    const exp  = new Date(base)
-    exp.setMonth(exp.getMonth() + validMonths)
-    validStr = `${base.getFullYear()}年${base.getMonth() + 1}月${base.getDate()}日 〜 ${exp.getFullYear()}年${exp.getMonth() + 1}月${exp.getDate()}日（${validMonths}ヶ月）`
-  }
+  // 見積有効期間: 基本情報の起算日（estimate_valid_from）+ estimate_valid_months ヶ月。
+  // 起算日が未設定なら表示日で補わず「—」（開くたびに日付が変わる書類にしない）
+  const validity = formatEstimateValidity(project.estimate_valid_from, project.estimate_valid_months)
+  const validStr = validity ?? '—'
+  const validityMissing = validity == null && Boolean(project.estimate_valid_months)
 
   const p2 = project as typeof project & {
     person_in_charge?: string | null
@@ -324,6 +317,11 @@ export function EstimateDocument({ projectId, project, company, groups, items }:
         }}>
           ← 案件詳細へ戻る
         </a>
+        {validityMissing && (
+          <span style={{ color: '#FCD34D', fontSize: 12, fontWeight: 600 }}>
+            見積有効期間の起算日が未設定です（案件の「基本情報」で設定できます）
+          </span>
+        )}
         <PrintButton />
       </div>
 

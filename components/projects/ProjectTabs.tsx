@@ -86,14 +86,26 @@ function InvoiceIcon() {
     </svg>
   )
 }
+function ScheduleIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="4" width="18" height="18" rx="2"/>
+      <line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/>
+      <line x1="3" y1="10" x2="21" y2="10"/>
+    </svg>
+  )
+}
 // ── タブ定義 ───────────────────────────────────────────────
 
+// スマホ幅（サイドバー非表示の lg 未満）で使う案件内タブ。並びはサイドバー（components/shell/Sidebar.tsx）と同じ
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
-  { id: 'info',        label: '基本情報',           icon: <InfoIcon /> },
-  { id: 'estimate',    label: '見積エディタ',       icon: <EstimateIcon /> },
-  { id: 'invoice',     label: '請求書',             icon: <InvoiceIcon /> },
-  { id: 'spec-import', label: '仕様書等の取り込み', icon: <SpecIcon /> },
-  { id: 'cost-ledger', label: '原価台帳',           icon: <LedgerIcon /> },
+  { id: 'info',        label: '基本情報', icon: <InfoIcon /> },
+  { id: 'estimate',    label: '見積',     icon: <EstimateIcon /> },
+  { id: 'invoice',     label: '請求書',   icon: <InvoiceIcon /> },
+  { id: 'cost-ledger', label: '原価台帳', icon: <LedgerIcon /> },
+  { id: 'spec-import', label: '取り込み', icon: <SpecIcon /> },
+  { id: 'schedule',    label: '工程表',   icon: <ScheduleIcon /> },
 ]
 
 // ── コンポーネント ─────────────────────────────────────────
@@ -139,14 +151,44 @@ export function ProjectTabs({
     </>
   )
 
-  return content
+  // lg 以上はサイドバー（genba:tab）で切り替える。lg 未満はサイドバーが無いので同じタブをここに出す。
+  // 請求書は legacy 帳票を使える会社だけ（上の invoiceAvailable と同じ条件）
+  const mobileTabs = TABS.filter(t => t.id !== 'invoice' || invoiceAvailable)
+
+  return (
+    <>
+      <nav aria-label="案件内の画面" className="flex lg:hidden no-print" style={s.tabBar}>
+        {mobileTabs.map(t => {
+          const active = tab === t.id
+          return (
+            <button
+              key={t.id}
+              type="button"
+              aria-current={active ? 'page' : undefined}
+              onClick={() => setTab(t.id)}
+              style={{
+                ...s.tabItem,
+                color: active ? '#1D4530' : '#64748B',
+                fontWeight: active ? 700 : 500,
+                borderBottom: active ? '2px solid #2B5E40' : '2px solid transparent',
+              }}
+            >
+              {t.icon}
+              {t.label}
+            </button>
+          )
+        })}
+      </nav>
+      {content}
+    </>
+  )
 }
 
 // ── スタイル ───────────────────────────────────────────────
 
 const s: Record<string, React.CSSProperties> = {
+  // display はクラス（flex lg:hidden）で切り替える。inline に書くと lg:hidden が効かない
   tabBar: {
-    display: 'flex',
     overflowX: 'auto',
     background: '#FFFFFF',
     borderBottom: '1px solid #E8ECF6',
@@ -158,7 +200,8 @@ const s: Record<string, React.CSSProperties> = {
     flexDirection: 'column',
     alignItems: 'center',
     gap: 3,
-    padding: '9px 12px',
+    padding: '6px 12px',
+    minHeight: 48,
     fontSize: 11,
     background: 'none',
     border: 'none',

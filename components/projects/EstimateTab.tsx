@@ -1854,6 +1854,8 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   // 初回ロード済みフラグ：2回目以降の reload では setLoading(true) を呼ばず
   // EstimateImportTab などの子コンポーネントがアンマウントされないようにする
   const hasLoadedRef = useRef(false)
+  // 明細を 1 度でも正しく取得できたか。未取得（読込中・初回失敗）の空配列から算出した 0円 を外へ通知しない
+  const [itemsLoaded, setItemsLoaded] = useState(false)
 
   // internal_memo 列は migration（20260928000001）適用後に存在する。
   // 未適用環境（42703 = undefined_column）では列なしで再取得し、見積表が空にならないようにする
@@ -1899,6 +1901,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
         setRoundingDiscount(proj.rounding_discount ?? 0)
         setProjectMarkupRate(proj.markup_rate ?? DEFAULT_MARKUP_RATE)
       }
+      setItemsLoaded(true)
       hasLoadedRef.current = true
       setLoading(false)
     })
@@ -2193,10 +2196,14 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   const tax              = estimateTotals.tax
   const total            = estimateTotals.totalIncludingTax
 
-  // ヘッダーに合計金額を通知（genba:total イベント）
+  // 「RAGZが確認しました」に合計金額と明細行数を通知（genba:total / genba:estimate-count）。
+  // 明細の取得が済むまでは通知しない。行数 0 は「見積なし」表示に使う
+  const itemCount = items.length
   useEffect(() => {
+    if (!itemsLoaded) return
     window.dispatchEvent(new CustomEvent('genba:total', { detail: total }))
-  }, [total])
+    window.dispatchEvent(new CustomEvent('genba:estimate-count', { detail: itemCount }))
+  }, [total, itemCount, itemsLoaded])
 
   // 35%粗利参考金額（原価÷0.65）— Excelの O38, O41 に対応
   const ref35ExclTax     = totalCost > 0 ? Math.round(totalCost / 0.65) : null
@@ -2735,9 +2742,10 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
 
         {/* ── ツールバー + 選択アクションバー（sticky 固定）── */}
         <div style={{ position: 'sticky', top: 0, zIndex: 30, background: C.bg }}>
+        {/* 幅が足りないときは右側の操作（見積書を表示・Rev確定・履歴など）を画面外に隠さず 2 段目へ折り返す */}
         <div style={{
-          display: 'flex', alignItems: 'center', gap: 8,
-          padding: '0 16px', height: 52,
+          display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8,
+          padding: '10px 16px', minHeight: 52,
           background: C.bg, borderBottom: HDIV,
         }}>
           <button className="est-tb-btn" style={st.tbBtn} onMouseDown={e => startDragCreate(e, 'item')} disabled={addingRow}>
@@ -2839,7 +2847,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                 <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/>
                 <line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="11" x2="15" y2="11"/>
               </svg>
-              請求書を作成
+              請求書を開く
             </button>
             <div style={{ width: 1, height: 18, background: C.divider }} />
             </>
@@ -2954,11 +2962,11 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
           boxShadow: '0 1px 6px rgba(26,35,50,0.08)',
         }}>
 
-          {/* メイン行：合計（税込）| フロー | 全体粗利率 */}
+          {/* メイン行：合計（税込）| フロー | 全体粗利率。狭い画面では粗利率以降を次の段へ折り返し、金額と重ならないようにする */}
           <div style={{
-            display: 'flex', alignItems: 'center',
-            padding: '0 20px', height: SUMMARY_TOP_H,
-            gap: 16,
+            display: 'flex', alignItems: 'center', flexWrap: 'wrap',
+            padding: '0 20px', minHeight: SUMMARY_TOP_H,
+            columnGap: 16, rowGap: 4,
           }}>
             {/* 合計（税込） */}
             <TopFormulaCell

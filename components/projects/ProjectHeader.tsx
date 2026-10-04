@@ -1,6 +1,5 @@
 'use client'
 
-import { useEffect, useState } from 'react'
 import Link from 'next/link'
 
 type Props = {
@@ -15,16 +14,7 @@ type Props = {
 export function ProjectHeader({
   projectName, badgeLabel, badgeColor, badgeBg, customerName, siteAddress,
 }: Props) {
-  const [total, setTotal] = useState<number | null>(null)
-
-  useEffect(() => {
-    const handler = (e: Event) => setTotal((e as CustomEvent<number>).detail)
-    window.addEventListener('genba:total', handler)
-    return () => window.removeEventListener('genba:total', handler)
-  }, [])
-
-  const fmt = (n: number) => n.toLocaleString('ja-JP')
-
+  // 見積合計（genba:total）は直下の ProjectCheckedSummary が表示する
   return (
     <div style={{
       background: '#FFFFFF', borderBottom: '1px solid #E8ECF6',

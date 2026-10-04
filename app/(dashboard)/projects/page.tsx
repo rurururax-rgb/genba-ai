@@ -140,7 +140,7 @@ export default async function ProjectsPage() {
           <LogoutForm />
         </div>
 
-        {/* ── 今日やること（決定論的判定。AIに生成させない） ── */}
+        {/* ── 今日の確認（決定論的判定。AIに生成させない） ── */}
         <DashboardSummarySection summary={summary} actionItems={actionItems} />
 
         {/* ── クライアントリスト ── */}
