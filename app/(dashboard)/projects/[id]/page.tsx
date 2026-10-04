@@ -6,6 +6,9 @@ import { ChatPanel } from '@/components/projects/ChatPanel'
 import { getCurrentCompany } from '@/lib/company/current-company'
 import { supportsLegacyRugsDocuments } from '@/lib/company/templates'
 import { getInvoiceIssuerProfile } from '@/lib/company/rugs-invoice-issuer.server'
+import { ProjectCheckedSummary } from '@/components/projects/ProjectCheckedSummary'
+import { getEstimateAndSchedule, toBillingFact } from '@/lib/project/checked-summary'
+import { CHAT_ENTRY_ENABLED } from '@/lib/trial-features'
 
 const STATUS_CONFIG: Record<string, { label: string; color: string; bg: string }> = {
   collecting: { label: '情報収集中', color: '#6B7280', bg: '#F3F4F6' },
@@ -44,7 +47,7 @@ export default async function ProjectDetailPage({ params, searchParams }: Props)
   const invoiceIssuer = getInvoiceIssuerProfile(company)
 
   // 請求書・見積データから実績ステータスを導出
-  const [{ data: invoices }, { data: estimates }] = await Promise.all([
+  const [{ data: invoices, error: invoicesError }, { data: estimates }, checked] = await Promise.all([
     supabase
       .from('invoice_documents')
       .select('status, printed_at')
@@ -57,9 +60,13 @@ export default async function ProjectDetailPage({ params, searchParams }: Props)
       .eq('project_id', projectId)
       .is('deleted_at', null)
       .limit(1),
+    // 「RAGZが確認しました」の見積合計（見積画面と同じ共有計算）・次の工程
+    getEstimateAndSchedule(supabase, projectId),
   ])
 
   const latestInv = invoices?.[0]
+  if (invoicesError) console.error('[project page] invoice query failed:', invoicesError.message)
+  const billing = invoicesError ? null : toBillingFact(latestInv)
   const hasEstimate = (estimates?.length ?? 0) > 0
 
   let cfg: { label: string; color: string; bg: string }
@@ -90,6 +97,13 @@ export default async function ProjectDetailPage({ params, searchParams }: Props)
         siteAddress={project.site_address}
       />
 
+      {/* ── RAGZが確認しました（確定した事実のみ・表示だけ） ── */}
+      <ProjectCheckedSummary
+        estimateTotal={checked.estimateTotal}
+        billing={billing}
+        nextSchedule={checked.nextSchedule}
+      />
+
       {/* ── タブコンテンツ ── */}
       <ProjectTabs
         projectId={projectId}
@@ -114,8 +128,8 @@ export default async function ProjectDetailPage({ params, searchParams }: Props)
         invoiceIssuer={invoiceIssuer}
       />
 
-      {/* ── AIチャットパネル（固定FAB） ── */}
-      <ChatPanel projectId={projectId} />
+      {/* ── AIチャットパネル（Trial では入口を出さないため描画しない。lib/trial-features.ts） ── */}
+      {CHAT_ENTRY_ENABLED && <ChatPanel projectId={projectId} />}
 
     </div>
   )

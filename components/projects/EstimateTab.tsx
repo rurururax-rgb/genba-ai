@@ -1854,6 +1854,8 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   // 初回ロード済みフラグ：2回目以降の reload では setLoading(true) を呼ばず
   // EstimateImportTab などの子コンポーネントがアンマウントされないようにする
   const hasLoadedRef = useRef(false)
+  // 明細を 1 度でも正しく取得できたか。未取得（読込中・初回失敗）の空配列から算出した 0円 を外へ通知しない
+  const [itemsLoaded, setItemsLoaded] = useState(false)
 
   // internal_memo 列は migration（20260928000001）適用後に存在する。
   // 未適用環境（42703 = undefined_column）では列なしで再取得し、見積表が空にならないようにする
@@ -1899,6 +1901,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
         setRoundingDiscount(proj.rounding_discount ?? 0)
         setProjectMarkupRate(proj.markup_rate ?? DEFAULT_MARKUP_RATE)
       }
+      setItemsLoaded(true)
       hasLoadedRef.current = true
       setLoading(false)
     })
@@ -2193,10 +2196,11 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   const tax              = estimateTotals.tax
   const total            = estimateTotals.totalIncludingTax
 
-  // ヘッダーに合計金額を通知（genba:total イベント）
+  // 「RAGZが確認しました」に合計金額を通知（genba:total イベント）。明細の取得が済むまでは通知しない
   useEffect(() => {
+    if (!itemsLoaded) return
     window.dispatchEvent(new CustomEvent('genba:total', { detail: total }))
-  }, [total])
+  }, [total, itemsLoaded])
 
   // 35%粗利参考金額（原価÷0.65）— Excelの O38, O41 に対応
   const ref35ExclTax     = totalCost > 0 ? Math.round(totalCost / 0.65) : null

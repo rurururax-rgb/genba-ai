@@ -3,6 +3,7 @@
 import { useRef, useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
+import { CHAT_ENTRY_ENABLED } from '@/lib/trial-features'
 
 // ── 型 ────────────────────────────────────────────────────
 
@@ -332,12 +333,14 @@ export function Sidebar({ legacyRugsDocuments = false }: {
 
             <div style={{ flex: 1 }} />
 
-            {/* AIチャット */}
-            <IconBtn
-              icon={Icons.chat}
-              label="AIアシスタント"
-              onClick={() => window.dispatchEvent(new CustomEvent('genba:open-chat'))}
-            />
+            {/* AIチャット（Trial では入口を出さない。lib/trial-features.ts） */}
+            {CHAT_ENTRY_ENABLED && (
+              <IconBtn
+                icon={Icons.chat}
+                label="AIアシスタント"
+                onClick={() => window.dispatchEvent(new CustomEvent('genba:open-chat'))}
+              />
+            )}
           </>
         ) : (
           <>

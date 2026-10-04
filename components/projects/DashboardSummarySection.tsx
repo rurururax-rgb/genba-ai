@@ -17,6 +17,7 @@ import Link from 'next/link'
 import type { TodayActionItem } from '@/lib/services/daily-briefing'
 import type { CompanySummary } from '@/lib/services/company-summary'
 import { CompanyChat } from './CompanyChat'
+import { CHAT_ENTRY_ENABLED } from '@/lib/trial-features'
 
 type Props = {
   summary:     CompanySummary
@@ -71,7 +72,7 @@ type CardProps = {
 
 function ActionCard({ item, onOpenChat }: CardProps) {
   const ps = PRIORITY_STYLE[item.priority] ?? PRIORITY_STYLE[5]
-  const showChat = TYPES_WITH_CHAT.has(item.type)
+  const showChat = CHAT_ENTRY_ENABLED && TYPES_WITH_CHAT.has(item.type)
 
   return (
     <div style={{
@@ -260,8 +261,8 @@ export function DashboardSummarySection({ summary, actionItems }: Props) {
             </h2>
           </div>
 
-          {/* AI相談ボタン（会社全体に聞く） */}
-          <button
+          {/* AI相談ボタン（会社全体に聞く。Trial では入口を出さない。lib/trial-features.ts） */}
+          {CHAT_ENTRY_ENABLED && <button
             onClick={() => handleOpenChat('')}
             style={{
               display:    'flex',
@@ -282,7 +283,7 @@ export function DashboardSummarySection({ summary, actionItems }: Props) {
               <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
             </svg>
             AIに相談する →
-          </button>
+          </button>}
         </div>
 
         {/* 要対応なし */}
