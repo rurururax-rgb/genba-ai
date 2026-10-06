@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "RAGZ",
+  title: "RUGZ",
   description: "工務店の現場情報・見積・工程をまとめる業務補助ツール",
   // ブラウザ自動翻訳の抑止（Google Translate は <meta name="google" content="notranslate"> を参照）
   other: { google: "notranslate" },

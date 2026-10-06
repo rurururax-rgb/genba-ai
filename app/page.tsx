@@ -129,7 +129,7 @@ export default function AuthCallbackPage() {
     return (
       <div style={S.bg}>
         <div style={S.card}>
-          <p style={S.logo}>RAGZ</p>
+          <p style={S.logo}>RUGZ</p>
           <div style={S.loadingRow}>
             <svg style={S.spinner} viewBox="0 0 24 24" fill="none" stroke={ACCENT} strokeWidth="2.5" strokeLinecap="round">
               <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
@@ -145,7 +145,7 @@ export default function AuthCallbackPage() {
     return (
       <div style={S.bg}>
         <div style={S.card}>
-          <p style={S.logo}>RAGZ</p>
+          <p style={S.logo}>RUGZ</p>
           <div style={S.errBox}>
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#D12953" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="10"/>
@@ -167,7 +167,7 @@ export default function AuthCallbackPage() {
     <div style={S.bg}>
       <div style={S.card}>
         <div style={S.top}>
-          <p style={S.logo}>RAGZ</p>
+          <p style={S.logo}>RUGZ</p>
           <p style={S.sub}>新しいパスワードを設定してください</p>
         </div>
         <form onSubmit={handleReset} style={S.form}>

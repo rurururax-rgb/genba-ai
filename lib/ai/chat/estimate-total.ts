@@ -63,6 +63,6 @@ export async function executeGetEstimateTotal(
     total_including_tax: totals.totalIncludingTax,
     note: items.length === 0
       ? 'この案件の見積明細は0件です。'
-      : '金額は RAGZ が見積画面と同じ計算式で算出した値です。AI 側で再計算・補正せずそのまま回答してください。',
+      : '金額は RUGZ が見積画面と同じ計算式で算出した値です。AI 側で再計算・補正せずそのまま回答してください。',
   }
 }
