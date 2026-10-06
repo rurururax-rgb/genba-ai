@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import dynamic from 'next/dynamic'
 import type { InvoiceIssuerProfile } from '@/lib/company/invoice-issuer'
+import { publishActiveProjectTab } from '@/lib/project/active-tab'
 import { EstimateTab } from './EstimateTab'
 import { SpecImportTab } from './SpecImportTab'
 import { CostLedgerTab } from './CostLedgerTab'
@@ -108,6 +109,12 @@ const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
   { id: 'schedule',    label: '工程表',   icon: <ScheduleIcon /> },
 ]
 
+/** 実際に表示するタブ。未知の ID は見積、請求書は対象会社以外では見積に戻す */
+export function resolveProjectTab(requested: string | null | undefined, invoiceAvailable: boolean): Tab {
+  const known = TABS.some(t => t.id === requested) ? (requested as Tab) : 'estimate'
+  return known === 'invoice' && !invoiceAvailable ? 'estimate' : known
+}
+
 // ── コンポーネント ─────────────────────────────────────────
 
 export function ProjectTabs({
@@ -128,7 +135,7 @@ export function ProjectTabs({
   const [requestedTab, setTab] = useState<Tab>((defaultTab as Tab) || 'estimate')
   // 請求書タブは対象会社のみ。URL（?tab=invoice）やイベントで指定されても、他社では見積タブに戻す
   const invoiceAvailable = legacyRugsDocuments && invoiceIssuer != null
-  const tab: Tab = requestedTab === 'invoice' && !invoiceAvailable ? 'estimate' : requestedTab
+  const tab = resolveProjectTab(requestedTab, invoiceAvailable)
 
   // グローバルサイドバーからのタブ切替イベントを受信
   useEffect(() => {
@@ -139,6 +146,12 @@ export function ProjectTabs({
     window.addEventListener('genba:tab', handler)
     return () => window.removeEventListener('genba:tab', handler)
   }, [])
+
+  // 実際に表示しているタブをサイドバーへ伝える（サイドバーの active 表示の唯一の情報源）
+  useEffect(() => {
+    publishActiveProjectTab(tab)
+  }, [tab])
+  useEffect(() => () => publishActiveProjectTab(null), [])
 
   const content = (
     <>

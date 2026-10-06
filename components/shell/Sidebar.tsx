@@ -1,9 +1,10 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import { useRef, useState, useSyncExternalStore } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { CHAT_ENTRY_ENABLED } from '@/lib/trial-features'
+import { getActiveProjectTab, subscribeActiveProjectTab } from '@/lib/project/active-tab'
 
 // ── 型 ────────────────────────────────────────────────────
 
@@ -252,6 +253,8 @@ function IconBtn({
       <Link
         ref={ref as React.RefObject<HTMLAnchorElement>}
         href={href}
+        aria-label={label}
+        aria-current={active ? 'page' : undefined}
         style={style}
         onMouseEnter={onEnter}
         onMouseLeave={onLeave}
@@ -264,6 +267,9 @@ function IconBtn({
   return (
     <button
       ref={ref as React.RefObject<HTMLButtonElement>}
+      type="button"
+      aria-label={label}
+      aria-current={active ? 'page' : undefined}
       style={style}
       onClick={onClick}
       onMouseEnter={onEnter}
@@ -283,10 +289,10 @@ export function Sidebar({ legacyRugsDocuments = false }: {
   const pathname   = usePathname()
   const projectId  = getProjectId(pathname)
   const inProject  = Boolean(projectId)
-  const [activeTab, setActiveTab] = useState('estimate')
+  // active 表示は ProjectTabs が実際に表示しているタブに従う（サイドバー独自の選択 state は持たない）
+  const activeTab = useSyncExternalStore(subscribeActiveProjectTab, getActiveProjectTab, getActiveProjectTab)
 
   const dispatchTab = (id: string) => {
-    setActiveTab(id)
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('genba:tab', { detail: id }))
     }
