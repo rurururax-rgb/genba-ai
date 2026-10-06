@@ -52,8 +52,8 @@ export function ProjectCheckedSummary({ estimateTotal, estimateItemCount, billin
     : '—'
 
   return (
-    <section aria-label="RAGZが確認しました" style={s.wrap}>
-      <span style={s.title}>RAGZが確認しました</span>
+    <section aria-label="RUGZが確認しました" style={s.wrap}>
+      <span style={s.title}>RUGZが確認しました</span>
       <Fact label="見積" value={estimateValue} />
       <Fact label="請求" value={billing ?? '—'} />
       {schedule?.kind === 'current' ? (

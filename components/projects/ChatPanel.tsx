@@ -532,7 +532,7 @@ export function ChatPanel({ projectId }: Props) {
           }}>
             <AiLogo size={26} />
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, color: '#1A1A18', lineHeight: 1.2 }}>RAGZ アシスタント</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: '#1A1A18', lineHeight: 1.2 }}>RUGZ アシスタント</div>
               <div style={{ fontSize: 11, color: C.muted, lineHeight: 1 }}>見積・カタログ・原価を質問できます</div>
             </div>
             <button
@@ -960,7 +960,7 @@ function EmptyState({ onHintClick }: { onHintClick: (text: string) => void }) {
       <AiLogo size={48} />
       <div>
         <p style={{ fontSize: 15, fontWeight: 600, margin: '0 0 6px', color: '#1A1A18' }}>
-          RAGZ アシスタント
+          RUGZ アシスタント
         </p>
         <p style={{ fontSize: 13, margin: 0, lineHeight: 1.7, color: C.muted }}>
           見積・原価・カタログを検索したり、<br />変更提案を出すことができます

@@ -96,7 +96,7 @@ describe('見積：共有計算と一致', () => {
 
   it('表示：null は「—」で金額を出さない / 値はカンマ区切り税込', () => {
     const none = renderToStaticMarkup(<ProjectCheckedSummary estimateTotal={null} estimateItemCount={null} billing={null} schedule={null} />)
-    expect(none).toContain('RAGZが確認しました')
+    expect(none).toContain('RUGZが確認しました')
     expect(none).not.toContain('0円')
     expect((none.match(/—/g) ?? []).length).toBe(3)
     const html = renderToStaticMarkup(<ProjectCheckedSummary estimateTotal={7_996_802} estimateItemCount={12} billing="下書きあり" schedule={{ kind: 'next', name: '内装解体', start_date: '2026-10-08' }} />)

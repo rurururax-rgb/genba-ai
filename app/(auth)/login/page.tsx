@@ -42,7 +42,7 @@ export default function LoginPage() {
       <div style={styles.card}>
         {/* ロゴ / タイトル */}
         <div style={styles.logoArea}>
-          <p style={styles.logoText}>RAGZ</p>
+          <p style={styles.logoText}>RUGZ</p>
           <p style={styles.subtitle}>建築業務管理</p>
         </div>
 
