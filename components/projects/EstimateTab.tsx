@@ -19,7 +19,7 @@ import { resolveNumericCommit } from '@/lib/input/numeric-input'
 import { jsonInit, writeRequest } from '@/lib/api/write-request'
 import { calculateSellingPrice, DEFAULT_MARKUP_RATE, getEffectiveMarkupRate, getItemPricingState, markupToMarginRate, normalizeMarkupOverride, resolveSellingPrice, type SellingPriceMode } from '@/lib/estimate/pricing'
 import { calculateEstimateTotals, liveAmount } from '@/lib/estimate/totals'
-import { clipInsertionLine, intersectBoxes, type Box } from '@/lib/estimate/insertion-line'
+import { planInsert } from '@/lib/estimate/insert-plan'
 import { ItemPricingPopover, MarginCell, fmtMarginPct, fmtMarkup } from './ItemPricingPopover'
 import { ProjectMarkupDialog } from './ProjectMarkupDialog'
 import { ItemMemoPopover, LockIcon } from './ItemMemoPopover'
@@ -411,7 +411,7 @@ function TextInput({ value, onChange, placeholder = '─' }: {
 
 // ── PillAddBtn ────────────────────────────────────────────
 
-function PillAddBtn({ onClick, disabled, label }: { onClick: () => void; disabled?: boolean; label: string }) {
+function PillAddBtn({ onClick, disabled, label }: { onClick: (e: React.MouseEvent<HTMLButtonElement>) => void; disabled?: boolean; label: string }) {
   const [hov, setHov] = useState(false)
   return (
     <button
@@ -434,6 +434,128 @@ function PillAddBtn({ onClick, disabled, label }: { onClick: () => void; disable
       </svg>
       {label}
     </button>
+  )
+}
+
+// ── RowTypeMenu ───────────────────────────────────────────
+// 行間 ＋ / 空グループの「行を追加」から開く行種別メニュー（明細行 / 中見出し / メモ行）。
+// テーブルの overflow に切られないよう body へ portal し、ボタン位置に fixed で出す。
+
+const ROW_TYPE_OPTIONS: { type: RowType; label: string; hint: string }[] = [
+  { type: 'item',   label: '明細行', hint: '数量・単価のある行' },
+  { type: 'header', label: '中見出し', hint: 'グループ内の区切り（金額なし）' },
+  { type: 'note',   label: 'メモ行', hint: '自由記載（金額なし）' },
+]
+
+function RowTypeMenu({ anchor, onPick, onClose }: {
+  anchor: DOMRect
+  onPick: (t: RowType) => void
+  onClose: () => void
+}) {
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    ref.current?.querySelector<HTMLButtonElement>('button')?.focus()
+    const onDown = (e: PointerEvent) => { if (!ref.current?.contains(e.target as Node)) onClose() }
+    const onKey  = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    // 開いたままスクロールするとメニューだけ取り残されるので閉じる
+    const onScroll = (e: Event) => { if (!ref.current?.contains(e.target as Node)) onClose() }
+    window.addEventListener('pointerdown', onDown, true)
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('scroll', onScroll, true)
+    return () => {
+      window.removeEventListener('pointerdown', onDown, true)
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('scroll', onScroll, true)
+    }
+  }, [onClose])
+
+  const MENU_W = 200
+  const left = Math.max(8, Math.min(anchor.left, window.innerWidth - MENU_W - 8))
+  const below = anchor.bottom + 4
+  const top = below + 140 > window.innerHeight ? Math.max(8, anchor.top - 140 - 4) : below
+
+  return createPortal(
+    <div ref={ref} role="menu" data-testid="estimate-row-type-menu"
+      style={{
+        position: 'fixed', left, top, width: MENU_W, zIndex: 9999,
+        background: C.bg, border: `1px solid ${C.divider}`, borderRadius: 8,
+        boxShadow: '0 6px 20px rgba(26,35,50,0.14)', padding: 4, fontFamily: FONT,
+      }}
+      onKeyDown={e => {
+        if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
+        e.preventDefault()
+        const btns = Array.from(ref.current?.querySelectorAll<HTMLButtonElement>('button') ?? [])
+        const i = btns.indexOf(document.activeElement as HTMLButtonElement)
+        btns[(i + (e.key === 'ArrowDown' ? 1 : btns.length - 1)) % btns.length]?.focus()
+      }}
+    >
+      {ROW_TYPE_OPTIONS.map(o => (
+        <button key={o.type} type="button" role="menuitem" className="est-row-type-menu-item"
+          data-row-type={o.type}
+          onClick={() => { onClose(); onPick(o.type) }}
+          style={{
+            display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 1,
+            width: '100%', minHeight: 44, padding: '6px 10px', borderRadius: 6,
+            border: 'none', background: 'transparent', cursor: 'pointer', textAlign: 'left',
+            fontFamily: FONT,
+          }}>
+          <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{o.label}</span>
+          <span style={{ fontSize: 11, color: C.textMuted }}>{o.hint}</span>
+        </button>
+      ))}
+    </div>,
+    document.body,
+  )
+}
+
+// ── InsertGap ─────────────────────────────────────────────
+// 行と行の境目に重ねる「＋」。行の高さを変えないよう、Draggable の内側に absolute で置く
+// （Droppable 直下に Draggable 以外の兄弟を置くと @hello-pangea/dnd の位置計算が狂うため）。
+// edge='top' はその行の上端、edge='bottom' は最終行の下端。挿入位置は index で渡し、DOM 座標は使わない。
+
+function InsertGap({ edge, disabled, onPick, label }: {
+  edge: 'top' | 'bottom'
+  disabled?: boolean
+  onPick: (t: RowType) => void
+  label: string
+}) {
+  const [anchor, setAnchor] = useState<DOMRect | null>(null)
+  const close = useCallback(() => setAnchor(null), [])
+  return (
+    <div className="est-insert-gap" data-testid="estimate-insert-gap" data-edge={edge} data-open={anchor ? 'true' : undefined}
+      style={{ position: 'absolute', left: 0, right: 0, top: edge === 'top' ? 0 : '100%', height: 0, zIndex: 4, pointerEvents: 'none' }}>
+      <button type="button" className="est-insert-gap-btn" aria-label={label} title={label}
+        aria-haspopup="menu" aria-expanded={!!anchor} disabled={disabled}
+        onClick={e => setAnchor(e.currentTarget.getBoundingClientRect())}
+        style={{
+          position: 'absolute', left: 1, top: -9, width: 18, height: 18,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 0, borderRadius: '50%', border: `1px solid ${C.accentMid}`,
+          background: C.bg, color: C.accent, cursor: 'pointer', pointerEvents: 'auto',
+        }}>
+        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" aria-hidden>
+          <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+        </svg>
+      </button>
+      <div className="est-insert-gap-line" aria-hidden
+        style={{ position: 'absolute', left: 22, right: 0, top: -1, height: 2, borderRadius: 1, background: C.accentMid, pointerEvents: 'none' }} />
+      {anchor && <RowTypeMenu anchor={anchor} onPick={onPick} onClose={close} />}
+    </div>
+  )
+}
+
+// ── EmptyGroupAdd ─────────────────────────────────────────
+// 空の工種グループに出す「＋ 行を追加」。行間 ＋ と同じ行種別メニューを開く。
+
+function EmptyGroupAdd({ disabled, onPick }: { disabled?: boolean; onPick: (t: RowType) => void }) {
+  const [anchor, setAnchor] = useState<DOMRect | null>(null)
+  const close = useCallback(() => setAnchor(null), [])
+  return (
+    <div data-testid="estimate-empty-group-add" style={{ padding: '8px 52px' }}>
+      <PillAddBtn onClick={e => setAnchor(e.currentTarget.getBoundingClientRect())} disabled={disabled} label="行を追加" />
+      {anchor && <RowTypeMenu anchor={anchor} onPick={onPick} onClose={close} />}
+    </div>
   )
 }
 
@@ -1761,17 +1883,8 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   const [savedIds, setSavedIds] = useState<Set<string>>(new Set())
   // Shift+クリック範囲選択用：最後にクリックした行のID
   const lastClickedIdRef = useRef<string | null>(null)
-  // ドラッグ作成中のゴースト位置
-  const [dragCreate, setDragCreate] = useState<{
-    rowType: RowType; x: number; y: number
-    indicator: {
-      line: { left: number; width: number; top: number; height: number } | null
-      groupId: string | null; insertAfterItem: EstimateItem | null
-    } | null
-  } | null>(null)
-  // 挿入ラインの表示範囲（テーブル領域 ∩ スクロール領域 ∩ sticky ツールバーより下）の計測用
-  const tableScrollRef   = useRef<HTMLDivElement>(null)
-  const stickyToolbarRef = useRef<HTMLDivElement>(null)
+  // @hello-pangea/dnd で行・グループをドラッグ中か（行間の ＋ を隠す）
+  const [dndDragging, setDndDragging] = useState(false)
   // マルチドラッグ中のドラッグ元アイテムID
   const [draggingId, setDraggingId] = useState<string | null>(null)
   // renderClone は常に安定した参照を渡す（state 変化で差し替えると DnD がドラッグをキャンセルする）
@@ -1839,8 +1952,12 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
     }
   }, [groups, activeGroupTab])
 
-  // グループタブ切替時に合計選択をクリア
-  useEffect(() => { setSumSelection(new Map) }, [activeGroupTab])
+  // グループタブ切替時に合計選択・行選択をクリア
+  // （行選択を残すと、別タブで「削除」したとき見えていない行まで消えてしまう）
+  useEffect(() => {
+    setSumSelection(new Map)
+    setSelectedIds(new Set())
+  }, [activeGroupTab])
 
   // ── react-table（カラム定義・ヘッダー生成） ────────────────
 
@@ -2053,74 +2170,6 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       if (rafId) cancelAnimationFrame(rafId)
     }
   }, [])
-
-  // ── ドラッグ＆プレース行作成 ──────────────────────────────
-
-  function startDragCreate(e: React.MouseEvent, rowType: RowType) {
-    e.preventDefault()
-    const capturedItems = items
-
-    function findTarget(cx: number, cy: number) {
-      const els = document.elementsFromPoint(cx, cy) as HTMLElement[]
-      for (const el of els) {
-        const rowEl = el.closest('[data-row-id]') as HTMLElement | null
-        if (!rowEl?.dataset.rowId) continue
-        const item = capturedItems.find(i => i.id === rowEl.dataset.rowId)
-        if (!item) continue
-        const rect = rowEl.getBoundingClientRect()
-        const gId = item.group_id
-        const gItems = capturedItems.filter(i => i.group_id === gId).sort((a, b) => a.sort_order - b.sort_order)
-        const idx = gItems.findIndex(i => i.id === item.id)
-        const row = { left: rect.left, right: rect.right }
-        if (cy <= rect.top + rect.height / 2) {
-          const prev = idx > 0 ? gItems[idx - 1] : null
-          return { y: rect.top, row, groupId: gId, insertAfterItem: prev }
-        } else {
-          return { y: rect.bottom, row, groupId: gId, insertAfterItem: item }
-        }
-      }
-      return null
-    }
-
-    // ラインはテーブルの見えている範囲内だけに描く（サイドバー側・画面右端・ツールバーの裏へ出さない）
-    function visibleTableBox(): Box | null {
-      const table = tableScrollRef.current?.getBoundingClientRect()
-      if (!table) return null
-      const boxes: Box[] = [table, { left: 0, right: window.innerWidth, top: 0, bottom: window.innerHeight }]
-      const main = document.getElementById('dashboard-main')?.getBoundingClientRect()
-      if (main) boxes.push(main)
-      const toolbar = stickyToolbarRef.current?.getBoundingClientRect()
-      if (toolbar) boxes.push({ left: -Infinity, right: Infinity, top: toolbar.bottom, bottom: Infinity })
-      return intersectBoxes(...boxes)
-    }
-
-    setDragCreate({ rowType, x: e.clientX, y: e.clientY, indicator: null })
-    document.body.style.cursor = 'grabbing'
-    document.body.style.userSelect = 'none'
-
-    const onMove = (ev: MouseEvent) => {
-      const t = findTarget(ev.clientX, ev.clientY)
-      setDragCreate(prev => prev ? {
-        ...prev, x: ev.clientX, y: ev.clientY,
-        indicator: t ? { line: clipInsertionLine(t.row, t.y, visibleTableBox()), groupId: t.groupId, insertAfterItem: t.insertAfterItem } : null,
-      } : null)
-    }
-
-    const onUp = (ev: MouseEvent) => {
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
-      const t = findTarget(ev.clientX, ev.clientY)
-      setDragCreate(null)
-      // ターゲットが見つからない場合、表示中のグループタブのグループに追加する
-      const fallbackGroupId = activeGroupTab ?? undefined
-      handleAddRow(t?.groupId ?? fallbackGroupId, t?.insertAfterItem ?? undefined, rowType)
-    }
-
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
-  }
 
   // ── 派生値 ────────────────────────────────────────────────
 
@@ -2349,24 +2398,30 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
     }
   }
 
-  async function handleAddRow(groupId?: string | null, insertAfterItem?: EstimateItem, rowType: RowType = 'item') {
+  // 行間の ＋ から行を追加する。groupId（null = 未分類「その他」）と、そのグループ内の表示順での挿入位置だけで決める。
+  // 前後に整数の空きがなければ先に既存の /reorder でグループを振り直し、失敗したら行は追加しない。
+  async function handleAddRowAt(groupId: string | null, insertIndex: number, rowType: RowType = 'item') {
+    if (addingRow) return
     setAddingRow(true)
     try {
-      const scope = groupId ? items.filter(i => i.group_id === groupId) : ungroupedItems
-      let newOrder: number
-      if (insertAfterItem) {
-        const sorted = [...scope].sort((a, b) => a.sort_order - b.sort_order)
-        const idx = sorted.findIndex(i => i.id === insertAfterItem.id)
-        const next = sorted[idx + 1]
-        newOrder = next
-          ? Math.round((insertAfterItem.sort_order + next.sort_order) / 2)
-          : insertAfterItem.sort_order + 1000
-      } else {
-        newOrder = scope.length > 0 ? Math.max(...scope.map(i => i.sort_order)) + 1000 : 0
+      const scope = groupId ? itemsForGroup(groupId) : ungroupedItems
+      const plan = planInsert(scope, insertIndex)
+
+      if (plan.renumber.length > 0) {
+        try {
+          await persistReorder([], plan.renumber.map(r => ({ id: r.id, sort_order: r.sort_order, group_id: groupId })))
+        } catch (err) {
+          console.error('[EstimateTab] handleAddRowAt renumber failed:', err)
+          alert('行の並び順の保存に失敗しました\n行は追加されていません。')
+          return
+        }
+        const next = new Map(plan.renumber.map(r => [r.id, r.sort_order]))
+        setItems(prev => prev.map(i => next.has(i.id) ? { ...i, sort_order: next.get(i.id)! } : i))
       }
+
       const result = await writeRequest<EstimateItem>(
         '/api/estimate-items/manual',
-        jsonInit('POST', { project_id: projectId, sort_order: newOrder, group_id: groupId ?? null, row_type: rowType }),
+        jsonInit('POST', { project_id: projectId, sort_order: plan.sortOrder, group_id: groupId, row_type: rowType }),
         '行の追加に失敗しました',
       )
       if (result.ok && result.data) {
@@ -2374,11 +2429,14 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
         setItems(prev => [...prev, { ...item, row_type: item.row_type ?? 'item' }])
       } else {
         const message = result.ok ? '行の追加に失敗しました' : result.message
-        console.error('[EstimateTab] handleAddRow failed:', message)
+        console.error('[EstimateTab] handleAddRowAt failed:', message)
         alert(`${message}\n行は追加されていません。`)
       }
-    } finally { setAddingRow(false) }
+    } finally {
+      setAddingRow(false)
+    }
   }
+
 
   async function handleDropImportItem(
     row: { name: string; quantity: number; unit: string; cost_price: number | null; vendor_name: string; memo: string; _importId?: string },
@@ -2427,7 +2485,13 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       const result = await writeRequest<EstimateGroup>(
         '/api/estimate-groups', jsonInit('POST', { project_id: projectId, label: '', sort_order: maxOrder }), '工種グループの追加に失敗しました',
       )
-      if (result.ok && result.data) { const group = result.data; setGroups(prev => [...prev, group]); setNewlyCreatedGroupId(group.id) }
+      if (result.ok && result.data) {
+        const group = result.data
+        setGroups(prev => [...prev, group])
+        setNewlyCreatedGroupId(group.id)
+        // 作った工種のタブへ移り、空グループの「＋ 行を追加」からすぐ入力できるようにする
+        setActiveGroupTab(group.id)
+      }
       else alert(`${result.ok ? '工種グループの追加に失敗しました' : result.message}\nグループは追加されていません。`)
     } finally { setCreating(false) }
   }
@@ -2761,39 +2825,16 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       }}>
 
         {/* ── ツールバー + 選択アクションバー（sticky 固定）── */}
-        <div ref={stickyToolbarRef} style={{ position: 'sticky', top: 0, zIndex: 30, background: C.bg }}>
+        <div style={{ position: 'sticky', top: 0, zIndex: 30, background: C.bg }}>
         {/* 幅が足りないときは右側の操作（見積書を表示・Rev確定・履歴など）を画面外に隠さず 2 段目へ折り返す */}
         <div style={{
           display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8,
           padding: '10px 16px', minHeight: 52,
           background: C.bg, borderBottom: HDIV,
         }}>
-          <button className="est-tb-btn" style={st.tbBtn} onMouseDown={e => startDragCreate(e, 'item')} disabled={addingRow}>
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-              <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-            </svg>
-            行を追加
-          </button>
-          <button className="est-tb-btn-header" style={st.tbBtnHeader} onMouseDown={e => startDragCreate(e, 'header')} disabled={addingRow} title="グループ内の区切り見出し（金額なし）">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round">
-              <line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="14" y2="12"/><line x1="4" y1="18" x2="17" y2="18"/>
-            </svg>
-            見出し行
-          </button>
-          <button className="est-tb-btn-note" style={st.tbBtnNote} onMouseDown={e => startDragCreate(e, 'note')} disabled={addingRow} title="自由記載のメモ行（金額なし）">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/>
-              <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
-            </svg>
-            メモ行
-          </button>
-          <div style={{ width: 1, height: 18, background: C.divider }} />
-          <button className="est-tb-btn" style={st.tbBtn} onClick={handleCreateGroup} disabled={creating}>
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/>
-              <line x1="9" y1="21" x2="9" y2="9"/>
-            </svg>
-            工種グループ追加
+          {/* 行の追加は表の行間の ＋ から（位置が曖昧になる上部の汎用「追加」は置かない） */}
+          <button className="est-tb-btn" style={st.tbBtn} onClick={handleCreateGroup} disabled={creating} title="工種グループを追加して、そのタブへ移動します">
+            ＋ 工種
           </button>
           <div style={{ flex: 1 }} />
           <div style={{ width: 1, height: 18, background: C.divider }} />
@@ -2990,7 +3031,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
           }}>
             {/* 合計（税込） */}
             <TopFormulaCell
-              label="合計（税込）"
+              label="案件合計（税込）"
               value={`¥${fmt(total)}`}
               valueColor={C.green}
               formula={[
@@ -3172,7 +3213,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
         </div>{/* /sticky toolbar wrapper */}
 
         {/* ── テーブル ── */}
-        <div id="estimate-table-scroll" ref={tableScrollRef} style={{ overflow: 'auto', flex: 1 }}>
+        <div id="estimate-table-scroll" style={{ overflow: 'auto', flex: 1 }}>
           <div style={{ minWidth: GRID_TOTAL_W }}>
 
             {/* ── 2段ヘッダー（sticky でまとめてスクロール追従） ── */}
@@ -3216,7 +3257,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                 </svg>
                 <p style={{ margin: 0, color: C.textSub, fontSize: 14, fontWeight: 600, fontFamily: FONT }}>見積項目がありません</p>
                 <p style={{ margin: 0, color: C.textMuted, fontSize: 12, fontFamily: FONT }}>
-                  上の「行を追加」または「工種グループ追加」から作成してください
+                  上の「＋ 工種」で工種グループを作り、その中の「行を追加」から入力してください
                 </p>
               </div>
             )}
@@ -3227,6 +3268,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
             <DragDropContext
               autoScrollerOptions={{ disabled: true }}
               onDragStart={(start: DragStart) => {
+                setDndDragging(true)
                 startDndAutoScroll()
                 if (start.type !== 'ITEM') return
                 const id = start.draggableId.replace('item-', '')
@@ -3235,7 +3277,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                   setDraggingId(id)            // isGhost のために state も更新
                 }
               }}
-              onDragEnd={result => { stopDndAutoScroll(); draggingIdRef.current = null; setDraggingId(null); handleDragEnd(result) }}
+              onDragEnd={result => { stopDndAutoScroll(); setDndDragging(false); draggingIdRef.current = null; setDraggingId(null); handleDragEnd(result) }}
             >
 
               {/* グループ */}
@@ -3364,7 +3406,16 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                                   pointerEvents: 'none',
                                                 }}>ここに追加</div>
                                               )}
-                                              <div style={{ position: 'relative', paddingBottom: nextPb ? 30 : 0 }}>
+                                              <div className="est-row-wrap" style={{ position: 'relative', paddingBottom: nextPb ? 30 : 0 }}>
+                                                {/* 行間 ＋：この行の上端 = index idx（先頭行なら先頭）。最終行だけ下端（= 末尾）も持つ */}
+                                                {!dndDragging && !is.isDragging && (
+                                                  <InsertGap edge="top" disabled={addingRow} label="この位置に行を追加"
+                                                    onPick={t => handleAddRowAt(group.id, idx, t)} />
+                                                )}
+                                                {!dndDragging && !is.isDragging && idx === gItems.length - 1 && (
+                                                  <InsertGap edge="bottom" disabled={addingRow} label="末尾に行を追加"
+                                                    onPick={t => handleAddRowAt(group.id, gItems.length, t)} />
+                                                )}
                                                 <ItemRow item={item} inGroup isDragging={is.isDragging}
                                                   dragHandleProps={ip.dragHandleProps}
                                                   onSave={c => handleSave(item.id, c)}
@@ -3406,9 +3457,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                       })}
                                       {dp.placeholder}
                                       {gItems.length === 0 && (
-                                        <div style={{ padding: '8px 52px' }}>
-                                          <PillAddBtn onClick={() => handleAddRow(group.id)} disabled={addingRow} label="行を追加" />
-                                        </div>
+                                        <EmptyGroupAdd disabled={addingRow} onPick={t => handleAddRowAt(group.id, 0, t)} />
                                       )}
                                     </div>
                                   )}
@@ -3465,6 +3514,15 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                           <Draggable key={item.id} draggableId={`item-${item.id}`} index={idx}>
                             {(ip, is) => (
                               <div ref={ip.innerRef} {...ip.draggableProps} style={ip.draggableProps.style}>
+                                <div className="est-row-wrap" style={{ position: 'relative' }}>
+                                {!dndDragging && !is.isDragging && (
+                                  <InsertGap edge="top" disabled={addingRow} label="この位置に行を追加"
+                                    onPick={t => handleAddRowAt(null, idx, t)} />
+                                )}
+                                {!dndDragging && !is.isDragging && idx === ungroupedItems.length - 1 && (
+                                  <InsertGap edge="bottom" disabled={addingRow} label="末尾に行を追加"
+                                    onPick={t => handleAddRowAt(null, ungroupedItems.length, t)} />
+                                )}
                                 <ItemRow item={item} inGroup={false} isDragging={is.isDragging}
                                   dragHandleProps={ip.dragHandleProps}
                                   onSave={c => handleSave(item.id, c)}
@@ -3482,6 +3540,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                   sumSelKeys={sumSelKeys}
                                   onSumToggle={(k, v) => { if (v == null) return; setSumSelection(p => { const n = new Map(p); n.has(k) ? n.delete(k) : n.set(k, v); return n }) }}
                                   projectMarkupRate={projectMarkupRate} />
+                                </div>
                               </div>
                             )}
                           </Draggable>
@@ -3695,47 +3754,6 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       document.body
     )}
 
-    {/* ── ドラッグ作成ゴースト＆インジケーター ── */}
-    {dragCreate && (
-      <>
-        {/* カーソル追随バッジ */}
-        <div style={{
-          position: 'fixed',
-          left: dragCreate.x + 16,
-          top: dragCreate.y - 14,
-          zIndex: 9999,
-          pointerEvents: 'none',
-          background: C.accent,
-          color: '#fff',
-          padding: '5px 14px',
-          borderRadius: 20,
-          fontSize: 12,
-          fontWeight: 700,
-          fontFamily: FONT,
-          boxShadow: `0 4px 16px rgba(22,114,236,0.45)`,
-          whiteSpace: 'nowrap',
-          transform: 'rotate(-2deg)',
-        }}>
-          ＋ {dragCreate.rowType === 'header' ? '見出し行' : dragCreate.rowType === 'note' ? 'メモ行' : '行'}
-        </div>
-        {/* 挿入位置インジケーターライン */}
-        {dragCreate.indicator?.line && (
-          <div data-testid="estimate-insertion-line" style={{
-            position: 'fixed',
-            left: dragCreate.indicator.line.left,
-            width: dragCreate.indicator.line.width,
-            top: dragCreate.indicator.line.top,
-            height: dragCreate.indicator.line.height,
-            zIndex: 9998,
-            pointerEvents: 'none',
-            background: C.accent,
-            borderRadius: 2,
-            opacity: 0.85,
-          }} />
-        )}
-      </>
-    )}
-
     </InternalMemoAvailableCtx.Provider>
     </GridColsCtx.Provider>
   )
@@ -3768,23 +3786,5 @@ const st = {
 
   tbAccent: {
     background: '#E3EFE7', color: '#2B5E40', border: '1px solid #BDD1C3',
-  } as React.CSSProperties,
-
-  tbBtnHeader: {
-    display: 'inline-flex', alignItems: 'center', gap: 5,
-    height: 32, padding: '0 11px', borderRadius: 7,
-    border: `1px solid #8BA3D9`, background: '#EEF1F8',
-    color: '#2B3A5C', fontSize: 12, fontWeight: 600,
-    cursor: 'pointer', whiteSpace: 'nowrap' as const,
-    fontFamily: FONT, transition: 'background 0.1s, border-color 0.1s',
-  } as React.CSSProperties,
-
-  tbBtnNote: {
-    display: 'inline-flex', alignItems: 'center', gap: 5,
-    height: 32, padding: '0 11px', borderRadius: 7,
-    border: `1px solid #C9A84C`, background: '#FEFAED',
-    color: '#7A5A00', fontSize: 12, fontWeight: 600,
-    cursor: 'pointer', whiteSpace: 'nowrap' as const,
-    fontFamily: FONT, transition: 'background 0.1s, border-color 0.1s',
   } as React.CSSProperties,
 } as const

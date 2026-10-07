@@ -340,22 +340,6 @@ body {
   background: #E3EFE7 !important;
   transition-duration: var(--duration-micro) !important;
 }
-.est-tb-btn-header:hover {
-  background: #E4E8F4 !important;
-  border-color: #6B83B8 !important;
-}
-.est-tb-btn-header:active {
-  background: #D0D8F0 !important;
-  transition-duration: var(--duration-micro) !important;
-}
-.est-tb-btn-note:hover {
-  background: #FEF0C0 !important;
-  border-color: #B08020 !important;
-}
-.est-tb-btn-note:active {
-  background: #FDE8A0 !important;
-  transition-duration: var(--duration-micro) !important;
-}
 .est-tb-accent:hover {
   background: #D3E8D8 !important;
   border-color: #8BB09B !important;
@@ -377,6 +361,37 @@ body {
   opacity: 0.85;
 }
 
+/* Inline insert gap（見積エディタの行間 ＋）
+   行の高さは変えない：ギャップは各行の内側に absolute で重ねる。
+   デスクトップ：行に近づくと薄く、＋ に乗る／フォーカスで濃く＋挿入位置ライン。
+   タッチ（hover: none）：常に薄く表示し、指で押せる大きさにする。 */
+.est-insert-gap-btn {
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard);
+}
+.est-insert-gap-line {
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+.est-row-wrap:hover .est-insert-gap-btn { opacity: 0.4; }
+.est-row-wrap .est-insert-gap-btn:hover,
+.est-row-wrap .est-insert-gap-btn:focus-visible,
+.est-row-wrap .est-insert-gap[data-open="true"] .est-insert-gap-btn { opacity: 1; background: #EAF3DE; }
+.est-insert-gap-btn:hover + .est-insert-gap-line,
+.est-insert-gap-btn:focus-visible + .est-insert-gap-line,
+.est-insert-gap[data-open="true"] .est-insert-gap-line { opacity: 0.85; }
+.est-insert-gap-btn:focus-visible { outline: 2px solid #2B5E40; outline-offset: 1px; }
+.est-insert-gap-btn:disabled { cursor: not-allowed; }
+@media (hover: none) {
+  .est-row-wrap .est-insert-gap-btn { opacity: 0.45; width: 28px !important; height: 28px !important; top: -14px !important; }
+}
+
+.est-row-type-menu-item:hover,
+.est-row-type-menu-item:focus-visible {
+  background: #EAF3DE;
+  outline: none;
+}
+
 /* Group tabs */
 .est-tab:not(.est-tab-active):hover {
   color: #2B5E40 !important;
@@ -393,7 +408,7 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .edit-cell { transition: none; }
   .edit-select { transition: none !important; }
-  .est-tb-btn, .est-tb-btn-header, .est-tb-btn-note,
+  .est-tb-btn, .est-insert-gap-btn, .est-insert-gap-line,
   .est-tb-accent, .est-tb-invoice { transition: none !important; }
 }
 

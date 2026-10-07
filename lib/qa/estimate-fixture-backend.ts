@@ -13,6 +13,8 @@
  *       PATCH /api/estimate-items/[id]      … 指定フィールドのみ更新、amount = quantity × selling_price
  *       POST  /api/estimate-items/manual    … 実APIと同じく selling_price_mode / markup_rate_override を返さない
  *       POST  /api/projects/[id]/apply-markup-rate … apply_markup_rate_change() RPC と同じ対象・ROUND
+ *       POST  /api/estimate-items/reorder   … groups / items の sort_order・group_id を一括更新
+ *       POST/PATCH/DELETE /api/estimate-groups … 工種グループの追加・名称変更・削除
  */
 
 import { MAX_MARKUP_RATE, MIN_MARKUP_RATE } from '@/lib/estimate/pricing'
@@ -142,7 +144,7 @@ async function handle(url: URL, method: string, init: RequestInit | undefined, a
       const obj = { markup_rate: s.project.markup_rate, misc_expense_override: s.project.misc_expense_override, rounding_discount: s.project.rounding_discount }
       return json(accept.includes('vnd.pgrst.object') ? obj : [obj])
     }
-    if (table === 'estimate_groups') return json(s.groups)
+    if (table === 'estimate_groups') return json([...s.groups].sort((a, b) => a.sort_order - b.sort_order))
     if (table === 'estimate_items')  return json([...s.items].sort((a, b) => a.sort_order - b.sort_order))
     return null
   }
@@ -173,6 +175,41 @@ async function handle(url: URL, method: string, init: RequestInit | undefined, a
     s.items.push(it); save(s)
     // 実APIの select と同じ列だけ返す（selling_price_mode / markup_rate_override / retail_price は返らない）
     return json(omit(it, ['selling_price_mode', 'markup_rate_override', 'retail_price']))
+  }
+  // 並び替え・行間 ＋ の振り直し（実APIと同じく groups / items の sort_order・group_id を更新）
+  // window.__QA_FAIL_REORDER = true で失敗（500）を再現できる
+  if (p === '/api/estimate-items/reorder' && method === 'POST') {
+    if ((window as unknown as { __QA_FAIL_REORDER?: boolean }).__QA_FAIL_REORDER) return json({ error: 'QA: reorder failed' }, 500)
+    for (const g of (body.groups as Array<{ id: string; sort_order: number }> | undefined) ?? []) {
+      const t = s.groups.find(x => x.id === g.id); if (t) t.sort_order = g.sort_order
+    }
+    for (const u of (body.items as Array<{ id: string; sort_order: number; group_id: string | null }> | undefined) ?? []) {
+      const t = s.items.find(x => x.id === u.id); if (t) { t.sort_order = u.sort_order; t.group_id = u.group_id }
+    }
+    save(s)
+    return json({ ok: true })
+  }
+  // 工種グループの追加・名称変更・削除
+  if (p === '/api/estimate-groups' && method === 'POST') {
+    const n = s.groups.length + 1
+    const g = { id: `00000000-0000-4000-8000-00000000b${String(n).padStart(3, '0')}`, label: String(body.label ?? ''), display_mode: 'detail', sort_order: Number(body.sort_order ?? 0) }
+    s.groups.push(g); save(s)
+    return json(g)
+  }
+  if ((m = p.match(/^\/api\/estimate-groups\/([0-9a-f-]{36})$/))) {
+    const g = s.groups.find(x => x.id === m![1])
+    if (!g) return json({ error: 'not found' }, 404)
+    if (method === 'PATCH') {
+      if (body.label !== undefined) g.label = String(body.label)
+      if (body.display_mode !== undefined) g.display_mode = String(body.display_mode)
+      save(s); return json(g)
+    }
+    if (method === 'DELETE') {
+      s.groups = s.groups.filter(x => x.id !== g.id)
+      s.items  = s.items.filter(i => i.group_id !== g.id)
+      save(s); return json({ ok: true })
+    }
+    return null
   }
   // OCR / AI 読み取りの代替（Claude Vision は呼ばない）。元見積書の備考欄に社内情報が入っているケースを再現
   if (p === '/api/ai/extract-estimate' && method === 'POST') {
