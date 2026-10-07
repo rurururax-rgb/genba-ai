@@ -19,6 +19,7 @@ import { resolveNumericCommit } from '@/lib/input/numeric-input'
 import { jsonInit, writeRequest } from '@/lib/api/write-request'
 import { calculateSellingPrice, DEFAULT_MARKUP_RATE, getEffectiveMarkupRate, getItemPricingState, markupToMarginRate, normalizeMarkupOverride, resolveSellingPrice, type SellingPriceMode } from '@/lib/estimate/pricing'
 import { calculateEstimateTotals, liveAmount } from '@/lib/estimate/totals'
+import { clipInsertionLine, intersectBoxes, type Box } from '@/lib/estimate/insertion-line'
 import { ItemPricingPopover, MarginCell, fmtMarginPct, fmtMarkup } from './ItemPricingPopover'
 import { ProjectMarkupDialog } from './ProjectMarkupDialog'
 import { ItemMemoPopover, LockIcon } from './ItemMemoPopover'
@@ -1763,8 +1764,14 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   // ドラッグ作成中のゴースト位置
   const [dragCreate, setDragCreate] = useState<{
     rowType: RowType; x: number; y: number
-    indicator: { y: number; groupId: string | null; insertAfterItem: EstimateItem | null } | null
+    indicator: {
+      line: { left: number; width: number; top: number; height: number } | null
+      groupId: string | null; insertAfterItem: EstimateItem | null
+    } | null
   } | null>(null)
+  // 挿入ラインの表示範囲（テーブル領域 ∩ スクロール領域 ∩ sticky ツールバーより下）の計測用
+  const tableScrollRef   = useRef<HTMLDivElement>(null)
+  const stickyToolbarRef = useRef<HTMLDivElement>(null)
   // マルチドラッグ中のドラッグ元アイテムID
   const [draggingId, setDraggingId] = useState<string | null>(null)
   // renderClone は常に安定した参照を渡す（state 変化で差し替えると DnD がドラッグをキャンセルする）
@@ -2064,14 +2071,27 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
         const gId = item.group_id
         const gItems = capturedItems.filter(i => i.group_id === gId).sort((a, b) => a.sort_order - b.sort_order)
         const idx = gItems.findIndex(i => i.id === item.id)
+        const row = { left: rect.left, right: rect.right }
         if (cy <= rect.top + rect.height / 2) {
           const prev = idx > 0 ? gItems[idx - 1] : null
-          return { y: rect.top, groupId: gId, insertAfterItem: prev }
+          return { y: rect.top, row, groupId: gId, insertAfterItem: prev }
         } else {
-          return { y: rect.bottom, groupId: gId, insertAfterItem: item }
+          return { y: rect.bottom, row, groupId: gId, insertAfterItem: item }
         }
       }
       return null
+    }
+
+    // ラインはテーブルの見えている範囲内だけに描く（サイドバー側・画面右端・ツールバーの裏へ出さない）
+    function visibleTableBox(): Box | null {
+      const table = tableScrollRef.current?.getBoundingClientRect()
+      if (!table) return null
+      const boxes: Box[] = [table, { left: 0, right: window.innerWidth, top: 0, bottom: window.innerHeight }]
+      const main = document.getElementById('dashboard-main')?.getBoundingClientRect()
+      if (main) boxes.push(main)
+      const toolbar = stickyToolbarRef.current?.getBoundingClientRect()
+      if (toolbar) boxes.push({ left: -Infinity, right: Infinity, top: toolbar.bottom, bottom: Infinity })
+      return intersectBoxes(...boxes)
     }
 
     setDragCreate({ rowType, x: e.clientX, y: e.clientY, indicator: null })
@@ -2082,7 +2102,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       const t = findTarget(ev.clientX, ev.clientY)
       setDragCreate(prev => prev ? {
         ...prev, x: ev.clientX, y: ev.clientY,
-        indicator: t ? { y: t.y, groupId: t.groupId, insertAfterItem: t.insertAfterItem } : null,
+        indicator: t ? { line: clipInsertionLine(t.row, t.y, visibleTableBox()), groupId: t.groupId, insertAfterItem: t.insertAfterItem } : null,
       } : null)
     }
 
@@ -2741,7 +2761,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       }}>
 
         {/* ── ツールバー + 選択アクションバー（sticky 固定）── */}
-        <div style={{ position: 'sticky', top: 0, zIndex: 30, background: C.bg }}>
+        <div ref={stickyToolbarRef} style={{ position: 'sticky', top: 0, zIndex: 30, background: C.bg }}>
         {/* 幅が足りないときは右側の操作（見積書を表示・Rev確定・履歴など）を画面外に隠さず 2 段目へ折り返す */}
         <div style={{
           display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8,
@@ -3152,7 +3172,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
         </div>{/* /sticky toolbar wrapper */}
 
         {/* ── テーブル ── */}
-        <div id="estimate-table-scroll" style={{ overflow: 'auto', flex: 1 }}>
+        <div id="estimate-table-scroll" ref={tableScrollRef} style={{ overflow: 'auto', flex: 1 }}>
           <div style={{ minWidth: GRID_TOTAL_W }}>
 
             {/* ── 2段ヘッダー（sticky でまとめてスクロール追従） ── */}
@@ -3699,13 +3719,13 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
           ＋ {dragCreate.rowType === 'header' ? '見出し行' : dragCreate.rowType === 'note' ? 'メモ行' : '行'}
         </div>
         {/* 挿入位置インジケーターライン */}
-        {dragCreate.indicator && (
-          <div style={{
+        {dragCreate.indicator?.line && (
+          <div data-testid="estimate-insertion-line" style={{
             position: 'fixed',
-            left: 0,
-            right: 0,
-            top: dragCreate.indicator.y - 2,
-            height: 4,
+            left: dragCreate.indicator.line.left,
+            width: dragCreate.indicator.line.width,
+            top: dragCreate.indicator.line.top,
+            height: dragCreate.indicator.line.height,
             zIndex: 9998,
             pointerEvents: 'none',
             background: C.accent,
