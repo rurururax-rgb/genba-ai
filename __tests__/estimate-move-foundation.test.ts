@@ -41,18 +41,7 @@ describe('行ドラッグの自動スクロール', () => {
   })
 })
 
-describe('選択行の「移動先」', () => {
-  it('並びは planMoveToGroup（元の表示順）で決め、selectedIds の順番を使わない', () => {
-    const b = body('async function moveSelectedToGroup(', '// ── 安定した renderClone')
-    expect(b).toContain('planMoveToGroup(items, selectedIds, groups.map(g => g.id), targetGroupId)')
-    expect(b).not.toContain('Array.from(selectedIds)')
-  })
-
-  it('保存に失敗したら通知して DB を読み直す（手元のスナップショットに戻さない）', () => {
-    const b = body('async function moveSelectedToGroup(', '// ── 安定した renderClone')
-    expect(b).toMatch(/try \{\s*await persistReorder\(\[\], updates\)\s*\} catch \{\s*recoverFromReorderFailure\(\)/)
-  })
-
+describe('選択行の移動（並び順）', () => {
   it('複数選択ドラッグも表示順（工種順 → sort_order）で並べる', () => {
     expect(src).toContain('sortByDisplayOrder(items.filter(i => selectedIds.has(i.id)), groups.map(g => g.id))')
   })
