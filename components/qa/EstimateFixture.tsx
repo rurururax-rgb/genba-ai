@@ -8,7 +8,8 @@ installEstimateFixtureBackend()
 
 export function EstimateFixture() {
   return (
-    <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
+    // 本番の app/(dashboard)/layout.tsx と同じく、縦スクロールは #dashboard-main が受け持つ
+    <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '6px 12px', background: '#FEF3C7', color: '#92400E', fontSize: 12 }}>
         <strong>QA FIXTURE</strong>
         <span>本番DBには接続しません（書き込みは sessionStorage 上の Fixture に対して行われます）</span>
@@ -23,9 +24,12 @@ export function EstimateFixture() {
           初期データに戻す
         </button>
       </div>
-      <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-        <EstimateTab projectId={FIXTURE_PROJECT_ID} />
-      </div>
+      <main id="dashboard-main" style={{ flex: 1, minHeight: 0, overflowY: 'auto', background: '#F3F7F4' }}>
+        {/* 案件ページと同じく高さ auto の親に置く（EstimateTab の height: 100% が効かず、表は内容の高さまで伸びる） */}
+        <div>
+          <EstimateTab projectId={FIXTURE_PROJECT_ID} />
+        </div>
+      </main>
     </div>
   )
 }

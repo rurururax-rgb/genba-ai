@@ -178,12 +178,17 @@ async function handle(url: URL, method: string, init: RequestInit | undefined, a
   }
   // 並び替え・行間 ＋ の振り直し（実APIと同じく groups / items の sort_order・group_id を更新）
   // window.__QA_FAIL_REORDER = true で失敗（500）を再現できる
+  // window.__QA_FAIL_REORDER_AFTER = n で「先頭 n 件（groups → items の順）だけ保存して 500」＝途中までの成功を再現できる
   if (p === '/api/estimate-items/reorder' && method === 'POST') {
-    if ((window as unknown as { __QA_FAIL_REORDER?: boolean }).__QA_FAIL_REORDER) return json({ error: 'QA: reorder failed' }, 500)
+    const qa = window as unknown as { __QA_FAIL_REORDER?: boolean; __QA_FAIL_REORDER_AFTER?: number }
+    if (qa.__QA_FAIL_REORDER) return json({ error: 'QA: reorder failed' }, 500)
+    let budget = qa.__QA_FAIL_REORDER_AFTER ?? Infinity
     for (const g of (body.groups as Array<{ id: string; sort_order: number }> | undefined) ?? []) {
+      if (budget-- <= 0) { save(s); return json({ error: 'QA: reorder partially failed' }, 500) }
       const t = s.groups.find(x => x.id === g.id); if (t) t.sort_order = g.sort_order
     }
     for (const u of (body.items as Array<{ id: string; sort_order: number; group_id: string | null }> | undefined) ?? []) {
+      if (budget-- <= 0) { save(s); return json({ error: 'QA: reorder partially failed' }, 500) }
       const t = s.items.find(x => x.id === u.id); if (t) { t.sort_order = u.sort_order; t.group_id = u.group_id }
     }
     save(s)
