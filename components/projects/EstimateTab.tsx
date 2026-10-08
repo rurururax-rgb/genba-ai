@@ -20,6 +20,7 @@ import { jsonInit, writeRequest } from '@/lib/api/write-request'
 import { calculateSellingPrice, DEFAULT_MARKUP_RATE, getEffectiveMarkupRate, getItemPricingState, markupToMarginRate, normalizeMarkupOverride, resolveSellingPrice, type SellingPriceMode } from '@/lib/estimate/pricing'
 import { calculateEstimateTotals, liveAmount } from '@/lib/estimate/totals'
 import { planInsert } from '@/lib/estimate/insert-plan'
+import { planMoveToGroup, sortByDisplayOrder } from '@/lib/estimate/move-plan'
 import { ItemPricingPopover, MarginCell, fmtMarginPct, fmtMarkup } from './ItemPricingPopover'
 import { ProjectMarkupDialog } from './ProjectMarkupDialog'
 import { ItemMemoPopover, LockIcon } from './ItemMemoPopover'
@@ -2098,12 +2099,13 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
 
     const tick = () => {
       if (!dndDragActiveRef.current) return
-      const container = document.getElementById('estimate-table-scroll')
+      // 縦スクロールするのはダッシュボードの main（#estimate-table-scroll は内容の高さまで伸びるので縦には動かない）
+      const container = document.getElementById('dashboard-main')
       if (container) {
         const rect    = container.getBoundingClientRect()
         const y       = dndMouseYRef.current
-        const topDist = y - rect.top
-        const botDist = rect.bottom - y
+        const topDist = y - Math.max(rect.top, 0)
+        const botDist = Math.min(rect.bottom, window.innerHeight) - y
         let speed = 0
         if (topDist > 0 && topDist < ZONE)
           speed = -MAX_SPEED * Math.pow(1 - topDist / ZONE, 2)
@@ -2123,6 +2125,16 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       dndAutoScrollRafRef.current = null
     }
   }, [])
+
+  // @hello-pangea/dnd は Droppable に最も近い overflow: auto/scroll の要素だけをスクロールコンテナとして追跡する。
+  // 表の横スクロール用 #estimate-table-scroll（overflow: auto）がそれに選ばれると、実際に縦スクロールする
+  // #dashboard-main の移動量が無視され、自動スクロール後のドロップ位置がずれる（nested scroll container）。
+  // ドラッグ中だけ overflow: hidden にして（dnd はスクロールコンテナとみなさない・scrollLeft は保たれる）
+  // #dashboard-main を唯一のスクロールコンテナにする。onBeforeCapture は寸法の取得前に呼ばれる。
+  function setTableScrollForDrag(dragging: boolean) {
+    const el = document.getElementById('estimate-table-scroll')
+    if (el) el.style.overflow = dragging ? 'hidden' : 'auto'
+  }
 
   // ── HTML5ドラッグ（取込パネル→見積）中の自動スクロール ────────────────
   useEffect(() => {
@@ -2295,6 +2307,13 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
     if (!res.ok) throw new Error('reorder failed')
   }
 
+  // /reorder は 1 行ずつ更新するので途中まで保存されていることがある。
+  // 手元のスナップショットに戻さず、DB を読み直して実際に保存された並びを表示する。
+  function recoverFromReorderFailure() {
+    alert('並び替えの保存に失敗しました。保存済みの状態を読み込み直します。')
+    void reload()
+  }
+
   function handleDragEnd(result: DropResult) {
     const { source, destination, type, draggableId } = result
     if (!destination) { setSelectedIds(new Set()); return }
@@ -2305,10 +2324,9 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       const ng = reorder(visibleGroups, source.index, destination.index)
         .map((g, i) => ({ ...g, sort_order: i * 1000 }))
       const ngIds    = new Set(ng.map(g => g.id))
-      const prevGrps = groups  // rollback snapshot
       setGroups(prev => [...ng, ...prev.filter(g => !ngIds.has(g.id))])
       persistReorder(ng.map(g => ({ id: g.id, sort_order: g.sort_order })), [])
-        .catch(() => { setGroups(prevGrps); alert('並び替えの保存に失敗しました') })
+        .catch(recoverFromReorderFailure)
       return
     }
 
@@ -2318,10 +2336,8 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
 
       // ── マルチドラッグ: 選択中のアイテムをドラッグした場合は選択全体を一括移動 ──
       if (selectedIds.has(draggedId) && selectedIds.size > 1) {
-        // 選択アイテムを現在の sort_order 順で並べる
-        const selectedSorted = items
-          .filter(i => selectedIds.has(i.id))
-          .sort((a, b) => a.sort_order - b.sort_order)
+        // 選択アイテムを表示順（工種順 → sort_order）で並べる
+        const selectedSorted = sortByDisplayOrder(items.filter(i => selectedIds.has(i.id)), groups.map(g => g.id))
 
         // 移動先グループの非選択アイテム（挿入位置の計算基準）
         const dstNonSelected = items
@@ -2350,7 +2366,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
         ].map((x, i) => ({ ...x, sort_order: i * 1000 }))
 
         const updatedItems = items.map(item => newDst.find(x => x.id === item.id) ?? item)
-        const prevItems    = items  // rollback snapshot
+        const prevItems    = items  // 変更行の抽出用
         setItems(updatedItems)
         setSelectedIds(new Set())
 
@@ -2359,7 +2375,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
           return o && (o.sort_order !== i.sort_order || o.group_id !== i.group_id)
         })
         persistReorder([], changed.map(i => ({ id: i.id, sort_order: i.sort_order, group_id: i.group_id })))
-          .catch(() => { setItems(prevItems); alert('並び替えの保存に失敗しました') })
+          .catch(recoverFromReorderFailure)
         return
       }
 
@@ -2387,14 +2403,14 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
           return i
         })
       }
-      const prevItems = items  // rollback snapshot
+      const prevItems = items  // 変更行の抽出用
       setItems(updatedItems)
       const changed = updatedItems.filter(i => {
         const o = prevItems.find(x => x.id === i.id)
         return o && (o.sort_order !== i.sort_order || o.group_id !== i.group_id)
       })
       persistReorder([], changed.map(i => ({ id: i.id, sort_order: i.sort_order, group_id: i.group_id })))
-        .catch(() => { setItems(prevItems); alert('並び替えの保存に失敗しました') })
+        .catch(recoverFromReorderFailure)
     }
   }
 
@@ -2718,19 +2734,20 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
     }
   }
 
+  // 選択行を工種の末尾へ移動する。並びは選択した順ではなく元の表示順（工種順 → sort_order）
   async function moveSelectedToGroup(targetGroupId: string | null) {
     if (selectedIds.size === 0) return
-    const tgtItems = items.filter(i => i.group_id === targetGroupId).sort((a, b) => a.sort_order - b.sort_order)
-    const baseOrder = tgtItems.length > 0 ? Math.max(...tgtItems.map(i => i.sort_order)) + 1000 : 0
-    const updates = Array.from(selectedIds).map((id, i) => ({
-      id, group_id: targetGroupId, sort_order: baseOrder + i * 1000,
-    }))
+    const updates = planMoveToGroup(items, selectedIds, groups.map(g => g.id), targetGroupId)
     setItems(prev => prev.map(item => {
       const u = updates.find(x => x.id === item.id)
       return u ? { ...item, group_id: u.group_id, sort_order: u.sort_order } : item
     }))
     setSelectedIds(new Set())
-    await persistReorder([], updates)
+    try {
+      await persistReorder([], updates)
+    } catch {
+      recoverFromReorderFailure()
+    }
   }
 
   // ── 安定した renderClone（常に同一参照） ──────────────────────────────────
@@ -3267,6 +3284,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
             <div style={{ background: C.bg }}>
             <DragDropContext
               autoScrollerOptions={{ disabled: true }}
+              onBeforeCapture={() => setTableScrollForDrag(true)}
               onDragStart={(start: DragStart) => {
                 setDndDragging(true)
                 startDndAutoScroll()
@@ -3277,7 +3295,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                   setDraggingId(id)            // isGhost のために state も更新
                 }
               }}
-              onDragEnd={result => { stopDndAutoScroll(); setDndDragging(false); draggingIdRef.current = null; setDraggingId(null); handleDragEnd(result) }}
+              onDragEnd={result => { stopDndAutoScroll(); setTableScrollForDrag(false); setDndDragging(false); draggingIdRef.current = null; setDraggingId(null); handleDragEnd(result) }}
             >
 
               {/* グループ */}
