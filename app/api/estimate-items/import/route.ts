@@ -50,6 +50,32 @@ export async function POST(request: NextRequest) {
 
     const company_id = membership.company_id
 
+    // 保存先の所有確認。estimate_items の RLS は company_id しか見ず、project_id / group_id の外部キー検査は
+    // RLS を通らないため、確認しないと他社・別案件の工種を参照する行を作れてしまう。
+    // 存在しない・他社・削除済みは区別せず同じエラーを返す（他社案件の存在を漏らさない）。
+    const { data: project } = await supabase
+      .from('projects')
+      .select('id, company_id')
+      .eq('id', project_id)
+      .is('deleted_at', null)
+      .maybeSingle()
+    if (!project || project.company_id !== company_id) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    }
+
+    // group_id = null は未分類として扱う（従来どおり）
+    if (group_id != null) {
+      const { data: group } = await supabase
+        .from('estimate_groups')
+        .select('id')
+        .eq('id', group_id)
+        .eq('project_id', project_id)
+        .eq('company_id', company_id)
+        .is('deleted_at', null)
+        .maybeSingle()
+      if (!group) return NextResponse.json({ error: 'Group not found' }, { status: 404 })
+    }
+
     // 案件掛け率を取得（column 未存在 / RLS ブロック時は DEFAULT_MARKUP_RATE にフォールバック）
     const { data: projectData } = await supabase
       .from('projects')
