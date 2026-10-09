@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
+import { isUuid, isSortOrder, isActiveProject, isActiveGroupInProject } from '@/lib/estimate/ownership'
 
 export async function POST(request: NextRequest) {
   const supabase = await getServerClient()
@@ -13,7 +14,7 @@ export async function POST(request: NextRequest) {
     .single()
   if (!membership) return NextResponse.json({ error: 'No company' }, { status: 403 })
 
-  const body = await request.json() as {
+  const body = await request.json().catch(() => null) as {
     project_id: string
     name?: string
     quantity?: number
@@ -22,8 +23,23 @@ export async function POST(request: NextRequest) {
     group_id?: string | null
     row_type?: 'item' | 'header' | 'note'
   }
+  if (!body || typeof body !== 'object') return NextResponse.json({ error: 'Invalid request' }, { status: 400 })
   const { project_id } = body
   if (!project_id) return NextResponse.json({ error: 'project_id required' }, { status: 400 })
+  if (!isUuid(project_id)
+    || (body.group_id != null && !isUuid(body.group_id))
+    || (body.sort_order != null && !isSortOrder(body.sort_order))) {
+    return NextResponse.json({ error: 'Invalid request' }, { status: 400 })
+  }
+
+  // 保存先の所有確認（lib/estimate/ownership.ts）。存在しない・他社・削除済みは同じエラーを返す
+  if (!(await isActiveProject(supabase, project_id, membership.company_id))) {
+    return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+  }
+  // group_id = null / 省略は未分類（その他）として扱う（従来どおり）
+  if (body.group_id != null && !(await isActiveGroupInProject(supabase, body.group_id, project_id, membership.company_id))) {
+    return NextResponse.json({ error: 'Group not found' }, { status: 404 })
+  }
 
   const rowType = body.row_type ?? 'item'
   const defaultName = rowType === 'item' ? '新規項目' : ''
