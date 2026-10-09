@@ -20,7 +20,8 @@ import { jsonInit, writeRequest } from '@/lib/api/write-request'
 import { calculateSellingPrice, DEFAULT_MARKUP_RATE, getEffectiveMarkupRate, getItemPricingState, markupToMarginRate, normalizeMarkupOverride, resolveSellingPrice, type SellingPriceMode } from '@/lib/estimate/pricing'
 import { calculateEstimateTotals, liveAmount } from '@/lib/estimate/totals'
 import { planInsert } from '@/lib/estimate/insert-plan'
-import { planMoveToGroup, sortByDisplayOrder } from '@/lib/estimate/move-plan'
+import { planMove, sortByDisplayOrder, type MoveDestination } from '@/lib/estimate/move-plan'
+import { MoveGap, MoveModeBar, MoveTargetBlock, moveTargetLabel, useEstimateMoveMode } from './EstimateMoveMode'
 import { ItemPricingPopover, MarginCell, fmtMarginPct, fmtMarkup } from './ItemPricingPopover'
 import { ProjectMarkupDialog } from './ProjectMarkupDialog'
 import { ItemMemoPopover, LockIcon } from './ItemMemoPopover'
@@ -1880,6 +1881,8 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   const [newlyCreatedGroupId, setNewlyCreatedGroupId] = useState<string | null>(null)
   // 複数選択
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  // 移動（選択 → 移動 → 移動先の行間）。moveIds は selectedIds と別に持ち、工種タブを切り替えても残す
+  const { moveIds, moving, start: startMove, cancel: cancelMove, finish: finishMove } = useEstimateMoveMode()
   // 保存フラッシュ（保存直後に行をハイライト）
   const [savedIds, setSavedIds] = useState<Set<string>>(new Set())
   // Shift+クリック範囲選択用：最後にクリックした行のID
@@ -2666,6 +2669,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   }
 
   function handleGroupSelect(gid: string) {
+    if (moving) return  // 移動中は選択を変えない（移動する行は「移動」を押した時点で確定済み）
     const gItems = items.filter(i => i.group_id === gid)
     if (gItems.length === 0) return
     const state = calcGroupCheckState(gid)
@@ -2688,6 +2692,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   }, [visibleGroups, items, ungroupedItems])
 
   function handleItemSelect(itemId: string, shift: boolean) {
+    if (moving) return
     if (shift && lastClickedIdRef.current && lastClickedIdRef.current !== itemId) {
       // Shift+クリック: 前回クリックした行から今回の行まで一括選択
       const allIds = flatItemOrder.map(i => i.id)
@@ -2734,20 +2739,25 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
     }
   }
 
-  // 選択行を工種の末尾へ移動する。並びは選択した順ではなく元の表示順（工種順 → sort_order）
-  async function moveSelectedToGroup(targetGroupId: string | null) {
-    if (selectedIds.size === 0) return
-    const updates = planMoveToGroup(items, selectedIds, groups.map(g => g.id), targetGroupId)
+  // 移動先の行間を押したとき。並びは planMove（元の表示順のまま dest の位置へ）で決め、/reorder で保存する。
+  // 成功しても失敗しても DB を読み直し、実際に保存された並びを表示する（/reorder は途中まで保存されうる）
+  async function confirmMove(dest: MoveDestination) {
+    if (!moveIds) return
+    const updates = planMove(items, moveIds, groups.map(g => g.id), dest)
+    finishMove()
+    setSelectedIds(new Set())
+    if (updates.length === 0) return  // 今と同じ位置：保存しない
     setItems(prev => prev.map(item => {
       const u = updates.find(x => x.id === item.id)
       return u ? { ...item, group_id: u.group_id, sort_order: u.sort_order } : item
     }))
-    setSelectedIds(new Set())
     try {
       await persistReorder([], updates)
     } catch {
       recoverFromReorderFailure()
+      return
     }
+    void reload()
   }
 
   // ── 安定した renderClone（常に同一参照） ──────────────────────────────────
@@ -2850,7 +2860,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
           background: C.bg, borderBottom: HDIV,
         }}>
           {/* 行の追加は表の行間の ＋ から（位置が曖昧になる上部の汎用「追加」は置かない） */}
-          <button className="est-tb-btn" style={st.tbBtn} onClick={handleCreateGroup} disabled={creating} title="工種グループを追加して、そのタブへ移動します">
+          <button className="est-tb-btn" style={st.tbBtn} onClick={handleCreateGroup} disabled={creating || moving} title="工種グループを追加して、そのタブへ移動します">
             ＋ 工種
           </button>
           <div style={{ flex: 1 }} />
@@ -2963,8 +2973,9 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
           </Button>
         </div>
 
-        {/* ── 選択アクションバー（複数選択時のみ表示）── */}
-        {selectedIds.size > 0 && (
+        {/* ── 選択アクションバー（選択時のみ表示）。移動中は「○件を移動中」バーに置き換える ── */}
+        {moving && moveIds && <MoveModeBar count={moveIds.size} onCancel={cancelMove} />}
+        {!moving && selectedIds.size > 0 && (
           <div style={{
             display: 'flex', alignItems: 'center', gap: 10,
             padding: '0 16px', height: 40,
@@ -2981,27 +2992,25 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
             <span style={{ fontSize: 12, color: C.textMuted, fontFamily: FONT }}>
               ｜ 合計 ¥{fmt(selectedSum)}
             </span>
-            <span style={{ fontSize: 12, color: C.textSub, fontFamily: FONT }}>→ 移動先：</span>
-            <select
-              defaultValue=""
-              onChange={e => {
-                const v = e.target.value
-                if (!v) return
-                moveSelectedToGroup(v === '__none__' ? null : v)
-                e.target.value = ''
-              }}
+            <button
+              type="button"
+              onClick={() => startMove(selectedIds)}
+              title="選択した行を、表の中の好きな行間へ移動します"
               style={{
-                fontSize: 12, border: `1px solid ${C.accentTint}`, borderRadius: 5,
-                padding: '3px 8px', background: '#fff', cursor: 'pointer',
-                color: C.text, fontFamily: FONT, outline: 'none',
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                fontSize: 11, fontWeight: 700,
+                color: '#fff', background: C.accent,
+                border: `1px solid ${C.accent}`, borderRadius: 5,
+                padding: '3px 12px', cursor: 'pointer', fontFamily: FONT,
               }}
             >
-              <option value="">── グループを選択 ──</option>
-              <option value="__none__">グループなし</option>
-              {visibleGroups.map(g => (
-                <option key={g.id} value={g.id}>{g.label || '（無題）'}</option>
-              ))}
-            </select>
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/>
+                <line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/>
+              </svg>
+              移動
+            </button>
             <div style={{ flex: 1 }} />
             <button
               onClick={handleDeleteSelected}
@@ -3318,7 +3327,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                       const lastPageMissingCost = lastPageItems.filter(i => (i.row_type ?? 'item') === 'item' && (i.selling_price ?? 0) !== 0 && i.cost_price == null).length
 
                       return (
-                        <Draggable key={group.id} draggableId={`group-${group.id}`} index={gi}>
+                        <Draggable key={group.id} draggableId={`group-${group.id}`} index={gi} isDragDisabled={moving}>
                           {(prov, snap) => (
                             <div ref={prov.innerRef} {...prov.draggableProps}
                               style={{
@@ -3397,7 +3406,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                         const showIndicatorBefore = importDragTarget?.groupId === group.id && importDragTarget?.afterItemId === prevId
                                         const showIndicatorAfter  = importDragTarget?.groupId === group.id && importDragTarget?.afterItemId === item.id && idx === gItems.length - 1
                                         return (
-                                        <Draggable key={item.id} draggableId={`item-${item.id}`} index={idx}>
+                                        <Draggable key={item.id} draggableId={`item-${item.id}`} index={idx} isDragDisabled={moving}>
                                           {(ip, is) => (
                                             <div ref={ip.innerRef} {...ip.draggableProps} style={ip.draggableProps.style}
                                               onDragOver={e => {
@@ -3425,14 +3434,28 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                                 }}>ここに追加</div>
                                               )}
                                               <div className="est-row-wrap" style={{ position: 'relative', paddingBottom: nextPb ? 30 : 0 }}>
-                                                {/* 行間 ＋：この行の上端 = index idx（先頭行なら先頭）。最終行だけ下端（= 末尾）も持つ */}
-                                                {!dndDragging && !is.isDragging && (
-                                                  <InsertGap edge="top" disabled={addingRow} label="この位置に行を追加"
-                                                    onPick={t => handleAddRowAt(group.id, idx, t)} />
-                                                )}
-                                                {!dndDragging && !is.isDragging && idx === gItems.length - 1 && (
-                                                  <InsertGap edge="bottom" disabled={addingRow} label="末尾に行を追加"
-                                                    onPick={t => handleAddRowAt(group.id, gItems.length, t)} />
+                                                {/* 行間 ＋：この行の上端 = index idx（先頭行なら先頭）。最終行だけ下端（= 末尾）も持つ。
+                                                    移動中は同じ行間が「ここへ移動」になる（この行の前 / 末尾） */}
+                                                {moving ? (
+                                                  <>
+                                                    <MoveGap edge="top" label={moveTargetLabel(group.label, item.name)}
+                                                      onPick={() => confirmMove({ groupId: group.id, beforeId: item.id })} />
+                                                    {idx === gItems.length - 1 && (
+                                                      <MoveGap edge="bottom" label={moveTargetLabel(group.label, null)}
+                                                        onPick={() => confirmMove({ groupId: group.id, beforeId: null })} />
+                                                    )}
+                                                  </>
+                                                ) : (
+                                                  <>
+                                                    {!dndDragging && !is.isDragging && (
+                                                      <InsertGap edge="top" disabled={addingRow} label="この位置に行を追加"
+                                                        onPick={t => handleAddRowAt(group.id, idx, t)} />
+                                                    )}
+                                                    {!dndDragging && !is.isDragging && idx === gItems.length - 1 && (
+                                                      <InsertGap edge="bottom" disabled={addingRow} label="末尾に行を追加"
+                                                        onPick={t => handleAddRowAt(group.id, gItems.length, t)} />
+                                                    )}
+                                                  </>
                                                 )}
                                                 <ItemRow item={item} inGroup isDragging={is.isDragging}
                                                   dragHandleProps={ip.dragHandleProps}
@@ -3445,7 +3468,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                                   indent={localIndent[item.id] ?? 0}
                                                   onIndent={() => setLocalIndent(p => ({ ...p, [item.id]: Math.min((p[item.id] ?? 0) + 1, 3) }))}
                                                   onUnindent={() => setLocalIndent(p => ({ ...p, [item.id]: Math.max((p[item.id] ?? 0) - 1, 0) }))}
-                                                  isGhost={draggingId !== null && selectedIds.has(item.id) && item.id !== draggingId}
+                                                  isGhost={(draggingId !== null && selectedIds.has(item.id) && item.id !== draggingId) || !!moveIds?.has(item.id)}
                                                   saved={savedIds.has(item.id)}
                                                   sumMode={sumMode}
                                                   sumSelKeys={sumSelKeys}
@@ -3474,8 +3497,10 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                         )
                                       })}
                                       {dp.placeholder}
-                                      {gItems.length === 0 && (
-                                        <EmptyGroupAdd disabled={addingRow} onPick={t => handleAddRowAt(group.id, 0, t)} />
+                                      {gItems.length === 0 && (moving
+                                        ? <MoveTargetBlock label={moveTargetLabel(group.label, null)} text="ここへ移動"
+                                            onPick={() => confirmMove({ groupId: group.id, beforeId: null })} />
+                                        : <EmptyGroupAdd disabled={addingRow} onPick={t => handleAddRowAt(group.id, 0, t)} />
                                       )}
                                     </div>
                                   )}
@@ -3499,6 +3524,12 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                   </div>
                 )}
               </Droppable>
+
+              {/* 移動中、行のない「その他」（工種なし）へも移せるようにする */}
+              {moving && ungroupedItems.length === 0 && activeGroupTab === null && groups.length > 0 && (
+                <MoveTargetBlock label={moveTargetLabel('その他', null)} text="その他（工種なし）へ移動"
+                  onPick={() => confirmMove({ groupId: null, beforeId: null })} />
+              )}
 
               {/* グループなし */}
               {ungroupedItems.length > 0 && activeGroupTab === null && (
@@ -3529,17 +3560,30 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                       <div ref={dp.innerRef} {...dp.droppableProps}
                         style={{ minHeight: 32, background: ds.isDraggingOver ? `${C.accent}08` : 'transparent', transition: 'background 0.12s' }}>
                         {ungroupedItems.map((item, idx) => (
-                          <Draggable key={item.id} draggableId={`item-${item.id}`} index={idx}>
+                          <Draggable key={item.id} draggableId={`item-${item.id}`} index={idx} isDragDisabled={moving}>
                             {(ip, is) => (
                               <div ref={ip.innerRef} {...ip.draggableProps} style={ip.draggableProps.style}>
                                 <div className="est-row-wrap" style={{ position: 'relative' }}>
-                                {!dndDragging && !is.isDragging && (
-                                  <InsertGap edge="top" disabled={addingRow} label="この位置に行を追加"
-                                    onPick={t => handleAddRowAt(null, idx, t)} />
-                                )}
-                                {!dndDragging && !is.isDragging && idx === ungroupedItems.length - 1 && (
-                                  <InsertGap edge="bottom" disabled={addingRow} label="末尾に行を追加"
-                                    onPick={t => handleAddRowAt(null, ungroupedItems.length, t)} />
+                                {moving ? (
+                                  <>
+                                    <MoveGap edge="top" label={moveTargetLabel('その他', item.name)}
+                                      onPick={() => confirmMove({ groupId: null, beforeId: item.id })} />
+                                    {idx === ungroupedItems.length - 1 && (
+                                      <MoveGap edge="bottom" label={moveTargetLabel('その他', null)}
+                                        onPick={() => confirmMove({ groupId: null, beforeId: null })} />
+                                    )}
+                                  </>
+                                ) : (
+                                  <>
+                                    {!dndDragging && !is.isDragging && (
+                                      <InsertGap edge="top" disabled={addingRow} label="この位置に行を追加"
+                                        onPick={t => handleAddRowAt(null, idx, t)} />
+                                    )}
+                                    {!dndDragging && !is.isDragging && idx === ungroupedItems.length - 1 && (
+                                      <InsertGap edge="bottom" disabled={addingRow} label="末尾に行を追加"
+                                        onPick={t => handleAddRowAt(null, ungroupedItems.length, t)} />
+                                    )}
+                                  </>
                                 )}
                                 <ItemRow item={item} inGroup={false} isDragging={is.isDragging}
                                   dragHandleProps={ip.dragHandleProps}
@@ -3552,7 +3596,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                   indent={localIndent[item.id] ?? 0}
                                   onIndent={() => setLocalIndent(p => ({ ...p, [item.id]: Math.min((p[item.id] ?? 0) + 1, 3) }))}
                                   onUnindent={() => setLocalIndent(p => ({ ...p, [item.id]: Math.max((p[item.id] ?? 0) - 1, 0) }))}
-                                  isGhost={draggingId !== null && selectedIds.has(item.id) && item.id !== draggingId}
+                                  isGhost={(draggingId !== null && selectedIds.has(item.id) && item.id !== draggingId) || !!moveIds?.has(item.id)}
                                   saved={savedIds.has(item.id)}
                                   sumMode={sumMode}
                                   sumSelKeys={sumSelKeys}
