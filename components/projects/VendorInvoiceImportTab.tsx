@@ -2,6 +2,10 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Input } from '@/components/ui/input'
+import {
+  createRegisterAttempt, postInvoice,
+  type ExistingDocument, type RegisterAttempt, type SimilarInvoiceSummary,
+} from '@/lib/cost-ledger/invoice-client'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -15,13 +19,24 @@ type CostLedgerItem = {
 
 type ExtractedInvoice = {
   vendor_name: string
+  invoice_number: string | null
   total_amount: number | null
   invoice_date: string | null
   payment_due_date: string | null
   items: Array<{ name: string; amount: number | null }>
   raw_warning: string | null
+  /** サーバーが画像のバイト列から計算した SHA-256（AI の出力ではない） */
+  document_sha256: string
 }
 
+/** 登録できなかった・登録できたか分からないときの案内 */
+type Blocker =
+  | { kind: 'duplicate'; existing: ExistingDocument | null }
+  | { kind: 'similar'; similar: SimilarInvoiceSummary[] }
+  | { kind: 'unknown'; message: string }
+
+/** 登録できたときの結果（画面は DB が返した値で表示する） */
+type SavedState = { actualCost: number | null; synced: boolean; replayed: boolean }
 // ── デザイントークン（EstimateImportTab と共通）──────────
 
 const G = {
@@ -39,9 +54,21 @@ const G = {
 
 const fmt = (n: number) => Math.round(n).toLocaleString('ja-JP')
 
-type Props = { projectId: string }
+type Props = {
+  projectId: string
+  /** 登録できたとき（再送で保存済みだったときも）。親は台帳と内訳を DB から読み直す */
+  onRegistered?: (itemId: string) => void
+}
 
-export function VendorInvoiceImportTab({ projectId }: Props) {
+/** 金額欄の文字列を数値にする（カンマ可。数値以外が混ざっていれば null） */
+function parseAmount(v: string): number | null {
+  const t = v.replace(/[,，\s]/g, '')
+  if (!t) return null
+  const n = Number(t)
+  return Number.isFinite(n) && n !== 0 ? n : null
+}
+
+export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
 
   const [file, setFile]             = useState<File | null>(null)
@@ -52,6 +79,7 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
 
   const [extracted, setExtracted]   = useState<ExtractedInvoice | null>(null)
   const [vendorName, setVendorName] = useState('')
+  const [invoiceNumber, setInvoiceNumber] = useState('')
   const [amount, setAmount]         = useState('')
   const [invoiceDate, setInvoiceDate] = useState('')
   const [paymentDate, setPaymentDate] = useState('')
@@ -61,10 +89,18 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
   const [selectedItemId, setSelectedItemId] = useState<string>('')
 
   const [saving, setSaving]         = useState(false)
-  const [saved, setSaved]           = useState(false)
+  const [saved, setSaved]           = useState<SavedState | null>(null)
+  const [blocker, setBlocker]       = useState<Blocker | null>(null)
+
+  // 画像ごとの世代。画像を変えたら古い読み取り結果・タイマーは捨てる
+  const genRef = useRef(0)
+  const extractAbortRef = useRef<AbortController | null>(null)
+  // 1回の登録操作（送信中の二重送信を止め、再試行では同じ idempotency_key を使う）
+  // （中身は書き換わるが、画面の表示には使わない。連打の判定に再描画を待たないため state にしない）
+  const [attempt] = useState<RegisterAttempt>(() => createRegisterAttempt())
 
   // 原価台帳アイテムを取得
-  useEffect(() => {
+  const loadLedgerItems = useCallback(() => {
     fetch(`/api/cost-ledger?project_id=${projectId}`)
       .then(r => r.json())
       .then(data => {
@@ -73,8 +109,34 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
       .catch(() => {/* ignore */})
   }, [projectId])
 
+  useEffect(() => { loadLedgerItems() }, [loadLedgerItems])
+
+  useEffect(() => () => { extractAbortRef.current?.abort() }, [])
+
+  /** 画像を変えた・登録が終わった。読み取り結果・画像ハッシュ・登録キーをすべて捨てる */
+  const clearDocument = useCallback(() => {
+    genRef.current += 1
+    extractAbortRef.current?.abort()
+    extractAbortRef.current = null
+    attempt.reset()
+    setLoading(false)
+    setExtracted(null)
+    setVendorName('')
+    setInvoiceNumber('')
+    setAmount('')
+    setInvoiceDate('')
+    setPaymentDate('')
+    setNote('')
+    setSelectedItemId('')
+    setSaved(null)
+    setBlocker(null)
+    setError(null)
+  }, [attempt])
+
   // ファイルセット
   const handleFile = useCallback((f: File) => {
+    // 登録の送信中は画像を変えない（どの画像の登録か分からなくなる）
+    if (attempt.busy) return
     const allowed = ['image/jpeg', 'image/png', 'image/webp']
     if (!allowed.includes(f.type)) {
       setError('JPEG / PNG / WebP の画像ファイルを選択してください')
@@ -84,14 +146,13 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
       setError('8MB 以下のファイルを選択してください')
       return
     }
+    clearDocument()
     setFile(f)
-    setError(null)
-    setExtracted(null)
-    setSaved(false)
+    const gen = genRef.current
     const reader = new FileReader()
-    reader.onload = e => setPreview(e.target?.result as string)
+    reader.onload = e => { if (genRef.current === gen) setPreview(e.target?.result as string) }
     reader.readAsDataURL(f)
-  }, [])
+  }, [attempt, clearDocument])
 
   const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault()
@@ -102,18 +163,27 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
 
   // AI抽出
   const extract = async () => {
-    if (!file) return
+    if (!file || loading) return
+    const gen = genRef.current
+    const ctrl = new AbortController()
+    extractAbortRef.current = ctrl
     setLoading(true)
     setError(null)
     try {
       const fd = new FormData()
       fd.append('file', file)
-      const res = await fetch('/api/ai/extract-vendor-invoice', { method: 'POST', body: fd })
+      const res = await fetch('/api/ai/extract-vendor-invoice', { method: 'POST', body: fd, signal: ctrl.signal })
       const data = await res.json()
+      // 読み取り中に画像が変わった。古い結果は使わない
+      if (genRef.current !== gen) return
       if (!res.ok) throw new Error(data.error ?? 'AI抽出に失敗しました')
       const result = data as ExtractedInvoice
+      if (typeof result.document_sha256 !== 'string') throw new Error('AI抽出に失敗しました')
+      // 新しい画像の読み取り結果 = 新しい登録操作
+      attempt.reset()
       setExtracted(result)
       setVendorName(result.vendor_name ?? '')
+      setInvoiceNumber(result.invoice_number ?? '')
       setAmount(result.total_amount != null ? String(Math.round(result.total_amount)) : '')
       setInvoiceDate(result.invoice_date ?? '')
       setPaymentDate(result.payment_due_date ?? '')
@@ -126,49 +196,80 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
         if (match) setSelectedItemId(match.id)
       }
     } catch (e) {
+      if (genRef.current !== gen) return
       setError(e instanceof Error ? e.message : 'AI抽出に失敗しました')
     } finally {
-      setLoading(false)
+      if (genRef.current === gen) {
+        setLoading(false)
+        extractAbortRef.current = null
+      }
     }
   }
 
-  // 台帳に登録
-  const register = async () => {
+  // 内容を直したら「似ています」の確認はやり直す（直した内容で判定し直す）
+  const edited = <T,>(set: (v: T) => void) => (v: T) => {
+    set(v)
+    setBlocker(b => (b?.kind === 'similar' ? null : b))
+  }
+
+  // 台帳に登録。confirmSimilar = 「以前の請求書と似ています」を確認したうえで登録する
+  const register = async (confirmSimilar = false) => {
+    if (!extracted || attempt.busy) return
     if (!selectedItemId) { setError('登録先の台帳項目を選択してください'); return }
-    const parsedAmount = parseFloat(amount.replace(/,/g, ''))
-    if (!amount || isNaN(parsedAmount)) { setError('金額を入力してください'); return }
+    const parsedAmount = parseAmount(amount)
+    if (parsedAmount === null) { setError('金額を正しく入力してください'); return }
+    const gen = genRef.current
+    const itemId = selectedItemId
     setSaving(true)
     setError(null)
     try {
-      const body = {
-        amount:       parsedAmount,
-        invoice_date: invoiceDate || null,
-        payment_date: paymentDate || null,
-        note:         note || (vendorName ? `${vendorName}からの請求` : null),
+      const result = await attempt.submit(key => postInvoice(itemId, {
+        source:          'ocr',
+        amount:          parsedAmount,
+        invoice_date:    invoiceDate || null,
+        payment_date:    paymentDate || null,
+        note:            note || (vendorName ? `${vendorName}からの請求` : null),
+        vendor_name:     vendorName || null,
+        invoice_number:  invoiceNumber || null,
+        document_sha256: extracted.document_sha256,
+        confirm_similar: confirmSimilar,
+      }, key))
+      if (!result || genRef.current !== gen) return
+
+      switch (result.kind) {
+        case 'saved':
+          // この登録操作は終わり。次の登録は新しいキーで行う
+          attempt.reset()
+          setBlocker(null)
+          setSaved({ actualCost: result.newActualCost, synced: result.synced, replayed: result.replayed })
+          loadLedgerItems()
+          onRegistered?.(itemId)
+          // 再集計に失敗したときは案内を残す（自動で消さない）
+          if (result.synced) {
+            setTimeout(() => {
+              if (genRef.current !== gen) return
+              clearDocument()
+              setFile(null)
+              setPreview(null)
+            }, 2000)
+          }
+          break
+        case 'duplicate_document':
+          setBlocker({ kind: 'duplicate', existing: result.existing })
+          break
+        case 'similar':
+          setBlocker({ kind: 'similar', similar: result.similar })
+          break
+        case 'unknown':
+          // 保存されたか分からない。自動で再送しない（同じキーで押し直せば二重にならない）
+          setBlocker({ kind: 'unknown', message: result.message })
+          break
+        case 'rejected':
+          setBlocker(null)
+          setError(result.message)
+          if (result.status === 409) { loadLedgerItems(); onRegistered?.(itemId) }
+          break
       }
-      const res = await fetch(`/api/cost-ledger/${selectedItemId}/invoices`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error ?? '登録に失敗しました')
-      setSaved(true)
-      // 完了後リセット
-      setTimeout(() => {
-        setFile(null)
-        setPreview(null)
-        setExtracted(null)
-        setVendorName('')
-        setAmount('')
-        setInvoiceDate('')
-        setPaymentDate('')
-        setNote('')
-        setSelectedItemId('')
-        setSaved(false)
-      }, 2000)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : '登録に失敗しました')
     } finally {
       setSaving(false)
     }
@@ -200,7 +301,7 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
 
       {/* ─ ドロップゾーン ─ */}
       <div
-        onClick={() => inputRef.current?.click()}
+        onClick={() => { if (!saving) inputRef.current?.click() }}
         onDragOver={e => { e.preventDefault(); setDragging(true) }}
         onDragLeave={() => setDragging(false)}
         onDrop={onDrop}
@@ -222,7 +323,7 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
           type="file"
           accept="image/jpeg,image/png,image/webp"
           style={{ display: 'none' }}
-          onChange={e => { const f = e.target.files?.[0]; if (f) handleFile(f) }}
+          onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) handleFile(f) }}
         />
         {preview ? (
           <div style={{ position: 'relative' }}>
@@ -335,8 +436,17 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
               <Input
                 inputSize="compact"
                 value={vendorName}
-                onChange={e => setVendorName(e.target.value)}
+                onChange={e => edited(setVendorName)(e.target.value)}
                 placeholder="例: ○○建材株式会社"
+              />
+            </Field>
+
+            <Field label="請求書番号">
+              <Input
+                inputSize="compact"
+                value={invoiceNumber}
+                onChange={e => edited(setInvoiceNumber)(e.target.value)}
+                placeholder="例: INV-2026-0123"
               />
             </Field>
 
@@ -344,7 +454,7 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
               <Input
                 inputSize="compact"
                 value={amount}
-                onChange={e => setAmount(e.target.value)}
+                onChange={e => edited(setAmount)(e.target.value)}
                 placeholder="例: 125000"
                 inputMode="numeric"
               />
@@ -355,7 +465,7 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
                 type="date"
                 inputSize="compact"
                 value={invoiceDate}
-                onChange={e => setInvoiceDate(e.target.value)}
+                onChange={e => edited(setInvoiceDate)(e.target.value)}
               />
             </Field>
 
@@ -364,7 +474,7 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
                 type="date"
                 inputSize="compact"
                 value={paymentDate}
-                onChange={e => setPaymentDate(e.target.value)}
+                onChange={e => edited(setPaymentDate)(e.target.value)}
               />
             </Field>
           </div>
@@ -443,7 +553,7 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
             <>
               <select
                 value={selectedItemId}
-                onChange={e => setSelectedItemId(e.target.value)}
+                onChange={e => edited(setSelectedItemId)(e.target.value)}
                 className="h-9 w-full rounded-[8px] border border-[#D5DED8] bg-white px-[10px] text-sm text-[#1A2E24] outline-none hover:border-[#AFC4B5] focus:border-[#2B5E40] focus:shadow-[0_0_0_3px_rgba(43,94,64,0.14)] cursor-pointer"
               >
                 <option value="">-- 台帳項目を選択 --</option>
@@ -477,22 +587,41 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
         </div>
       )}
 
+      {/* ─ 登録できなかった・登録できたか分からないときの案内 ─ */}
+      {extracted && blocker && !saved && <BlockerCard
+        blocker={blocker}
+        saving={saving}
+        onConfirmSimilar={() => register(true)}
+        onCancel={() => setBlocker(null)}
+      />}
+
       {/* ─ 登録ボタン ─ */}
       {extracted && (
         <div style={{ textAlign: 'right' }}>
           {saved ? (
-            <div style={{
-              display: 'inline-flex', alignItems: 'center', gap: 6,
-              background: G.light, color: G.dark,
-              borderRadius: 10, padding: '12px 24px',
-              fontSize: 14, fontWeight: 700,
-            }}>
-              <CheckIcon />
-              原価台帳に登録しました
+            <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8 }}>
+              <div style={{
+                display: 'inline-flex', alignItems: 'center', gap: 6,
+                background: G.light, color: G.dark,
+                borderRadius: 10, padding: '12px 24px',
+                fontSize: 14, fontWeight: 700,
+              }}>
+                <CheckIcon />
+                {saved.replayed ? 'この請求書は前回の送信で登録済みでした' : '原価台帳に登録しました'}
+                {saved.synced && saved.actualCost != null && (
+                  <span style={{ fontWeight: 500, fontSize: 12 }}>（実績累計 ¥{fmt(saved.actualCost)}）</span>
+                )}
+              </div>
+              {!saved.synced && (
+                <div style={NOTICE_WARN}>
+                  請求は保存されました。実績原価の再集計に失敗したため、表示中の金額が古い可能性があります。
+                  画面を再読み込みして確認してください（もう一度登録する必要はありません）。
+                </div>
+              )}
             </div>
-          ) : (
+          ) : blocker?.kind === 'duplicate' || blocker?.kind === 'similar' ? null : (
             <button
-              onClick={register}
+              onClick={() => register()}
               disabled={saving || !selectedItemId}
               style={{
                 background: (!selectedItemId || saving) ? G.border : G.dark,
@@ -512,6 +641,71 @@ export function VendorInvoiceImportTab({ projectId }: Props) {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+const NOTICE_WARN: React.CSSProperties = {
+  background: '#FFF7ED', border: '1px solid #FED7AA',
+  borderRadius: 10, padding: '10px 14px',
+  fontSize: 12, color: '#9A3412', textAlign: 'left', maxWidth: 520,
+}
+
+const fmtDate = (v: string | null) => (v ? v.slice(0, 10) : '—')
+
+/** created_at（UTC の時刻）を利用者の現地日付で表示する */
+const fmtLocalDate = (v: string | null) => {
+  if (!v) return '—'
+  const d = new Date(v)
+  if (Number.isNaN(d.getTime())) return '—'
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function BlockerCard({ blocker, saving, onConfirmSimilar, onCancel }: {
+  blocker: Blocker
+  saving: boolean
+  onConfirmSimilar: () => void
+  onCancel: () => void
+}) {
+  if (blocker.kind === 'unknown') {
+    return <div style={{ ...NOTICE_WARN, maxWidth: 'none', marginBottom: 16 }}>{blocker.message}</div>
+  }
+  if (blocker.kind === 'duplicate') {
+    const e = blocker.existing
+    return (
+      <div style={{ ...NOTICE_WARN, maxWidth: 'none', marginBottom: 16, background: '#FFF0F4', border: '1px solid #F5C2D0', color: '#C0385A' }}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>この請求書は登録済みです</div>
+        <div>同じ画像がこの案件に登録されています。二重計上を防ぐため、もう一度は登録できません。</div>
+        {e && (
+          <div style={{ marginTop: 6, color: G.textSec }}>
+            登録先: {e.item_name ?? '—'} ／ 金額 ¥{fmt(e.amount)} ／ 請求日 {fmtDate(e.invoice_date)} ／ 登録日 {fmtLocalDate(e.created_at)}
+          </div>
+        )}
+      </div>
+    )
+  }
+  return (
+    <div style={{ ...NOTICE_WARN, maxWidth: 'none', marginBottom: 16 }}>
+      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>以前の請求書と似ています</div>
+      <div style={{ marginBottom: 6 }}>二重登録でないか確認してください。別の請求書であれば、そのまま登録できます。</div>
+      <div style={{ border: '1px solid #FED7AA', borderRadius: 8, overflow: 'hidden', background: '#fff' }}>
+        {blocker.similar.map(s => (
+          <div key={s.id} style={{ padding: '6px 10px', borderBottom: '1px solid #FFEDD5', color: G.textSec }}>
+            {s.item_name ?? '—'} ／ {s.vendor_name ?? '業者名なし'} ／ No. {s.invoice_number ?? '—'} ／ ¥{fmt(s.amount)} ／ 請求日 {fmtDate(s.invoice_date)}
+            <span style={{ marginLeft: 6, color: '#9A3412' }}>
+              （{s.reason === 'invoice_number' ? '請求書番号が同じ' : '業者名・金額・請求日が同じ'}）
+            </span>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 10 }}>
+        <button onClick={onCancel} disabled={saving} style={{ minHeight: 36, padding: '0 14px', borderRadius: 8, border: `1px solid ${G.border}`, background: '#fff', color: G.textSec, fontSize: 12, cursor: 'pointer' }}>
+          キャンセル
+        </button>
+        <button onClick={onConfirmSimilar} disabled={saving} style={{ minHeight: 36, padding: '0 14px', borderRadius: 8, border: 'none', background: '#9A3412', color: '#fff', fontSize: 12, fontWeight: 700, cursor: saving ? 'not-allowed' : 'pointer' }}>
+          {saving ? '登録中...' : '別の請求書として登録'}
+        </button>
+      </div>
     </div>
   )
 }

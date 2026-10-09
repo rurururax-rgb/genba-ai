@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
+import { createHash } from 'crypto'
 import { getServerClient } from '@/lib/supabase/server'
 
 export const maxDuration = 60
@@ -10,6 +11,7 @@ const SYSTEM_PROMPT = `あなたはリフォーム会社が業者（仕入れ先
 
 ## 抽出対象
 - vendor_name: 請求書を発行した業者名（社名・屋号）
+- invoice_number: 請求書番号・請求No（印字どおり）。読み取れなければnull
 - total_amount: 請求合計金額（税込）。税込合計が明記されていればそれ。なければ税抜合計。数値のみ（カンマなし）
 - invoice_date: 請求書の発行日・請求日（YYYY-MM-DD形式）。読み取れなければnull
 - payment_due_date: 支払期日・支払期限（YYYY-MM-DD形式）。読み取れなければnull
@@ -20,6 +22,7 @@ const SYSTEM_PROMPT = `あなたはリフォーム会社が業者（仕入れ先
 
 {
   "vendor_name": "業者名（読み取れなければ空文字）",
+  "invoice_number": "請求書番号"またはnull,
   "total_amount": 数値またはnull,
   "invoice_date": "YYYY-MM-DD"またはnull,
   "payment_due_date": "YYYY-MM-DD"またはnull,
@@ -31,6 +34,7 @@ const SYSTEM_PROMPT = `あなたはリフォーム会社が業者（仕入れ先
 
 type ExtractedInvoice = {
   vendor_name: string
+  invoice_number: string | null
   total_amount: number | null
   invoice_date: string | null
   payment_due_date: string | null
@@ -91,8 +95,14 @@ export async function POST(request: NextRequest) {
     if (!jsonMatch) throw new Error('No JSON in AI response')
 
     const parsed = JSON.parse(jsonMatch[0]) as ExtractedInvoice
+    const num = typeof parsed.invoice_number === 'string' ? parsed.invoice_number.trim().slice(0, 100) : ''
 
-    return NextResponse.json(parsed)
+    // 画像の SHA-256 はサーバーが元のバイト列から計算する（AI には作らせない）。
+    // 登録時に同じ案件への同じ画像の二重登録を DB の一意制約で止めるために使う。
+    // クライアント経由で戻ってくる値なので、改ざんされない保証はない（誤操作・再送の防止が目的）
+    const document_sha256 = createHash('sha256').update(Buffer.from(arrayBuffer)).digest('hex')
+
+    return NextResponse.json({ ...parsed, invoice_number: num || null, document_sha256 })
   } catch (err) {
     console.error('[extract-vendor-invoice]', err)
     return NextResponse.json({ error: 'AI extraction failed' }, { status: 500 })
