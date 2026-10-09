@@ -2,8 +2,13 @@
 
 migration: `supabase/migrations/20261010000002_atomic_cost_ledger_invoice_writes.sql`
 
-> **この PR では本番に適用しない。** 適用は人間の明示的な承認のあと、Supabase SQL Editor で手動実行する
-> （`supabase db push` は使わない）。アプリ側（API）の切り替えは PR #32 で行う。
+> **この PR では本番に適用しない。**
+>
+> - 適用は人間の明示的な承認のあと、Supabase SQL Editor で手動実行する。
+> - 実行するのは `docs/db/p1-2-sql-editor-apply.sql`（1 トランザクション・migration 履歴の登録付き）。
+> - `supabase db push` は使わない。
+> - ロールバックは `docs/db/p1-2-sql-editor-rollback.sql`。
+> - アプリ側（API）の切り替えは PR #32 で行う。
 
 ## 目的
 
@@ -130,6 +135,16 @@ SELECT count(*) AS mismatched FROM public.cost_ledger_items ci
 JOIN (SELECT cost_ledger_item_id, sum(amount) AS total FROM public.cost_ledger_invoices GROUP BY 1) s
   ON s.cost_ledger_item_id = ci.id
 WHERE ci.actual_cost IS DISTINCT FROM s.total;
+
+-- 7. migration 履歴の現状（20261010000002 が未登録であること。P1-1 の 20261010000001 の有無も確認）
+SELECT version, name FROM supabase_migrations.schema_migrations
+WHERE version >= '20260912000000' ORDER BY version;
+
+-- 8. 履歴テーブルの列（適用スクリプトは version だけを必須とし、name は列があれば埋める）
+SELECT column_name, data_type, is_nullable, column_default
+FROM information_schema.columns
+WHERE table_schema = 'supabase_migrations' AND table_name = 'schema_migrations'
+ORDER BY ordinal_position;
 ```
 
 確認すること:
@@ -138,14 +153,66 @@ WHERE ci.actual_cost IS DISTINCT FROM s.total;
 - 請求書の UPDATE / DELETE を許すポリシーがあること（無ければ現行 API と同じく関数でも書けない）
 - 請求書のポリシーで「自社の請求書の一部が見えない」状態になっていないこと。
   見えない行は SUM にも含まれない（現行 API と同じ）
+- 7 の結果に `20261010000002` が**無い**こと。あれば適用しない（何かが既に行われている。原因を調べる）
+- 7 の結果に `20261010000001`（P1-1）が無い場合、P1-1 も「実体はあるが履歴が無い」状態。
+  P1-2 とは別に人間が判断する（この手順で P1-1 の履歴は登録しない）
+- 8 の結果に、`version` 以外で NOT NULL かつ既定値の無い列が無いこと。
+  あれば適用スクリプトの履歴登録が失敗し、全体が取り消される（安全側。列に合わせた手順を作り直す）
 
-## 適用（人間の承認後のみ）
+## 適用方法は 2 つ。混同しない
 
-1. 上の確認 SQL の結果を人間が確認
-2. Supabase SQL Editor で migration ファイルの内容をそのまま実行（1 トランザクションで実行される）
-3. 下の適用後の確認 SQL を実行
+| | A. Supabase CLI（通常の migration） | B. SQL Editor による手動適用（**今回の予定**） |
+|---|---|---|
+| 実行するもの | `supabase/migrations/20261010000002_*.sql` | `docs/db/p1-2-sql-editor-apply.sql`（migration 本体を同梱） |
+| トランザクション | CLI が管理する | スクリプト自身の `BEGIN` / `COMMIT` |
+| 履歴の登録 | CLI が自動で登録 | スクリプトが同じトランザクションの最後で登録 |
+| 今回 | **使わない**（`supabase db push` 禁止） | 人間の承認後に 1 回だけ |
 
-migration は既存の行を書き換えない（関数・権限・コメントを作るだけ）。
+- migration ファイルには `BEGIN` / `COMMIT` を入れていない。CLI は自分でトランザクションと履歴を扱うため、
+  ファイルにトランザクション制御を入れると CLI の処理と衝突しうる。トランザクション制御は B のスクリプトにだけ置く
+- B のスクリプトの migration 本体は、migration ファイルと 1 文字も違わないことをテストで照合している
+  （ファイルを直したらスクリプトも作り直す。ずれていれば `npm run test:db` が失敗する）
+- B で適用した後に A（`supabase db push`）を実行しても、履歴に `20261010000002` があるので再実行されない
+
+## 適用（B. SQL Editor・人間の承認後のみ）
+
+1. 「適用前の確認」の SQL を実行し、結果を人間が確認する
+2. `docs/db/p1-2-sql-editor-apply.sql` の**全文**を SQL Editor に貼り付け、1 回だけ実行する。中身は次の順に進む。
+   1. `BEGIN`
+   2. ガード：次のどれかに当てはまれば何もせずに止まる
+      - 履歴テーブルが無い
+      - `20261010000002` が履歴に登録済み
+      - 同名の関数が既にある
+   3. migration 本体（P1-1 の列・インデックスが無ければ、migration 自身の事前条件で止まる）
+   4. 検証：関数が 3 つあること、INVOKER であること、`search_path` / `lock_timeout`、EXECUTE 権限
+   5. 履歴の登録：`version = '20261010000002'`。`name` 列があれば `atomic_cost_ledger_invoice_writes` も入れる
+   6. `COMMIT`
+   7. 最終照合（読み取りのみ）
+3. 結果を確認する。
+   - **成功**：最後の結果が `history_rows = 1, functions = 3`
+   - **エラーが出た場合**：COMMIT には到達していないため、関数も履歴も確定していない。
+     1. `ROLLBACK;` だけを実行する（トランザクションが既に閉じていれば警告が出るだけで無害）
+     2. 下の「履歴と実体の照合」が `0 / 0` であることを確かめる
+     3. エラー文を人間に報告する。**再実行は原因を確かめてから**
+4. 「適用後の確認」の SQL を実行する
+
+途中失敗で何も残らないことは、ローカルの隔離 DB で確かめている。
+
+- 送り方：スクリプトの全文を 1 回のクエリ（複数文）として送った
+- 確かめた失敗の位置：次の 3 つ
+  - 事前条件（migration 本体の冒頭）
+  - 最後の履歴登録
+  - ガード
+- 最後の履歴登録で失敗した場合でも、作成済みの関数ごと取り消される
+
+SQL Editor が内部でスクリプトをどう送るかは、このリポジトリからは確認できない。ただし、どちらの送り方でも部分適用にはならない。
+
+- 全文を 1 回で送る場合：エラーの時点で残りの文は実行されない
+- 文ごとに送り、エラーの後も続ける場合：
+  - 失敗したトランザクションの中では、後続の文がすべてエラー（25P02）になる
+  - 最後の `COMMIT` は `ROLLBACK` として扱われる
+
+どちらの場合も COMMIT は成立しない。
 
 ## 適用後の確認（読み取りのみ）
 
@@ -160,17 +227,44 @@ WHERE n.nspname = 'public' AND p.proname LIKE 'cost_ledger_invoice_%';
 --         anon = false、authenticated = true、service_role = false
 ```
 
-## ロールバック
-
-PR #32（アプリの切り替え）を本番に出した後なら、**先にアプリを PR #32 より前に戻してから**関数を消す。
+### 履歴と実体の照合（読み取りのみ・適用後とロールバック後の両方で使う）
 
 ```sql
-DROP FUNCTION IF EXISTS public.cost_ledger_invoice_insert(uuid, numeric, date, date, text, text, text, text, text, uuid);
-DROP FUNCTION IF EXISTS public.cost_ledger_invoice_update(uuid, jsonb);
-DROP FUNCTION IF EXISTS public.cost_ledger_invoice_delete(uuid);
+SELECT
+  (SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '20261010000002') AS history_rows,
+  (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+   WHERE n.nspname = 'public'
+     AND p.proname IN ('cost_ledger_invoice_insert', 'cost_ledger_invoice_update', 'cost_ledger_invoice_delete')) AS functions;
 ```
 
-関数を消すだけで、テーブル・データ・RLS・一意インデックスは残る（テストで確認）。
+| history_rows | functions | 状態 |
+|---|---|---|
+| 1 | 3 | 適用済み（正常） |
+| 0 | 0 | 未適用・ロールバック済み（正常） |
+| それ以外 | | 履歴と実体がずれている。**何も実行せずに人間に報告**（履歴を手で足したり消したりしない） |
+
+CLI が使える環境では、`supabase migration list` でも `20261010000002` が Local と Remote の両方に出ることを確かめられる
+（読み取りのみ。`db push` / `migration repair` は実行しない）。
+
+## ロールバック
+
+方法は 1 つ。人間の承認後のみ実行する。
+
+1. PR #32 を本番に出した後なら、**先にアプリを PR #32 より前に戻す**
+   （戻さないと請求書の登録・編集・削除が失敗する）
+2. `docs/db/p1-2-sql-editor-rollback.sql` の全文を SQL Editor で 1 回だけ実行する。
+   関数 3 つの `DROP FUNCTION` と、履歴の `20261010000002` の 1 行の削除を、1 トランザクションで行う。
+   - ガード：関数も履歴も無ければ、何もせずに止まる
+   - 最後の結果が `history_rows = 0, functions = 0` なら成功
+   - エラーが出たら、適用時と同じく `ROLLBACK;` だけを実行してから照合する
+3. **履歴の扱い**：関数と一緒に履歴の行も消し、「履歴はあるが実体が無い」状態を作らない。
+   - その場合、`supabase/migrations/20261010000002_*.sql` が main に残っていると、CLI からは未適用に見える
+   - 誰かが `supabase db push` を実行すると、関数が再作成されてしまう
+   - そのため、migration ファイル（とこの PR の変更）を revert する PR を作り、人間が merge する
+4. ファイルを revert できない事情がある場合は、上のスクリプトを使わない。
+   代わりに、関数を DROP する新しい migration を追加する「前進するロールバック」を、人間と相談して選ぶ
+
+ロールバックで消えるのは関数と履歴の 1 行だけで、テーブル・データ・RLS・インデックスは残る（テストで確認）。
 
 ## テスト
 
@@ -179,8 +273,9 @@ npm run test:db
 ```
 
 - 一時ディレクトリに使い捨ての PostgreSQL 17（embedded-postgres）を 127.0.0.1 で起動し、
-  Supabase の最小限（ロール、`auth.uid()`、`get_my_company_ids()`、RLS）を再現した上で、
+  Supabase の最小限（ロール、`auth.uid()`、`get_my_company_ids()`、RLS、migration 履歴テーブルの代用）を再現した上で、
   リポジトリの実際の migration（台帳項目 → 請求書の代用定義 → P1-1 → P1-2）を順に適用する
+- SQL Editor 用の適用・ロールバックスクリプトも、SQL Editor と同じく全文を 1 回のクエリで送って検証する
 - 本番・Preview の DB には接続しない
 - 同時実行のテストは複数の独立した接続で実際にトランザクションを重ね、
   `pg_stat_activity.wait_event_type = 'Lock'` で本当にロック待ちになっていることを確かめる
@@ -188,24 +283,102 @@ npm run test:db
 
 ## PR #32 で必要な変更
 
-1. `POST /api/cost-ledger/[id]/invoices`、`PATCH` / `DELETE /api/cost-ledger/invoices/[invoiceId]` を
-   `supabase.rpc('cost_ledger_invoice_insert' | '…_update' | '…_delete')` に切り替え、
-   `recalcActualCost` / `syncActualCost` の呼び出しをやめる。idempotency の再送（23505 → 既存行を返す）は API 側に残す
-2. SQLSTATE → HTTP の変換（上の表）。`error.message` をクライアントに返さない
-3. **actual_cost の直接編集**
-   - 直接入力の機能は残す（請求書 0 件の台帳項目では、見積原価の初期値・手入力値として使う）
-   - 請求書が 1 件以上ある台帳項目では、`PATCH /api/cost-ledger/[id]` と AI チャットの confirm-change で
-     actual_cost の変更を 409 で拒否する（請求書の合計が正）。ロックを取って件数を確かめるため、
-     小さな RPC（台帳項目をロックし、請求書 0 件のときだけ actual_cost を設定する）を追加するのが安全
-   - CostLedgerTab は請求書を開いたときに初めて読み込むため、開いていない行では請求書があっても
-     actual_cost を編集できてしまう。一覧の取得時に請求書の件数を返し、それで読み取り専用にする
-4. init（actual_cost = 見積原価）・sync（新規行は NULL）・台帳項目の作成（NULL）は請求書 0 件の行にしか
-   書かないため変更不要（init は既存行を作り直さないことを PR #32 で再確認する）
+### 1. 請求書 API を RPC に切り替える
+
+- `POST /api/cost-ledger/[id]/invoices`、`PATCH` / `DELETE /api/cost-ledger/invoices/[invoiceId]` を
+  `supabase.rpc('cost_ledger_invoice_insert' | '…_update' | '…_delete')` に切り替える
+- `recalcActualCost` / `syncActualCost` の呼び出しをやめる
+- idempotency の再送（23505 → 既存行を返す）は API 側に残す
+- SQLSTATE を HTTP に変換する（上の表）。`error.message` をクライアントに返さない
+
+### 2. actual_cost の直接編集 —— API で拒否するだけでは防げない
+
+**現状の事実:**
+
+- `cost_ledger_items` の RLS は `FOR ALL USING (company_id IN (SELECT get_my_company_ids()))` で、WITH CHECK が無い
+  （`20260912000001_reconcile_cost_ledger_items.sql`）
+- そのため、ログイン済みの自社ユーザーは、ブラウザ用クライアント（anon key と本人の JWT）から PostgREST 経由で
+  自社の台帳項目の actual_cost を直接 UPDATE できる。アプリにそのコードが無いだけで、DB は止めない
+- テスト「（限界の確認）RPC を通らない現行の書き込み…」では、authenticated ロールで請求書のある項目の
+  actual_cost を直接書き換えられ、合計とずれることを確認している
+- 同じ理由で、請求書テーブル自体への直接の INSERT / UPDATE / DELETE も、本番の請求書ポリシー次第で可能
+
+`PATCH /api/cost-ledger/[id]` や AI チャットの confirm-change で拒否しても、DB への直接の更新は防げない。
+
+**維持すること:**
+
+- 請求書が 0 件の台帳項目では、actual_cost の直接入力（見積原価の初期値・手入力の原価）をこれまでどおり許す
+- RLS・GRANT は変更しない（この PR でも PR #32 でも、人間の合意なしに変えない）
+
+**PR #32 での推奨案（DB 側で不変条件を強制。新しい migration になるので人間の承認が必要）:**
+
+- `cost_ledger_items` に BEFORE UPDATE トリガーを追加する
+  - 発火条件：`NEW.actual_cost IS DISTINCT FROM OLD.actual_cost`
+  - 処理：その項目の請求書の件数と合計を数える。1 件以上あり、`NEW.actual_cost` が合計と一致しなければ拒否する
+  - 0 件なら何もしない（手入力は維持）
+  - RPC は合計と同じ値を書くので通る。経路（API・PostgREST・AI チャット）を問わず、DB で止まる
+  - ロールや GUC で RPC を見分ける方式にしない（PostgREST 経由で偽装されうる）。値そのものを検証する
+- 請求書テーブルへの直接書き込みで合計がずれる問題には、2 つの案がある
+  - 案 1：請求書テーブルに DEFERRABLE INITIALLY DEFERRED の制約トリガーを置き、コミット時に、
+    触れた台帳項目について「actual_cost = 合計（0 件なら NULL）」を検証する
+  - 案 2：AFTER トリガーで合計を計算し直す（RPC の処理と重なる）
+  - どちらを採るかは、現行の API を RPC に切り替えた後で人間と決める
+  - 現行 API は INSERT と再集計が別のリクエストなので、切り替える前に入れると現行 API が失敗する
+- トリガーの導入前に、既に「請求書があるのに actual_cost が合計とずれている」項目を数える（適用前の確認 6）
+  - トリガー導入後は、こうした項目の actual_cost を直接編集しようとすると拒否される
+  - 合計に揃えるデータ修正は既存行の UPDATE になるので、人間の承認なしに行わない
+
+**採らない案:**
+
+- 列単位の `REVOKE UPDATE (actual_cost)`
+  - SECURITY INVOKER の RPC も同じ権限で動くため、RPC まで書けなくなる
+  - 回避するには DEFINER が必要になり、方針に反する
+- RLS ポリシーの変更：方針により行わない
+
+**アプリ側:**
+
+- 台帳項目の PATCH と confirm-change では、請求書がある項目の actual_cost 変更を 409 で返す
+  （トリガーのエラーを分かりやすい文言にするため）
+- CostLedgerTab は請求書を開いたときに初めて読み込むため、開いていない行では請求書があっても
+  actual_cost を編集できてしまう
+  - 一覧の取得時に請求書の件数を返し、それで読み取り専用にする
+
+### 3. 【必須確認】請求実績の税区分（Excel との整合）
+
+**現状:**
+
+- 先方の原価台帳（Excel）の「請求実績」は、**税抜**の業者請求金額の合計
+- 現行の OCR（`app/api/ai/extract-vendor-invoice/route.ts` の抽出プロンプト）は、`total_amount` に
+  「税込合計が明記されていればそれ。なければ税抜合計」を返す
+- 画面（`VendorInvoiceImportTab.tsx`）は、その値を金額欄の初期値にしている
+- その結果、OCR で登録した請求書は多くが税込で入り、Excel の請求実績とずれる
+
+**P1-2（この PR）の扱い:**
+
+- 税区分は変えない。RPC は渡された金額をそのまま合計するだけで、税込・税抜を区別しない
+- 既存の請求書の金額も変換しない
+
+**PR #32 で必ず確認・対応すること:**
+
+1. OCR の抽出項目を分ける：税抜小計・消費税額・税込合計
+   - 金額欄の初期値は**税抜**にする
+   - 税抜が読み取れないときは推測で割り戻さず、空欄にして人間に入力してもらう
+2. 金額入力欄に「税抜」と明記する（手動登録も同じ）
+3. 既存の請求書の行の扱い（**データは変更しない**）
+   - OCR 由来（`source = 'ocr'`）の行は税込で入っている可能性が高い。
+     ただし行ごとの税区分はデータから判別できないため、件数を数えて人間に報告するところまでとする
+   - 修正するか、どう修正するかは人間が決める
+4. 先方の Excel と同じ案件で突き合わせ、actual_cost が「請求実績」と一致することを確かめる
+   （テストは本番以外のデータで行う）
 
 ## 未解決のリスク
 
 - 本番の `cost_ledger_invoices` の定義・RLS はリポジトリから確認できない。テストは代用の定義で行った。
   適用前の確認 SQL で必ず確かめる
-- PR #32 までは RPC を通らない書き込みが残るため、同時実行の保証は RPC どうしに限られる
+- 本番の `supabase_migrations.schema_migrations` の列構成も代用の定義でテストした。
+  適用前の確認 8 で、必須列が version だけであることを確かめる
+- PR #32 までは RPC を通らない書き込みが残るため、同時実行の保証は RPC どうしに限られる。
+  さらに RLS 上、アプリを経由しない直接の UPDATE も可能（PR #32 の 2 を参照）
 - 最後の請求書を削除すると actual_cost は NULL になり、登録前の見積原価の初期値には戻らない（現行と同じ仕様）
 - 既存の不整合（actual_cost ≠ 内訳合計）は migration では直さない。その台帳項目に次に RPC が書き込んだ時点で揃う
+- OCR で登録された既存の請求書は、税込で入っている可能性がある（PR #32 の 3 を参照）
