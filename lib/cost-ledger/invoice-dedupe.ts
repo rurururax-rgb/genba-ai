@@ -125,6 +125,55 @@ export function parseInvoiceRequest(body: unknown): Parsed {
   }
 }
 
+// ── 同じ登録操作の再送の判定 ─────────────────────────────────
+
+/** idempotency_key で見つかった保存済みの行（比較に必要な列） */
+export type StoredInvoice = {
+  cost_ledger_item_id: string
+  amount: number | string
+  source: string | null
+  document_sha256: string | null
+  invoice_date: string | null
+  payment_date: string | null
+  note: string | null
+  vendor_name: string | null
+  invoice_number: string | null
+}
+
+const normText = (v: string | null | undefined) => {
+  const t = typeof v === 'string' ? v.trim() : ''
+  return t || null
+}
+const normDate = (v: string | null | undefined) => (typeof v === 'string' && v ? v.slice(0, 10) : null)
+const normAmount = (v: number | string) => Number(v)
+
+/**
+ * 保存済みの行が、今回のリクエストと同じ内容か（同じ idempotency_key の再送として扱ってよいか）。
+ * 保存する列をすべて比較する。confirm_similar は登録確認の制御フラグなので比較しない。
+ * NULL と空文字は同じ、numeric は数値で、日付は YYYY-MM-DD で比較する。
+ */
+export function sameInvoiceContent(row: StoredInvoice, itemId: string, req: InvoiceRequest): boolean {
+  return row.cost_ledger_item_id === itemId
+    && normAmount(row.amount) === req.amount
+    && (row.source ?? 'manual') === req.source
+    && normText(row.document_sha256) === normText(req.document_sha256)
+    && normDate(row.invoice_date) === normDate(req.invoice_date)
+    && normDate(row.payment_date) === normDate(req.payment_date)
+    && normText(row.note) === normText(req.note)
+    && normText(row.vendor_name) === normText(req.vendor_name)
+    && normText(row.invoice_number) === normText(req.invoice_number)
+}
+
+/**
+ * actual_cost が請求内訳の合計と一致しているか（読み取りだけで確かめる）。
+ * 再送時に「原価合計も正常」と言えるのは一致したときだけ。小数の誤差は1銭未満を無視する。
+ */
+export function actualCostMatchesInvoices(actualCost: number | string | null, amounts: Array<number | string | null>): boolean {
+  if (actualCost == null) return false
+  const total = amounts.reduce<number>((s, a) => s + Number(a ?? 0), 0)
+  return Math.round(Number(actualCost) * 100) === Math.round(total * 100)
+}
+
 // ── 似ている請求書の判定 ─────────────────────────────────────
 
 /** 請求書番号の比較用正規化（全角→半角・英字の大小・空白と区切り記号を無視） */

@@ -195,8 +195,8 @@ function InvoicePanel({
         setDraft({ amount: '', invoice_date: '', payment_date: '', note: '' })
         setAdding(false)
         if (result.replayed || !result.synced) {
-          // 前回の送信で保存済みだった・実績原価の再集計に失敗した → DB の値で表示し直す
-          if (!result.synced) alert('請求は保存されました。実績原価の再集計に失敗したため、画面を読み直します。\nもう一度追加する必要はありません。')
+          // 前回の送信で保存済みだった・実績原価が内訳合計と一致すると確認できない → DB の値で表示し直す
+          if (!result.synced) alert('請求は保存済みです（もう一度追加する必要はありません）。\nただし実績原価の合計が請求内訳と一致していることを確認できませんでした。実績原価と内訳の合計を確認してください。')
           onReload()
           return
         }

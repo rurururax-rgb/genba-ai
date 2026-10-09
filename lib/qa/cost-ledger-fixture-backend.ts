@@ -12,7 +12,9 @@
  * これは画面の動作確認用で、RLS や DB 制約そのものの検証ではない。
  */
 
-import { findSimilarInvoices, parseInvoiceRequest, type ExistingInvoice } from '@/lib/cost-ledger/invoice-dedupe'
+import {
+  actualCostMatchesInvoices, findSimilarInvoices, parseInvoiceRequest, sameInvoiceContent, type ExistingInvoice,
+} from '@/lib/cost-ledger/invoice-dedupe'
 
 export const COST_FIXTURE_PROJECT_ID = '00000000-0000-4000-8000-000000000c01'
 const STORAGE_KEY = 'ragz-qa-cost-ledger-fixture-v2'
@@ -99,10 +101,10 @@ function postInvoice(s: State, item: CostItem, raw: unknown): { res: Response; l
   if (b.idempotency_key) {
     const ex = s.invoices.find(i => i.idempotency_key === b.idempotency_key)
     if (ex) {
-      const same = ex.cost_ledger_item_id === item.id && Number(ex.amount) === b.amount
-        && (ex.source ?? 'manual') === b.source && ex.document_sha256 === b.document_sha256
-      if (!same) return { res: json({ error: '同じ登録操作で別の内容が送られました。画面を再読み込みしてください。', code: 'idempotency_conflict' }, 409) }
-      return { res: json({ invoice: publicInvoice(ex), newActualCost: item.actual_cost, replayed: true, synced: true }) }
+      if (!sameInvoiceContent(ex, item.id, b)) return { res: json({ error: '同じ登録操作で別の内容が送られました。画面を再読み込みしてください。', code: 'idempotency_conflict' }, 409) }
+      // 書き込まずに actual_cost と内訳合計の一致を確かめる（初回の再集計失敗を見逃さない）
+      const ok = actualCostMatchesInvoices(item.actual_cost, s.invoices.filter(i => i.cost_ledger_item_id === item.id).map(i => i.amount))
+      return { res: json({ invoice: publicInvoice(ex), newActualCost: ok ? item.actual_cost : null, replayed: true, synced: ok }) }
     }
   }
   if (b.source === 'ocr') {

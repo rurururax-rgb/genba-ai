@@ -575,11 +575,8 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
                 }}>
                   <span><strong>予算:</strong> {selectedItem.estimate_cost != null ? `¥${fmt(selectedItem.estimate_cost)}` : '—'}</span>
                   <span><strong>実績累計:</strong> {selectedItem.actual_cost != null ? `¥${fmt(selectedItem.actual_cost)}` : '—'}</span>
-                  {amount && !isNaN(parseFloat(amount.replace(/,/g, ''))) && (
-                    <span style={{ color: G.dark, fontWeight: 600 }}>
-                      → 登録後: ¥{fmt((selectedItem.actual_cost ?? 0) + parseFloat(amount.replace(/,/g, '')))}
-                    </span>
-                  )}
+                  {/* 登録後の予測は出さない（初期の actual_cost は見積原価のことがあり、登録 API は内訳合計で置き換えるため）。
+                      登録後は API が返した DB の値を表示する */}
                 </div>
               )}
             </>
@@ -614,8 +611,9 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
               </div>
               {!saved.synced && (
                 <div style={NOTICE_WARN}>
-                  請求は保存されました。実績原価の再集計に失敗したため、表示中の金額が古い可能性があります。
-                  画面を再読み込みして確認してください（もう一度登録する必要はありません）。
+                  請求は保存済みです（もう一度登録する必要はありません）。
+                  ただし実績原価の合計が請求内訳と一致していることを確認できませんでした。
+                  原価台帳で実績原価と請求内訳の合計を確認してください。
                 </div>
               )}
             </div>

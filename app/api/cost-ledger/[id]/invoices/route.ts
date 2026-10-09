@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
 import {
-  findSimilarInvoices, isUuid, parseInvoiceRequest,
-  type ExistingInvoice, type InvoiceRequest,
+  actualCostMatchesInvoices, findSimilarInvoices, isUuid, parseInvoiceRequest, sameInvoiceContent,
+  type ExistingInvoice, type InvoiceRequest, type StoredInvoice,
 } from '@/lib/cost-ledger/invoice-dedupe'
 
 type ServerClient = Awaited<ReturnType<typeof getServerClient>>
@@ -49,20 +49,8 @@ const INVOICE_COLUMNS =
 
 const IN_CHUNK = 100
 
-type ExistingRow = {
-  id: string
-  cost_ledger_item_id: string
-  amount: number
-  source: string | null
-  document_sha256: string | null
-}
-
-function sameOperation(row: ExistingRow, itemId: string, req: InvoiceRequest) {
-  return row.cost_ledger_item_id === itemId
-    && Number(row.amount) === req.amount
-    && (row.source ?? 'manual') === req.source
-    && (row.document_sha256 ?? null) === req.document_sha256
-}
+/** 再送の判定に使う列（保存する列すべて + document_sha256） */
+const STORED_COLUMNS = `${INVOICE_COLUMNS}, document_sha256`
 
 export async function POST(req: NextRequest, { params }: Params) {
   const { id: itemId } = await params
@@ -80,7 +68,7 @@ export async function POST(req: NextRequest, { params }: Params) {
   const notFound = () => NextResponse.json({ error: 'Item not found or no access' }, { status: 404 })
   const { data: item } = await supabase
     .from('cost_ledger_items')
-    .select('id, project_id, actual_cost')
+    .select('id, project_id')
     .eq('id', itemId)
     .is('deleted_at', null)
     .maybeSingle()
@@ -96,29 +84,38 @@ export async function POST(req: NextRequest, { params }: Params) {
   if (!project) return notFound()
 
   // ── 同じ登録操作の再送 ──
+  // RLS により他社の行は見えない（他社のキーと衝突しても中身は返らない）
   const findByKey = async (key: string) => {
     const { data } = await supabase
       .from('cost_ledger_invoices')
-      .select(`${INVOICE_COLUMNS}, document_sha256`)
+      .select(STORED_COLUMNS)
       .eq('idempotency_key', key)
       .maybeSingle()
-    return data as (ExistingRow & Record<string, unknown>) | null
+    return data as (StoredInvoice & Record<string, unknown>) | null
   }
-  const replay = (row: ExistingRow & Record<string, unknown>) => {
-    if (!sameOperation(row, itemId, body)) {
+  const replay = async (row: StoredInvoice & Record<string, unknown>) => {
+    if (!sameInvoiceContent(row, itemId, body)) {
       return NextResponse.json(
         { error: '同じ登録操作で別の内容が送られました。画面を再読み込みしてください。', code: 'idempotency_conflict' },
         { status: 409 },
       )
     }
-    // 既に保存済み。新しい行は作らず、actual_cost も再集計しない（DB の現在値を返す）
+    // 既に保存済み。新しい行は作らず、actual_cost も書き換えない。
+    // 初回の再集計が失敗していた可能性があるので、actual_cost が内訳合計と一致するかを読み取りだけで確かめる。
+    // 一致を確かめられなければ synced: false（請求は保存済みだが、原価合計は確認が必要）
+    const check = await readActualCostConsistency(supabase, itemId)
     const invoice = Object.fromEntries(Object.entries(row).filter(([k]) => k !== 'document_sha256'))
-    return NextResponse.json({ invoice, newActualCost: item.actual_cost ?? null, replayed: true, synced: true })
+    return NextResponse.json({
+      invoice,
+      newActualCost: check.ok ? check.actualCost : null,
+      replayed: true,
+      synced: check.ok,
+    })
   }
 
   if (body.idempotency_key) {
     const existing = await findByKey(body.idempotency_key)
-    if (existing) return replay(existing)
+    if (existing) return await replay(existing)
   }
 
   // ── 同じ案件に同じ画像 ──
@@ -186,7 +183,7 @@ export async function POST(req: NextRequest, { params }: Params) {
       // 同時送信などで事前確認をすり抜けた一意制約違反。見える範囲で既存行を探して分類する
       if (body.idempotency_key) {
         const existing = await findByKey(body.idempotency_key)
-        if (existing) return replay(existing)
+        if (existing) return await replay(existing)
       }
       if (body.source === 'ocr' && body.document_sha256) {
         const dup = await findByDocument(body.document_sha256)
@@ -242,6 +239,29 @@ async function findSimilarInProject(supabase: ServerClient, projectId: string, b
     created_at: s.created_at,
     reason: s.reason,
   }))
+}
+
+/**
+ * actual_cost が内訳合計と一致しているかを読み取りだけで確かめる（書き込みはしない）。
+ * 読み取り失敗・不一致はどちらも ok: false（安全側）。同時に別の請求が追加された直後も不一致になりうる。
+ */
+async function readActualCostConsistency(
+  supabase: ServerClient, itemId: string,
+): Promise<{ ok: true; actualCost: number } | { ok: false }> {
+  const { data: current, error: itemErr } = await supabase
+    .from('cost_ledger_items')
+    .select('actual_cost')
+    .eq('id', itemId)
+    .maybeSingle()
+  if (itemErr || !current) return { ok: false }
+  const { data: rows, error } = await supabase
+    .from('cost_ledger_invoices')
+    .select('amount')
+    .eq('cost_ledger_item_id', itemId)
+  if (error) return { ok: false }
+  const amounts = (rows ?? []).map((r: { amount: number | string | null }) => r.amount)
+  if (!actualCostMatchesInvoices(current.actual_cost as number | null, amounts)) return { ok: false }
+  return { ok: true, actualCost: Number(current.actual_cost) }
 }
 
 /** 内訳合計で actual_cost を更新する。読み取り・更新のどちらかが失敗したら ok: false */

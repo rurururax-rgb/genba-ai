@@ -35,6 +35,8 @@ let currentUser: string | null
 let tables: Record<string, Row[]>
 let failNextActualCostUpdate: boolean
 let failInvoiceRead: boolean
+/** 次の idempotency_key での検索を空にする（INSERT 前の確認をすり抜けた同時送信を再現し、23505 からの再取得を通す） */
+let missNextKeyLookup: boolean
 
 function seed() {
   tables = {
@@ -64,6 +66,7 @@ function seed() {
   }
   failNextActualCostUpdate = false
   failInvoiceRead = false
+  missNextKeyLookup = false
 }
 
 function myCompanies() {
@@ -114,6 +117,7 @@ function from(table: string) {
   let mode: 'select' | 'insert' | 'update' = 'select'
   let payload: Row | null = null
   let writeResult: { rows: Row[]; error: { code: string; message: string } | null } | null = null
+  let byKey = false
 
   const doWrite = () => {
     if (writeResult) return writeResult
@@ -144,6 +148,10 @@ function from(table: string) {
       return { data: w.error ? null : w.rows.map(r => pick(r, cols)), error: w.error }
     }
     if (table === 'cost_ledger_invoices' && failInvoiceRead) return { data: null, error: { code: '57014', message: 'timeout' } }
+    if (table === 'cost_ledger_invoices' && byKey && missNextKeyLookup) {
+      missNextKeyLookup = false
+      return { data: [], error: null }
+    }
     return { data: visible(table).filter(r => filters.every(f => f(r))).map(r => pick(r, cols)), error: null }
   }
   const one = (strict: boolean) => {
@@ -155,7 +163,7 @@ function from(table: string) {
   }
   const q = {
     select: (c?: string) => { cols = c ?? null; return q },
-    eq: (col: string, v: unknown) => { filters.push(r => r[col] === v); return q },
+    eq: (col: string, v: unknown) => { if (col === 'idempotency_key') byKey = true; filters.push(r => r[col] === v); return q },
     is: (col: string, v: unknown) => { filters.push(r => (r[col] ?? null) === v); return q },
     in: (col: string, vs: unknown[]) => { filters.push(r => vs.includes(r[col])); return q },
     order: () => q,
@@ -302,6 +310,72 @@ describe('同じ登録操作の再送（idempotency_key）', () => {
     expect(actualCost(I_A1_2)).toBeNull()
   })
 
+  it.each([
+    ['請求日', { invoice_date: '2026-10-02' }],
+    ['支払日', { payment_date: '2026-11-30' }],
+    ['メモ', { note: '別のメモ' }],
+    ['業者名', { vendor_name: '別の業者' }],
+    ['請求書番号', { invoice_number: 'INV-999' }],
+  ])('同じキー・同じ金額でも %s が違う再送は 409 idempotency_conflict（行も原価も増えない）', async (_label, change) => {
+    await post(I_A1, ocr())
+    const before = invoiceCount()
+    const r = await post(I_A1, ocr(change))
+    expect(r.status).toBe(409)
+    expect(r.json.code).toBe('idempotency_conflict')
+    expect(invoiceCount()).toBe(before)
+    expect(actualCost(I_A1)).toBe(33000)
+  })
+
+  it.each([
+    ['請求日', { invoice_date: '2026-10-02' }],
+    ['メモ', { note: '別のメモ' }],
+  ])('手動登録でも同じキーで %s が違う再送は 409', async (_label, change) => {
+    await post(I_A1, manual({ idempotency_key: KEY1, invoice_date: '2026-10-01', note: 'メモ' }))
+    const r = await post(I_A1, manual({ idempotency_key: KEY1, invoice_date: '2026-10-01', note: 'メモ', ...change }))
+    expect(r.status).toBe(409)
+    expect(r.json.code).toBe('idempotency_conflict')
+    expect(actualCost(I_A1)).toBe(10000)
+  })
+
+  it('23505 から再取得した行でも同じ判定：内容が違えば 409、同じなら再送として返す', async () => {
+    // OCR は同じ画像の事前確認で止まるため、23505 まで進む手動登録で確かめる
+    await post(I_A1, manual({ idempotency_key: KEY1, note: 'メモ' }))
+    missNextKeyLookup = true   // INSERT 前の確認をすり抜けた
+    const conflict = await post(I_A1, manual({ idempotency_key: KEY1, note: '別のメモ' }))
+    expect(conflict.status).toBe(409)
+    expect(conflict.json.code).toBe('idempotency_conflict')
+
+    missNextKeyLookup = true
+    const same = await post(I_A1, manual({ idempotency_key: KEY1, note: 'メモ' }))
+    expect(same.status).toBe(200)
+    expect(same.json).toEqual(expect.objectContaining({ replayed: true, synced: true, newActualCost: 10000 }))
+    expect(tables.cost_ledger_invoices.filter(i => i.cost_ledger_item_id === I_A1)).toHaveLength(1)
+    expect(actualCost(I_A1)).toBe(10000)
+  })
+
+  it('NULL と空文字・前後の空白・numeric の文字列表現は同じ内容とみなす', async () => {
+    await post(I_A1, manual({ idempotency_key: KEY1, note: null }))
+    const saved = tables.cost_ledger_invoices.at(-1)!
+    saved.amount = '10000.00'           // numeric が文字列で返る場合
+    const r = await post(I_A1, manual({ idempotency_key: KEY1, note: '  ', invoice_date: '' }))
+    expect(r.status).toBe(200)
+    expect(r.json.replayed).toBe(true)
+  })
+
+  it('confirm_similar の違いは比較しない（保存内容ではないため）', async () => {
+    await post(I_A1, ocr())
+    const r = await post(I_A1, ocr({ confirm_similar: true }))
+    expect(r.status).toBe(200)
+    expect(r.json.replayed).toBe(true)
+  })
+
+  it('他社の行と同じキーで 23505 になっても他社の行は返さない（再取得は RLS の範囲だけ）', async () => {
+    const r = await post(I_A1, ocr({ idempotency_key: KEY3, document_sha256: SHA_B, invoice_number: 'SECRET-1', vendor_name: '他社業者' }))
+    expect(r.status).toBe(409)
+    expect(r.json.code).toBe('conflict')
+    expect(JSON.stringify(r.json)).not.toMatch(/SECRET|777|他社/)
+  })
+
   it('11. 他社の行と同じキー（見えない行との衝突）は中身を返さない汎用エラー', async () => {
     const r = await post(I_A1, manual({ idempotency_key: KEY3 }))
     expect(r.status).toBe(409)
@@ -434,6 +508,30 @@ describe('actual_cost の再集計（16）', () => {
     expect(invoiceCount()).toBe(2)
   })
 
+  it('再集計失敗 → 応答喪失 → 同じキーで再送：請求は1件のまま、古い actual_cost を正常反映と表示しない', async () => {
+    // 1・2. 初回 INSERT は成功、actual_cost の再集計は失敗（actual_cost は古いまま null）
+    failNextActualCostUpdate = true
+    await post(I_A1, manual({ idempotency_key: KEY1, amount: 50000 }))   // 3. この応答は届かなかったとする
+    expect(actualCost(I_A1)).toBeNull()
+    // 3. 同じキーで再送
+    const retry = await post(I_A1, manual({ idempotency_key: KEY1, amount: 50000 }))
+    expect(retry.status).toBe(200)
+    // 4. 請求書は1件のみ・原価を二重加算しない（再送では書き込まない）
+    expect(tables.cost_ledger_invoices.filter(i => i.cost_ledger_item_id === I_A1)).toHaveLength(1)
+    expect(actualCost(I_A1)).toBeNull()
+    // 5. 「保存済み」だが「原価合計も正常」とは言わない
+    expect(retry.json).toEqual(expect.objectContaining({ replayed: true, synced: false, newActualCost: null }))
+  })
+
+  it('再送時に actual_cost が古い値（見積原価など）のままでも synced: true にしない', async () => {
+    tables.cost_ledger_items.find(i => i.id === I_A1)!.actual_cost = 100000   // 初期化時の見積原価
+    failNextActualCostUpdate = true
+    await post(I_A1, ocr())
+    const retry = await post(I_A1, ocr())
+    expect(retry.json).toEqual(expect.objectContaining({ replayed: true, synced: false, newActualCost: null }))
+    expect(actualCost(I_A1)).toBe(100000)
+  })
+
   it('登録しなかった場合（重複）は再集計しない', async () => {
     await post(I_A1, ocr())
     tables.cost_ledger_items.find(i => i.id === I_A1)!.actual_cost = 12345   // 手入力の値とする
@@ -441,12 +539,18 @@ describe('actual_cost の再集計（16）', () => {
     expect(actualCost(I_A1)).toBe(12345)
   })
 
-  it('再送（replayed）では再集計せず DB の現在値を返す', async () => {
+  it('再送（replayed）では再集計しない。内訳合計と一致しない actual_cost は synced: false', async () => {
     await post(I_A1, ocr())
     tables.cost_ledger_items.find(i => i.id === I_A1)!.actual_cost = 12345
     const r = await post(I_A1, ocr())
-    expect(r.json.newActualCost).toBe(12345)
-    expect(actualCost(I_A1)).toBe(12345)
+    expect(r.json).toEqual(expect.objectContaining({ replayed: true, synced: false, newActualCost: null }))
+    expect(actualCost(I_A1)).toBe(12345)   // 書き換えない
+  })
+
+  it('再送で actual_cost が内訳合計と一致していれば synced: true と DB の値を返す', async () => {
+    await post(I_A1, ocr())
+    const r = await post(I_A1, ocr())
+    expect(r.json).toEqual(expect.objectContaining({ replayed: true, synced: true, newActualCost: 33000 }))
   })
 })
 

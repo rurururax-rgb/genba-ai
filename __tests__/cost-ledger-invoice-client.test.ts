@@ -3,6 +3,7 @@ import { readFileSync } from 'fs'
 import { join } from 'path'
 import { createRegisterAttempt, postInvoice, UNKNOWN_RESULT_MESSAGE } from '@/lib/cost-ledger/invoice-client'
 import {
+  actualCostMatchesInvoices, sameInvoiceContent,
   findSimilarInvoices, isIsoDate, isSha256, normalizeInvoiceNumber, normalizeVendorName, parseInvoiceRequest,
   type ExistingInvoice,
 } from '@/lib/cost-ledger/invoice-dedupe'
@@ -151,6 +152,56 @@ describe('findSimilarInvoices（以前の請求書と似ている）', () => {
   })
 })
 
+describe('sameInvoiceContent（同じキーの再送として扱ってよいか）', () => {
+  const req = (over: Record<string, unknown> = {}) => {
+    const p = parseInvoiceRequest({
+      source: 'ocr', amount: 33000, invoice_date: '2026-10-01', payment_date: '2026-10-31', note: 'メモ',
+      vendor_name: 'QA設備', invoice_number: 'INV-001', document_sha256: 'a'.repeat(64),
+      idempotency_key: '00000000-0000-4000-8000-000000000101', ...over,
+    })
+    if (!p.ok) throw new Error(p.error)
+    return p.value
+  }
+  const row = {
+    cost_ledger_item_id: ITEM, amount: '33000.00', source: 'ocr', document_sha256: 'a'.repeat(64),
+    invoice_date: '2026-10-01', payment_date: '2026-10-31', note: 'メモ', vendor_name: 'QA設備', invoice_number: 'INV-001',
+  }
+
+  it('保存する列がすべて同じなら true（numeric の文字列・confirm_similar の違いは無視）', () => {
+    expect(sameInvoiceContent(row, ITEM, req())).toBe(true)
+    expect(sameInvoiceContent(row, ITEM, req({ confirm_similar: true }))).toBe(true)
+  })
+
+  it.each([
+    ['台帳項目', () => sameInvoiceContent(row, '00000000-0000-4000-8000-000000000022', req())],
+    ['金額', () => sameInvoiceContent(row, ITEM, req({ amount: 33001 }))],
+    ['source', () => sameInvoiceContent({ ...row, source: 'manual', document_sha256: null }, ITEM, req())],
+    ['ハッシュ', () => sameInvoiceContent(row, ITEM, req({ document_sha256: 'b'.repeat(64) }))],
+    ['請求日', () => sameInvoiceContent(row, ITEM, req({ invoice_date: '2026-10-02' }))],
+    ['支払日', () => sameInvoiceContent(row, ITEM, req({ payment_date: null }))],
+    ['メモ', () => sameInvoiceContent(row, ITEM, req({ note: '別' }))],
+    ['業者名', () => sameInvoiceContent(row, ITEM, req({ vendor_name: '別業者' }))],
+    ['請求書番号', () => sameInvoiceContent(row, ITEM, req({ invoice_number: 'INV-002' }))],
+  ])('%s が違えば false', (_l, f) => {
+    expect(f()).toBe(false)
+  })
+
+  it('NULL と空文字・空白だけは同じ', () => {
+    expect(sameInvoiceContent({ ...row, note: '' }, ITEM, req({ note: null }))).toBe(true)
+    expect(sameInvoiceContent({ ...row, note: null }, ITEM, req({ note: '   ' }))).toBe(true)
+  })
+})
+
+describe('actualCostMatchesInvoices（再送時に原価合計も正常と言えるか）', () => {
+  it('内訳合計と一致するときだけ true', () => {
+    expect(actualCostMatchesInvoices(30000, [10000, '20000.00'])).toBe(true)
+    expect(actualCostMatchesInvoices('30000.00', [10000, 20000])).toBe(true)
+    expect(actualCostMatchesInvoices(10000, [10000, 20000])).toBe(false)   // 再集計失敗で古い
+    expect(actualCostMatchesInvoices(null, [10000])).toBe(false)           // 未集計
+    expect(actualCostMatchesInvoices(0.3, [0.1, 0.2])).toBe(true)          // 小数誤差
+  })
+})
+
 // ── 画面の配線（DOM テスト環境がないため、ソースの約束を確認する） ──
 
 const importTab = readFileSync(join(__dirname, '../components/projects/VendorInvoiceImportTab.tsx'), 'utf8')
@@ -189,6 +240,17 @@ describe('VendorInvoiceImportTab', () => {
     expect(reg).toContain('attempt.reset()')
     expect(reg).toContain('loadLedgerItems()')
     expect(reg).toContain('onRegistered?.(itemId)')
+  })
+
+  it('登録後の予測金額（現在の actual_cost＋今回の金額）は表示しない', () => {
+    expect(importTab).not.toContain('→ 登録後')
+    expect(importTab).not.toMatch(/actual_cost \?\? 0\) \+/)
+  })
+
+  it('原価合計を確認できないときは「保存済み」と「原価合計の確認が必要」を分けて表示する', () => {
+    expect(importTab).toContain('請求は保存済みです')
+    expect(importTab).toContain('実績原価の合計が請求内訳と一致していることを確認できませんでした')
+    expect(importTab).toMatch(/saved\.synced && saved\.actualCost != null/)
   })
 
   it('「この請求書は登録済みです」「以前の請求書と似ています」を表示する', () => {
