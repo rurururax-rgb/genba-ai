@@ -6,6 +6,7 @@ import { VendorInvoiceImportTab } from './VendorInvoiceImportTab'
 import { Button } from '@/components/ui/button'
 import { parseNumericInput, resolveNumericCommit } from '@/lib/input/numeric-input'
 import { jsonInit, writeRequest } from '@/lib/api/write-request'
+import { createRegisterAttempt, postInvoice, type RegisterAttempt } from '@/lib/cost-ledger/invoice-client'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -32,6 +33,9 @@ type Invoice = {
   invoice_date:  string | null
   payment_date:  string | null
   note: string | null
+  source?: string | null
+  vendor_name?: string | null
+  invoice_number?: string | null
   created_at: string
 }
 
@@ -134,14 +138,20 @@ function fmt(n: number) { return n.toLocaleString('ja-JP') }
 // 1行分の分割請求内訳を展開表示するパネル
 
 function InvoicePanel({
-  itemId, invoices, onInvoicesChange, onActualCostChange,
+  itemId, invoices, onInvoicesChange, onActualCostChange, onReload,
 }: {
   itemId: string
   invoices: Invoice[]
   onInvoicesChange: (invs: Invoice[]) => void
   onActualCostChange: (newCost: number | null) => void
+  /** 保存されたか分からない・再集計に失敗したときに、台帳と内訳を DB から読み直す */
+  onReload: () => void
 }) {
   const [adding, setAdding]     = useState(false)
+  // 1回の追加操作。送信中の連打を止め、通信エラー後の再試行では同じ idempotency_key を使う
+  // （中身は書き換わるが表示には使わない。連打の判定に再描画を待たないため state にしない）
+  const [attempt] = useState<RegisterAttempt>(() => createRegisterAttempt())
+  const [submitting, setSubmitting] = useState(false)
   const [draft,  setDraft]      = useState<{ amount: string; invoice_date: string; payment_date: string; note: string }>({ amount: '', invoice_date: '', payment_date: '', note: '' })
   const [editId,  setEditId]    = useState<string | null>(null)
   const [editAmt, setEditAmt]   = useState('')
@@ -151,21 +161,60 @@ function InvoicePanel({
     if (adding) setTimeout(() => amountRef.current?.focus(), 0)
   }, [adding])
 
+  function openAddForm() {
+    // フォームを開く = 新しい追加操作
+    attempt.reset()
+    setAdding(true)
+  }
+
+  function closeAddForm() {
+    if (attempt.busy) return
+    attempt.reset()
+    setAdding(false)
+  }
+
   // 書き込みは「成功した場合のみ画面へ反映・失敗は必ず通知」（lib/api/write-request.ts）
+  // 同じ金額の分割請求は別の内訳として登録できる（手動追加は内容で重複判定しない。再送だけを止める）
   async function handleAdd() {
+    if (attempt.busy) return
     const amount = parseNumericInput(draft.amount)
     if (amount == null || amount <= 0) { alert('金額を数字で入力してください。'); return }
-    const result = await writeRequest<{ invoice: Invoice; newActualCost: number }>(
-      `/api/cost-ledger/${itemId}/invoices`,
-      jsonInit('POST', { amount, invoice_date: draft.invoice_date || null, payment_date: draft.payment_date || null, note: draft.note || null }),
-      '請求の追加に失敗しました',
-    )
-    if (!result.ok || !result.data) { alert(`${result.ok ? '請求の追加に失敗しました' : result.message}\n追加されていません。`); return }
-    const { invoice, newActualCost } = result.data
-    onInvoicesChange([...invoices, invoice])
-    onActualCostChange(newActualCost)
-    setDraft({ amount: '', invoice_date: '', payment_date: '', note: '' })
-    setAdding(false)
+    setSubmitting(true)
+    try {
+      const result = await attempt.submit(key => postInvoice(itemId, {
+        source: 'manual',
+        amount,
+        invoice_date: draft.invoice_date || null,
+        payment_date: draft.payment_date || null,
+        note: draft.note || null,
+      }, key))
+      if (!result) return
+      if (result.kind === 'saved') {
+        // この追加操作は終わり。次の追加は新しいキーで行う
+        attempt.reset()
+        setDraft({ amount: '', invoice_date: '', payment_date: '', note: '' })
+        setAdding(false)
+        if (result.replayed || !result.synced) {
+          // 前回の送信で保存済みだった・実績原価が内訳合計と一致すると確認できない → DB の値で表示し直す
+          if (!result.synced) alert('請求は保存済みです（もう一度追加する必要はありません）。\nただし実績原価の合計が請求内訳と一致していることを確認できませんでした。実績原価と内訳の合計を確認してください。')
+          onReload()
+          return
+        }
+        onInvoicesChange([...invoices, result.invoice as Invoice])
+        onActualCostChange(result.newActualCost)
+        return
+      }
+      if (result.kind === 'unknown') {
+        // 保存されたか分からない。自動で再送しない。フォームはそのまま（同じキーで押し直せば二重にならない）
+        alert(result.message)
+        onReload()
+        return
+      }
+      alert(`${result.message}\n追加されていません。`)
+      if (result.kind === 'rejected' && result.status === 409) onReload()
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   async function handleAmountEdit(inv: Invoice) {
@@ -272,7 +321,7 @@ function InvoicePanel({
             placeholder="金額"
             value={draft.amount}
             onChange={e => setDraft(v => ({ ...v, amount: e.target.value }))}
-            onKeyDown={e => { if (e.key === 'Enter') handleAdd(); if (e.key === 'Escape') setAdding(false) }}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) handleAdd(); if (e.key === 'Escape') closeAddForm() }}
             style={{ ...ps.input, flex: 1.2 }}
           />
           <input
@@ -291,14 +340,16 @@ function InvoicePanel({
             placeholder="メモ（任意）"
             value={draft.note}
             onChange={e => setDraft(v => ({ ...v, note: e.target.value }))}
-            onKeyDown={e => { if (e.key === 'Enter') handleAdd(); if (e.key === 'Escape') setAdding(false) }}
+            onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) handleAdd(); if (e.key === 'Escape') closeAddForm() }}
             style={{ ...ps.input, flex: 2 }}
           />
-          <button onClick={handleAdd} style={ps.saveBtn}>追加</button>
-          <button onClick={() => setAdding(false)} style={ps.cancelBtn}>キャンセル</button>
+          <button onClick={handleAdd} disabled={submitting} style={{ ...ps.saveBtn, opacity: submitting ? 0.6 : 1, cursor: submitting ? 'not-allowed' : ps.saveBtn.cursor }}>
+            {submitting ? '追加中...' : '追加'}
+          </button>
+          <button onClick={closeAddForm} disabled={submitting} style={ps.cancelBtn}>キャンセル</button>
         </div>
       ) : (
-        <button onClick={() => setAdding(true)} style={ps.addRowBtn}>
+        <button onClick={openAddForm} style={ps.addRowBtn}>
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor"
             strokeWidth="2.5" strokeLinecap="round">
             <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
@@ -580,6 +631,16 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
       return next
     })
     load() // サマリー再計算
+  }
+
+  // ── 請求の登録後・保存結果が不明なとき: 台帳と（開いたことのある）内訳を DB から読み直す ──
+  function reloadAfterInvoiceWrite(itemId: string) {
+    load()
+    if (!invoicesMap[itemId]) return
+    fetch(`/api/cost-ledger/${itemId}/invoices`)
+      .then(res => (res.ok ? res.json() as Promise<Invoice[]> : null))
+      .then(data => { if (data) setInvoices(p => ({ ...p, [itemId]: data })) })
+      .catch(() => {/* 内訳は次に開いたときに読み直す */})
   }
 
   // ── 内訳パネル開閉 ───────────────────────────────────────
@@ -989,7 +1050,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
               borderBottom: `1.5px solid #BDD1C3`,
               background: '#F6FAF7',
             }}>
-              <VendorInvoiceImportTab projectId={projectId} />
+              <VendorInvoiceImportTab projectId={projectId} onRegistered={reloadAfterInvoiceWrite} />
             </div>
           )}
 
@@ -1369,6 +1430,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                               <InvoicePanel
                                 itemId={item.id}
                                 invoices={invs}
+                                onReload={() => reloadAfterInvoiceWrite(item.id)}
                                 onInvoicesChange={newInvs =>
                                   setInvoices(p => ({ ...p, [item.id]: newInvs }))
                                 }

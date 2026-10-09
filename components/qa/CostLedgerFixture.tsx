@@ -1,7 +1,9 @@
 'use client'
 
 import { CostLedgerTab } from '@/components/projects/CostLedgerTab'
-import { COST_FIXTURE_PROJECT_ID, installCostLedgerFixtureBackend, resetCostFixture } from '@/lib/qa/cost-ledger-fixture-backend'
+import {
+  COST_FIXTURE_PROJECT_ID, armCostFixtureFault, installCostLedgerFixtureBackend, resetCostFixture,
+} from '@/lib/qa/cost-ledger-fixture-backend'
 
 // CostLedgerTab が最初の通信を行う前に fetch を差し替える（モジュール評価時）
 installCostLedgerFixtureBackend()
@@ -12,10 +14,25 @@ export function CostLedgerFixture() {
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '6px 12px', background: '#FEF3C7', color: '#92400E', fontSize: 12 }}>
         <strong>QA FIXTURE</strong>
         <span>本番DBには接続しません（原価台帳の書き込みは sessionStorage 上の Fixture に対して行われます）</span>
+        {/* 次の請求登録1回だけ障害を起こす（保存後に応答が届かない・実績原価の再集計に失敗） */}
+        <button
+          type="button"
+          onClick={() => armCostFixtureFault('lose_next_response')}
+          style={{ marginLeft: 'auto', border: '1px solid #92400E', borderRadius: 6, padding: '2px 10px', background: '#fff', cursor: 'pointer' }}
+        >
+          次の登録: 応答を失う
+        </button>
+        <button
+          type="button"
+          onClick={() => armCostFixtureFault('fail_next_sync')}
+          style={{ border: '1px solid #92400E', borderRadius: 6, padding: '2px 10px', background: '#fff', cursor: 'pointer' }}
+        >
+          次の登録: 再集計失敗
+        </button>
         <button
           type="button"
           onClick={() => { resetCostFixture(); window.location.reload() }}
-          style={{ marginLeft: 'auto', border: '1px solid #92400E', borderRadius: 6, padding: '2px 10px', background: '#fff', cursor: 'pointer' }}
+          style={{ border: '1px solid #92400E', borderRadius: 6, padding: '2px 10px', background: '#fff', cursor: 'pointer' }}
         >
           初期データに戻す
         </button>
