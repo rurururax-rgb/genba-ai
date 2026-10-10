@@ -23,6 +23,14 @@ const MIGRATION_REFLECTED = '20260711000005_reflected_to_estimate.sql'
 const MIGRATION_KI_001    = '20261013000001_link_line_event_on_estimate_add.sql'
 const MIGRATION_MATCH     = '20261013000002_enforce_project_company_match.sql'
 
+const CONSTRAINTS = [
+  'projects_id_company_id_key',
+  'estimate_items_project_company_fkey',
+  'line_events_project_company_fkey',
+  'line_events_project_requires_company_check',
+]
+const CONSTRAINT_LIST = CONSTRAINTS.map(n => `'${n}'`).join(', ')
+
 let server: LocalPostgres
 let admin: Client
 let userA: Client
@@ -60,7 +68,7 @@ async function newProject(c: Client, companyId: string): Promise<string> {
 }
 
 /** LINE イベント（Webhook と同じく service_role 相当の superuser で作る） */
-async function newEvent(companyId: string, projectId: string | null = null): Promise<string> {
+async function newEvent(companyId: string | null, projectId: string | null = null): Promise<string> {
   const { rows } = await admin.query(
     `INSERT INTO line_events (company_id, line_user_id, line_event_id, event_type, project_id, is_processed)
      VALUES ($1, 'U-test', $2, 'audio', $3, true) RETURNING id`,
@@ -170,7 +178,7 @@ afterAll(async () => {
 
 // ── 1. 修正前: 抜け道の再現 ───────────────────────────────────
 
-const reproduced: { items: string[]; events: string[] } = { items: [], events: [] }
+const reproduced: { items: string[]; events: string[]; nullCompanyEvents: string[] } = { items: [], events: [], nullCompanyEvents: [] }
 
 describe('修正前（20261013000002 未適用）: PostgREST と同じ権限で他社の案件を指定できてしまう', () => {
   it('estimate_items への直接 INSERT（company_id = 自社, project_id = 他社の案件）が成功する', async () => {
@@ -197,6 +205,40 @@ describe('修正前（20261013000002 未適用）: PostgREST と同じ権限で�
     expect(await eventProject(ev)).toBe(PROJECT_B)
   })
 
+  it('company_id が NULL の LINE イベントは service_role から他社の案件へ紐付けられる', async () => {
+    const ev = await newEvent(null)
+    const r = await asUser(userA, null, () =>
+      userA.query('UPDATE line_events SET project_id = $1 WHERE id = $2', [PROJECT_B, ev]), 'service_role')
+    expect(r.rowCount).toBe(1)
+    reproduced.nullCompanyEvents.push(ev)
+    expect(await eventProject(ev)).toBe(PROJECT_B)
+  })
+
+  it('複合外部キーだけでは company_id = NULL を素通りする（MATCH SIMPLE。CHECK が必要な理由）', async () => {
+    await admin.query('BEGIN')
+    try {
+      await admin.query('ALTER TABLE projects ADD CONSTRAINT tmp_projects_id_company UNIQUE (id, company_id)')
+      await admin.query(`ALTER TABLE line_events ADD CONSTRAINT tmp_line_events_fk
+        FOREIGN KEY (project_id, company_id) REFERENCES projects (id, company_id) NOT VALID`)
+      await expect(admin.query(
+        `INSERT INTO line_events (company_id, line_user_id, line_event_id, project_id) VALUES ($1, 'U', 'x1', $2)`,
+        [COMPANY_A, PROJECT_B])).rejects.toMatchObject({ code: '23503' })
+    } finally {
+      await admin.query('ROLLBACK')
+    }
+    await admin.query('BEGIN')
+    try {
+      await admin.query('ALTER TABLE projects ADD CONSTRAINT tmp_projects_id_company UNIQUE (id, company_id)')
+      await admin.query(`ALTER TABLE line_events ADD CONSTRAINT tmp_line_events_fk
+        FOREIGN KEY (project_id, company_id) REFERENCES projects (id, company_id) NOT VALID`)
+      const r = await admin.query(
+        `INSERT INTO line_events (company_id, line_user_id, line_event_id, project_id) VALUES (NULL, 'U', 'x2', $1)`, [PROJECT_B])
+      expect(r.rowCount).toBe(1)
+    } finally {
+      await admin.query('ROLLBACK')
+    }
+  })
+
   it('（参考）RPC add_line_event_estimate_items は修正前から他社の案件を拒否している', async () => {
     const ev = await newEvent(COMPANY_A)
     const e = await pgError(asUser(userA, USER_A, () =>
@@ -213,23 +255,35 @@ describe('migration の適用', () => {
     expect(e.message).toBe('project-company precondition failed: mismatched rows (estimate_items=2, line_events=1)')
     const { rows } = await admin.query(`
       SELECT count(*)::int AS n FROM pg_constraint
-      WHERE conname IN ('projects_id_company_id_key', 'estimate_items_project_company_fkey', 'line_events_project_company_fkey')`)
+      WHERE conname IN (${CONSTRAINT_LIST})`)
     expect(rows[0].n).toBe(0)
     expect((await itemRow(reproduced.items[0]))?.project_id).toBe(PROJECT_B) // 既存行は変えない
   })
 
-  it('食い違いを人間が解消した後なら適用できる（隔離 DB で再現行を消してから適用）', async () => {
+  it('案件に紐付いているのに company_id が NULL の LINE イベントがあれば、何も作らずに止まる', async () => {
     await admin.query('DELETE FROM estimate_items WHERE id = ANY($1)', [reproduced.items])
     await admin.query('UPDATE line_events SET project_id = NULL WHERE id = ANY($1)', [reproduced.events])
+    const e = await pgError(admin.query(readMigration(MIGRATION_MATCH)))
+    expect(e.message).toBe('project-company precondition failed: linked line_events without company_id (1)')
+    const { rows } = await admin.query(`
+      SELECT count(*)::int AS n FROM pg_constraint
+      WHERE conname IN (${CONSTRAINT_LIST})`)
+    expect(rows[0].n).toBe(0)
+    expect(await eventProject(reproduced.nullCompanyEvents[0])).toBe(PROJECT_B) // 既存行は変えない
+  })
+
+  it('食い違いを人間が解消した後なら適用できる（隔離 DB で再現行を戻してから適用）', async () => {
+    await admin.query('UPDATE line_events SET project_id = NULL WHERE id = ANY($1)', [reproduced.nullCompanyEvents])
     await admin.query(readMigration(MIGRATION_MATCH))
     const { rows } = await admin.query(`
       SELECT conrelid::regclass::text AS tbl, conname, contype, convalidated, confdeltype
       FROM pg_constraint
-      WHERE conname IN ('projects_id_company_id_key', 'estimate_items_project_company_fkey', 'line_events_project_company_fkey')
+      WHERE conname IN (${CONSTRAINT_LIST})
       ORDER BY conname`)
     expect(rows).toEqual([
       { tbl: 'estimate_items', conname: 'estimate_items_project_company_fkey', contype: 'f', convalidated: true, confdeltype: 'c' },
       { tbl: 'line_events', conname: 'line_events_project_company_fkey', contype: 'f', convalidated: true, confdeltype: 'a' },
+      { tbl: 'line_events', conname: 'line_events_project_requires_company_check', contype: 'c', convalidated: true, confdeltype: ' ' },
       { tbl: 'projects', conname: 'projects_id_company_id_key', contype: 'u', convalidated: true, confdeltype: ' ' },
     ])
   })
@@ -240,8 +294,8 @@ describe('migration の適用', () => {
     await admin.query(readMigration(MIGRATION_MATCH))
     const { rows } = await admin.query(`
       SELECT count(*)::int AS n FROM pg_constraint
-      WHERE conname IN ('projects_id_company_id_key', 'estimate_items_project_company_fkey', 'line_events_project_company_fkey')`)
-    expect(rows[0].n).toBe(3)
+      WHERE conname IN (${CONSTRAINT_LIST})`)
+    expect(rows[0].n).toBe(4)
   })
 })
 
@@ -306,6 +360,66 @@ describe('修正後: 他社の案件を指定した直接 INSERT / UPDATE は拒
     const e2 = await pgError(asUser(userA, null, () =>
       userA.query('UPDATE line_events SET project_id = $1 WHERE id = $2', [PROJECT_B, ev]), 'service_role'))
     expect(e2).toMatchObject(FK_EVENTS)
+  })
+})
+
+// ── 3b. 修正後: company_id が NULL の LINE イベント ───────────────
+
+describe('修正後: company_id が NULL の LINE イベント', () => {
+  const CHECK = { code: '23514', constraint: 'line_events_project_requires_company_check' }
+  const insertEvent = (companyId: string | null, projectId: string | null) =>
+    userA.query(
+      `INSERT INTO line_events (company_id, line_user_id, line_event_id, event_type, project_id)
+       VALUES ($1, 'U-test', $2, 'text', $3) RETURNING id`,
+      [companyId, randomUUID(), projectId])
+
+  it('未振り分け（project_id = NULL）なら company_id = NULL でも作れる（LINE_COMPANY_ID 未設定の Webhook）', async () => {
+    const { rows } = await asUser(userA, null, () => insertEvent(null, null), 'service_role')
+    expect(await eventProject(rows[0].id)).toBeNull()
+  })
+
+  it('service_role: company_id = NULL で他社・自社の案件に紐付けた INSERT → 23514', async () => {
+    for (const p of [PROJECT_B, PROJECT_A]) {
+      expect(await pgError(asUser(userA, null, () => insertEvent(null, p), 'service_role'))).toMatchObject(CHECK)
+    }
+  })
+
+  it('service_role: company_id = NULL の未振り分けイベントを案件へ UPDATE → 23514。未振り分けのまま', async () => {
+    const ev = await newEvent(null)
+    for (const p of [PROJECT_B, PROJECT_A]) {
+      const e = await pgError(asUser(userA, null, () =>
+        userA.query('UPDATE line_events SET project_id = $1 WHERE id = $2', [p, ev]), 'service_role'))
+      expect(e).toMatchObject(CHECK)
+    }
+    expect(await eventProject(ev)).toBeNull()
+  })
+
+  it('service_role: 紐付け済みイベントの company_id を NULL へ UPDATE → 23514', async () => {
+    const ev = await newEvent(COMPANY_A, PROJECT_A)
+    const e = await pgError(asUser(userA, null, () =>
+      userA.query('UPDATE line_events SET company_id = NULL WHERE id = $1', [ev]), 'service_role'))
+    expect(e).toMatchObject(CHECK)
+  })
+
+  it('service_role: 自社の company_id で他社の案件へ紐付け → 23503（複合外部キー）', async () => {
+    const e = await pgError(asUser(userA, null, () => insertEvent(COMPANY_A, PROJECT_B), 'service_role'))
+    expect(e).toMatchObject({ code: '23503', constraint: 'line_events_project_company_fkey' })
+  })
+
+  it('authenticated: company_id = NULL のイベントは見えず更新できない。自社のイベントを NULL にもできない（RLS）', async () => {
+    const nullEv = await newEvent(null)
+    const r = await asUser(userA, USER_A, () =>
+      userA.query('UPDATE line_events SET project_id = $1 WHERE id = $2', [PROJECT_A, nullEv]))
+    expect(r.rowCount).toBe(0)
+    const ev = await newEvent(COMPANY_A)
+    const e = await pgError(asUser(userA, USER_A, () =>
+      userA.query('UPDATE line_events SET company_id = NULL WHERE id = $1', [ev])))
+    expect(e.code).toBe('42501')
+  })
+
+  it('estimate_items は company_id が NOT NULL（service_role でも NULL は 23502）', async () => {
+    const e = await pgError(asUser(userA, null, () => insertItem(userA, null as unknown as string, PROJECT_A), 'service_role'))
+    expect(e.code).toBe('23502')
   })
 })
 
@@ -400,7 +514,7 @@ describe('SQL Editor 用スクリプト（docs/db/ki-001-project-company-*.sql�
     CREATE SCHEMA supabase_migrations;
     CREATE TABLE supabase_migrations.schema_migrations (version text PRIMARY KEY, statements text[], name text);
     INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('20260711000005');`
-  const APPLIED = [{ history_rows: '1', valid_constraints: '3' }]
+  const APPLIED = [{ history_rows: '1', valid_constraints: '4' }]
 
   let dbSeq = 0
   async function freshDb() {
@@ -418,7 +532,7 @@ describe('SQL Editor 用スクリプト（docs/db/ki-001-project-company-*.sql�
   async function constraints(c: Client) {
     const { rows } = await c.query(`
       SELECT count(*)::int AS n FROM pg_constraint
-      WHERE conname IN ('projects_id_company_id_key', 'estimate_items_project_company_fkey', 'line_events_project_company_fkey')`)
+      WHERE conname IN (${CONSTRAINT_LIST})`)
     return rows[0].n as number
   }
   async function runScript(c: Client, sql: string) {
@@ -482,7 +596,29 @@ describe('SQL Editor 用スクリプト（docs/db/ki-001-project-company-*.sql�
     await c.end()
   })
 
-  it('ロールバック: 制約 3 つと履歴の 1 行だけを消す。二度目はガードで止まり、適用し直せる', async () => {
+  it('estimate_items の project_id / company_id が NULL を許す DB では、何も作らずに止まる', async () => {
+    const c = await freshDb()
+    await c.query('ALTER TABLE estimate_items ALTER COLUMN company_id DROP NOT NULL')
+    const e = await runScriptExpectingError(c, APPLY)
+    expect(e.message).toBe('project-company precondition failed: estimate_items columns are nullable {company_id}')
+    expect(await constraints(c)).toBe(0)
+    expect(await history(c)).toHaveLength(0)
+    await c.end()
+  })
+
+  it('案件に紐付いているのに company_id が NULL の LINE イベントがあれば、制約も履歴も残らない', async () => {
+    const c = await freshDb()
+    await c.query('INSERT INTO companies (id, name) VALUES ($1, $2)', [COMPANY_A, 'A社'])
+    const pA = await newProject(c, COMPANY_A)
+    await c.query("INSERT INTO line_events (company_id, line_user_id, line_event_id, project_id) VALUES (NULL, 'U', 'x', $1)", [pA])
+    const e = await runScriptExpectingError(c, APPLY)
+    expect(e.message).toBe('project-company precondition failed: linked line_events without company_id (1)')
+    expect(await constraints(c)).toBe(0)
+    expect(await history(c)).toHaveLength(0)
+    await c.end()
+  })
+
+  it('ロールバック: 制約 4 つと履歴の 1 行だけを消す。二度目はガードで止まり、適用し直せる', async () => {
     const c = await freshDb()
     const before = [await policies(c), await tablePrivileges(c)]
     await runScript(c, APPLY)

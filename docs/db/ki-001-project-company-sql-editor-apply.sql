@@ -7,8 +7,9 @@
 -- ・全体を 1 つのトランザクションで実行する。途中のどこで失敗しても、制約・migration 履歴の
 --   どれも残らない（エラーが出たら、続けて `ROLLBACK;` だけを実行してから状況を確認する）。
 -- ・行うのは projects の UNIQUE (id, company_id) と、estimate_items / line_events の
---   複合外部キー (project_id, company_id) の追加だけ。RLS ポリシー・権限・列は変えない。
---   業務データの INSERT / UPDATE / DELETE も行わない。食い違っている行が 1 件でもあれば止まる。
+--   複合外部キー (project_id, company_id)、line_events の CHECK (project_id IS NULL OR company_id IS NOT NULL)
+--   の追加だけ。RLS ポリシー・権限・列は変えない。業務データの INSERT / UPDATE / DELETE も行わない。
+--   食い違っている行・案件に紐付いているのに会社 ID が NULL の行が 1 件でもあれば止まる。
 -- ・制約の追加中は projects / estimate_items / line_events の書き込みが待たされる
 --   （行数が少ないため数秒以内。ロック待ちは lock_timeout = 5s で打ち切って全体を取り消す）。
 -- ・「-- >>> MIGRATION BODY」から「-- <<< MIGRATION BODY」までは
@@ -31,7 +32,7 @@ BEGIN
     RAISE EXCEPTION 'project-company apply aborted: version 20261013000002 is already recorded';
   END IF;
   -- 履歴なしで制約だけある（想定外の状態）なら触らない
-  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname IN ('projects_id_company_id_key', 'estimate_items_project_company_fkey', 'line_events_project_company_fkey')) THEN
+  IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname IN ('projects_id_company_id_key', 'estimate_items_project_company_fkey', 'line_events_project_company_fkey', 'line_events_project_requires_company_check')) THEN
     RAISE EXCEPTION 'project-company apply aborted: constraints already exist (history is missing)';
   END IF;
   -- 適用後に RLS ポリシーが変わっていないことを確かめるため、適用前の状態を記録する
@@ -62,11 +63,18 @@ $guard$;
 --   案件の会社と行の会社が違う行は 23503 で拒否される。
 --     - estimate_items: ON DELETE CASCADE（既存の project_id の外部キーと同じ）
 --     - line_events   : ON DELETE NO ACTION（既存と同じ）。project_id が NULL（未振り分け）の行は対象外（MATCH SIMPLE）
+--   MATCH SIMPLE は列のどれかが NULL なら一致を確かめない。line_events.company_id は NULL を許すため、
+--   company_id = NULL・project_id = 他社の案件 は複合外部キーを素通りする。これを CHECK で塞ぐ:
+--     - line_events: CHECK (project_id IS NULL OR company_id IS NOT NULL)
+--       案件に紐付いたイベントは会社 ID が必須。未振り分け（project_id = NULL）は会社 ID が NULL でもよい
+--       （LINE_COMPANY_ID 未設定の Webhook が作る行を壊さない）
+--     - estimate_items: project_id・company_id とも NOT NULL のため CHECK は不要。NOT NULL であることを事前確認する
 --   既存の単独の外部キー・RLS ポリシー・テーブル権限・列は変えない。
 --
 -- 安全方針:
 --   - 既存データの UPDATE / DELETE / TRUNCATE なし
---   - 既に会社が食い違っている行が 1 件でもあれば、何も作らずに止まる（補正は人間が判断する）
+--   - 既に会社が食い違っている行、案件に紐付いているのに会社 ID が NULL の行が 1 件でもあれば、
+--     何も作らずに止まる（補正は人間が判断する）
 --   - 制約は NOT VALID で追加してから VALIDATE する（同じトランザクション内）
 --   - 再適用できる（制約が既にあれば作らない）
 --
@@ -79,6 +87,7 @@ $guard$;
 DO $$
 DECLARE
   missing   text[];
+  nullable  text[];
   v_items   bigint;
   v_events  bigint;
 BEGIN
@@ -96,6 +105,15 @@ BEGIN
     RAISE EXCEPTION 'project-company precondition failed: missing columns %', missing;
   END IF;
 
+  -- estimate_items は NOT NULL を前提に CHECK を付けない。NULL を許していれば止まる
+  SELECT array_agg(c.column_name::text ORDER BY c.column_name) INTO nullable
+  FROM information_schema.columns c
+  WHERE c.table_schema = 'public' AND c.table_name = 'estimate_items'
+    AND c.column_name IN ('project_id', 'company_id') AND c.is_nullable = 'YES';
+  IF nullable IS NOT NULL THEN
+    RAISE EXCEPTION 'project-company precondition failed: estimate_items columns are nullable %', nullable;
+  END IF;
+
   SELECT count(*) INTO v_items
   FROM public.estimate_items i JOIN public.projects p ON p.id = i.project_id
   WHERE i.company_id IS DISTINCT FROM p.company_id AND i.company_id IS NOT NULL;
@@ -104,6 +122,13 @@ BEGIN
   WHERE e.company_id IS DISTINCT FROM p.company_id AND e.company_id IS NOT NULL;
   IF v_items > 0 OR v_events > 0 THEN
     RAISE EXCEPTION 'project-company precondition failed: mismatched rows (estimate_items=%, line_events=%)', v_items, v_events;
+  END IF;
+
+  SELECT count(*) INTO v_events
+  FROM public.line_events e
+  WHERE e.project_id IS NOT NULL AND e.company_id IS NULL;
+  IF v_events > 0 THEN
+    RAISE EXCEPTION 'project-company precondition failed: linked line_events without company_id (%)', v_events;
   END IF;
 END
 $$;
@@ -138,13 +163,28 @@ BEGIN
 END
 $$;
 
+-- ── 3. 案件に紐付いた LINE イベントは会社 ID 必須（複合外部キーの NULL の抜け道を塞ぐ） ──
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                 WHERE conrelid = 'public.line_events'::regclass AND conname = 'line_events_project_requires_company_check') THEN
+    ALTER TABLE public.line_events
+      ADD CONSTRAINT line_events_project_requires_company_check
+      CHECK (project_id IS NULL OR company_id IS NOT NULL) NOT VALID;
+  END IF;
+END
+$$;
+
 ALTER TABLE public.estimate_items VALIDATE CONSTRAINT estimate_items_project_company_fkey;
 ALTER TABLE public.line_events    VALIDATE CONSTRAINT line_events_project_company_fkey;
+ALTER TABLE public.line_events    VALIDATE CONSTRAINT line_events_project_requires_company_check;
 
 COMMENT ON CONSTRAINT estimate_items_project_company_fkey ON public.estimate_items IS
   '見積項目の案件は同じ会社の案件であること（RLS は company_id しか見ないため DB で保証する）';
 COMMENT ON CONSTRAINT line_events_project_company_fkey ON public.line_events IS
   'LINE イベントの紐付け先は同じ会社の案件であること（未振り分け = project_id NULL は対象外）';
+COMMENT ON CONSTRAINT line_events_project_requires_company_check ON public.line_events IS
+  '案件に紐付いた LINE イベントは company_id 必須（複合外部キーは company_id が NULL だと一致を確かめないため）';
 -- <<< MIGRATION BODY
 
 -- ── 2. 適用後の検証（どれかが外れればトランザクション全体を取り消す） ──
@@ -152,7 +192,7 @@ DO $verify$
 DECLARE
   v_policies text;
 BEGIN
-  IF (SELECT count(*) FROM pg_constraint WHERE conname IN ('projects_id_company_id_key', 'estimate_items_project_company_fkey', 'line_events_project_company_fkey') AND convalidated) <> 3 THEN
+  IF (SELECT count(*) FROM pg_constraint WHERE conname IN ('projects_id_company_id_key', 'estimate_items_project_company_fkey', 'line_events_project_company_fkey', 'line_events_project_requires_company_check') AND convalidated) <> 4 THEN
     RAISE EXCEPTION 'project-company verify failed: constraints missing or not validated';
   END IF;
   IF NOT EXISTS (SELECT 1 FROM pg_constraint
@@ -164,6 +204,17 @@ BEGIN
                  WHERE conname = 'line_events_project_company_fkey' AND conrelid = 'public.line_events'::regclass
                    AND confrelid = 'public.projects'::regclass AND confdeltype = 'a') THEN
     RAISE EXCEPTION 'project-company verify failed: line_events fkey must be ON DELETE NO ACTION';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint
+                 WHERE conname = 'line_events_project_requires_company_check' AND conrelid = 'public.line_events'::regclass
+                   AND contype = 'c'
+                   AND pg_get_constraintdef(oid) = 'CHECK (((project_id IS NULL) OR (company_id IS NOT NULL)))') THEN
+    RAISE EXCEPTION 'project-company verify failed: unexpected line_events check constraint';
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+             WHERE table_schema = 'public' AND table_name = 'estimate_items'
+               AND column_name IN ('project_id', 'company_id') AND is_nullable = 'YES') THEN
+    RAISE EXCEPTION 'project-company verify failed: estimate_items project_id / company_id must be NOT NULL';
   END IF;
   -- RLS ポリシーは適用前と同じ
   SELECT coalesce(md5(string_agg(format('%s|%s|%s|%s|%s', tablename, policyname, cmd, qual, with_check), ';'
@@ -195,7 +246,7 @@ NOTIFY pgrst, 'reload schema';
 
 COMMIT;
 
--- ── 4. 最終照合（読み取りのみ。期待値: history_rows = 1, valid_constraints = 3） ──
+-- ── 4. 最終照合（読み取りのみ。期待値: history_rows = 1, valid_constraints = 4） ──
 SELECT
   (SELECT count(*) FROM supabase_migrations.schema_migrations WHERE version = '20261013000002') AS history_rows,
-  (SELECT count(*) FROM pg_constraint WHERE conname IN ('projects_id_company_id_key', 'estimate_items_project_company_fkey', 'line_events_project_company_fkey') AND convalidated) AS valid_constraints;
+  (SELECT count(*) FROM pg_constraint WHERE conname IN ('projects_id_company_id_key', 'estimate_items_project_company_fkey', 'line_events_project_company_fkey', 'line_events_project_requires_company_check') AND convalidated) AS valid_constraints;

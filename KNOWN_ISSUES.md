@@ -17,7 +17,9 @@ PostgREST から `company_id = 自社`、`project_id = 他社の案件` の行�
 他社のデータは読めないが、他社の案件に自社の行がぶら下がる。他社が案件を物理削除するとカスケードで消え、
 案件 UUID の存在確認にも使える。
 
-- 20261013000002 で対処済み: `estimate_items`・`line_events`（複合外部キー (project_id, company_id)）。
+- 20261013000002 で対処済み: `estimate_items`・`line_events`（複合外部キー (project_id, company_id)。
+  `line_events` は company_id が NULL だと複合外部キーを素通りするため、CHECK (project_id IS NULL OR company_id IS NOT NULL) も追加）。
+- 他のテーブルに複合外部キーを足すときも、company_id が NULL 許容なら同じ CHECK が必要。
 - 未対処（同じ形の複合外部キーで直せる）: `project_files`、`project_notes`、`ai_summaries`、
   `estimate_documents`、`schedule_items`、`share_links`、および案件に紐づくその後のテーブル
   （`cost_ledger_items`・`invoice_documents` など）。
