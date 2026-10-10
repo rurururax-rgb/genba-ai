@@ -6,6 +6,7 @@ import { getClient } from '@/lib/supabase/client'
 import type { InvoiceIssuerProfile } from '@/lib/company/invoice-issuer'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
+import { NumberDraftInput } from '@/components/projects/NumberDraftInput'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -882,7 +883,7 @@ function InvoiceEditor({
             {items.map((item, idx) => (
               <div key={item.id} style={{ display: 'grid', gridTemplateColumns: '2fr 64px 52px 150px 1fr 32px', padding: '5px 10px', borderBottom: idx < items.length - 1 ? `1px solid ${C.divider}` : 'none', alignItems: 'center', gap: 4 }}>
                 <Input inputSize="compact" className="text-xs" value={item.name} onChange={e => updateItem(idx, 'name', e.target.value)} placeholder="例：リフォーム工事（契約時）" />
-                <Input type="number" inputSize="compact" className="text-xs text-right" value={item.quantity} min={0} onChange={e => updateItem(idx, 'quantity', Number(e.target.value))} />
+                <NumberDraftInput inputSize="compact" className="text-xs text-right" value={item.quantity} min={0} onValueChange={v => updateItem(idx, 'quantity', v)} />
                 <Input inputSize="compact" className="text-xs text-center" value={item.unit} onChange={e => updateItem(idx, 'unit', e.target.value)} />
                 {(() => {
                   const isSel = sumSelection.has(item.id)
@@ -906,7 +907,7 @@ function InvoiceEditor({
                         background: isSel ? C.accentBg : undefined,
                       }}
                     >
-                      <Input type="number" inputSize="compact" className="text-xs text-right" value={item.amount} min={0} onChange={e => updateItem(idx, 'amount', Number(e.target.value))} placeholder="0" />
+                      <NumberDraftInput inputSize="compact" className="text-xs text-right" value={item.amount} min={0} onValueChange={v => updateItem(idx, 'amount', v)} placeholder="0" />
                     </div>
                   )
                 })()}
@@ -931,7 +932,7 @@ function InvoiceEditor({
             ))}
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 16px', borderBottom: `1px solid ${C.divider}` }}>
               <span style={{ fontSize: 12, color: C.label, fontFamily: FONT }}>調整額（端数など）</span>
-              <Input type="number" inputSize="compact" value={adjustment} onChange={e => setForm(p => ({ ...p, adjustment: Number(e.target.value) }))} className="text-right" style={{ width: 120 }} />
+              <NumberDraftInput inputSize="compact" value={adjustment} onValueChange={v => setForm(p => ({ ...p, adjustment: v }))} className="text-right" style={{ width: 120 }} />
             </div>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 16px', background: C.accentBg }}>
               <span style={{ fontSize: 14, fontWeight: 700, color: C.accent, fontFamily: FONT }}>ご請求金額（税込）</span>
