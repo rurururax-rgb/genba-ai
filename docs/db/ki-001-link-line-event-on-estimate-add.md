@@ -157,3 +157,143 @@ RLS ポリシーは手順 1 と同じ SELECT で変わっていないことを�
    - テーブル・業務データ・RLS には触れない。関数が作った見積項目・紐付けはそのまま残る。
    - 何も適用されていなければ `KI-001 rollback aborted: nothing to roll back ...` で止まる。
 3. migration ファイルも revert する（残っていると CLI からは「未適用」に見える）。
+
+---
+
+## 追加監査: 案件と会社の一致を DB で保証する（20261013000002・未適用）
+
+migration: `supabase/migrations/20261013000002_enforce_project_company_match.sql`
+
+**状態: 本番未適用。適用は人間の承認後に行う。**
+
+### 監査結果
+
+| 項目 | 結果 |
+|---|---|
+| RLS（`estimate_items`・`line_events`） | `company_id IN (SELECT get_my_company_ids())` だけ。WITH CHECK も同じ式。**`project_id` は見ない** |
+| 外部キー `project_id → projects(id)` | 存在の確認だけ。外部キーの確認は RLS を通らないため、**他社の案件 ID でも通る** |
+| テーブル権限 | Supabase 既定で `anon`・`authenticated` に ALL。PostgREST から直接 INSERT / UPDATE できる |
+| トリガー | `estimate_items`・`line_events` に会社を確かめるトリガーは無い |
+| 再現（隔離 DB） | ログイン済みユーザーが PostgREST と同じ権限で、`company_id = 自社`・`project_id = 他社` の見積項目の INSERT、自社の項目・LINE イベントの `project_id` を他社の案件へ UPDATE、の 3 つとも成功した |
+| 影響 | 他社のデータは読めない（`estimate_items` を読む SECURITY DEFINER 関数は無い）。他社の案件に自社の行がぶら下がる・他社の案件の物理削除でカスケード削除される・案件 UUID の存在確認に使える |
+| アプリの経路 | `manual`・`import`・並び替え・編集・KI-001 の RPC は会社を確認済み。**`/api/ai/chat/confirm-change` の create / bulk_create は確認していない**（KNOWN_ISSUES の KI-002） |
+| 同じ形の穴（今回は対象外） | `project_files`・`project_notes`・`ai_summaries`・`estimate_documents`・`schedule_items`・`share_links` ほか、`estimate_items.group_id`（KI-002） |
+
+### 修正（RLS は変えない）
+
+- `projects` に `UNIQUE (id, company_id)` を追加する（`id` が主キーなので既存データで違反は起きない）。
+- `estimate_items (project_id, company_id) → projects (id, company_id)` の外部キーを追加する（`ON DELETE CASCADE`。既存の外部キーと同じ）。
+- `line_events (project_id, company_id) → projects (id, company_id)` の外部キーを追加する（`NO ACTION`。`project_id` が NULL の未振り分けは対象外）。
+- 既存の単独の外部キー・RLS ポリシー・権限・列は変えない。既存データも変えない。
+- 食い違っている行が 1 件でもあれば `project-company precondition failed: mismatched rows (...)` で止まり、何も作らない。
+- ロール・経路にかかわらず（authenticated・service_role・RPC・API）、食い違いは `23503` で拒否される。
+- 副作用: 見積項目や紐付け済みの LINE イベントがある案件では、`projects.company_id` を変更できなくなる（アプリに変更する経路は無い）。
+- PostgREST の埋め込み: `estimate_items`・`line_events` から `projects` を埋め込むクエリは無いので、外部キーが 2 本になってもあいまいさのエラー（PGRST201）は起きない。適用時に `NOTIFY pgrst` を送る。
+
+### 検証（隔離 DB）
+
+`__tests__/db/project-company-match.db.test.ts`（`npm run test:db`）で次を確かめている。
+
+- 修正前に、上の 3 つの直接操作が成功することを再現する。
+- 適用後は、同じ操作が 23503 で拒否される。
+- 他社の `company_id` は従来どおり RLS で 42501 になる。
+- 未認証・anon は拒否される。
+- 両社に所属するユーザーは、会社の組み合わせが合っていれば操作でき、食い違えば 23503 になる。`company_id` だけを書き換えることもできない。
+- service_role でも拒否される。
+- 正常な操作は変わらない:
+  - 登録・編集・並び替え・論理削除・自社の別案件への移動
+  - LINE イベントの振り分けと解除
+  - KI-001 の RPC
+  - 案件の物理削除によるカスケード
+- 同時実行で、案件の会社の変更と見積項目の追加がどちらの順でも拒否される。
+- 食い違いがあると止まる。再適用しても変わらない。RLS ポリシーと権限は変わらない。
+- SQL Editor 用スクリプトについて:
+  - 本体が migration と一致する。
+  - 二重適用の拒否、食い違いがあると何も残らないこと、ロールバック、再適用。
+
+### 本番の読み取り専用チェック（人間が SQL Editor で実行する。書き込みなし）
+
+```sql
+-- ① RLS ポリシー（適用前後で同じであること。project_id を見ていないことの確認）
+SELECT tablename, policyname, cmd, roles, qual, with_check
+FROM pg_policies
+WHERE schemaname = 'public'
+  AND tablename IN ('projects', 'estimate_items', 'line_events', 'project_files', 'project_notes',
+                    'ai_summaries', 'estimate_documents', 'schedule_items', 'share_links')
+ORDER BY 1, 2;
+
+-- ② RLS が有効か
+SELECT relname, relrowsecurity, relforcerowsecurity
+FROM pg_class
+WHERE relnamespace = 'public'::regnamespace AND relname IN ('projects', 'estimate_items', 'line_events');
+
+-- ③ テーブル権限（anon / authenticated が直接書き込めるか）
+SELECT t, r,
+       has_table_privilege(r, 'public.' || t, 'INSERT') AS ins,
+       has_table_privilege(r, 'public.' || t, 'UPDATE') AS upd
+FROM unnest(ARRAY['estimate_items', 'line_events']) t, unnest(ARRAY['anon', 'authenticated']) r
+ORDER BY 1, 2;
+
+-- ④ 外部キー・一意制約（適用後は *_project_company_fkey と projects_id_company_id_key が convalidated = true）
+SELECT conrelid::regclass AS tbl, conname, contype, convalidated, confdeltype, pg_get_constraintdef(oid) AS def
+FROM pg_constraint
+WHERE conrelid IN ('public.estimate_items'::regclass, 'public.line_events'::regclass, 'public.projects'::regclass)
+  AND contype IN ('f', 'u', 'p')
+ORDER BY 1, 2;
+
+-- ⑤ トリガー
+SELECT event_object_table, trigger_name, action_timing, event_manipulation, action_statement
+FROM information_schema.triggers
+WHERE event_object_schema = 'public' AND event_object_table IN ('estimate_items', 'line_events', 'projects')
+ORDER BY 1, 2;
+
+-- ⑥ 食い違っている既存行（適用前に 0 / 0 であること。0 でなければ適用せず、補正を人間が判断する）
+SELECT
+  (SELECT count(*) FROM public.estimate_items i JOIN public.projects p ON p.id = i.project_id
+   WHERE i.company_id IS DISTINCT FROM p.company_id AND i.company_id IS NOT NULL) AS estimate_items_mismatch,
+  (SELECT count(*) FROM public.line_events e JOIN public.projects p ON p.id = e.project_id
+   WHERE e.company_id IS DISTINCT FROM p.company_id AND e.company_id IS NOT NULL) AS line_events_mismatch;
+
+-- ⑦ 参考: company_id が NULL の行（複合外部キーの対象外になる。件数の確認のみ）
+SELECT
+  (SELECT count(*) FROM public.estimate_items WHERE company_id IS NULL) AS estimate_items_null_company,
+  (SELECT count(*) FROM public.line_events WHERE company_id IS NULL AND project_id IS NOT NULL) AS line_events_null_company;
+
+-- ⑧ 履歴
+SELECT version FROM supabase_migrations.schema_migrations WHERE version IN ('20261013000001', '20261013000002');
+```
+
+### 適用手順（人間が実行する）
+
+`supabase db push` は使わない。Claude Code は本番 DB への接続・バックアップ・適用のどれも行わない。
+
+| ファイル | 内容 |
+|---|---|
+| `docs/db/ki-001-project-company-sql-editor-apply.sql` | ガード → migration 本体 → 検証 → 履歴登録 → `NOTIFY pgrst` を 1 トランザクションで実行 |
+| `docs/db/ki-001-project-company-sql-editor-rollback.sql` | 外部キー 2 つ・一意制約の削除 → 履歴 1 行の削除 を 1 トランザクションで実行 |
+
+0. **バックアップ。** 手順 0 と同じ形式で、ターミナル.app から実行する。`projects`・`estimate_items`・`line_events` のデータを含める。
+1. **適用前の確認。** 上の ①〜⑧ を実行して結果を記録する。
+   - ⑥ が 0 / 0 でなければ、ここで止めて相談する。
+2. **適用順序。** 20261013000001（KI-001 の apply）→ 20261013000002 の順に行う。
+   - 2 つは互いに依存しないが、この順に揃える。
+   - アプリはどちらの順でも動く。
+3. **適用。** `ki-001-project-company-sql-editor-apply.sql` の全文を 1 回だけ実行する。
+   - 最後の結果が `history_rows = 1, valid_constraints = 3` なら完了。
+   - エラーが出たら、続けて `ROLLBACK;` だけを実行する。
+   - 書き込みが多い時間を避ける。制約の追加中は 3 テーブルへの書き込みが待たされる。
+   - ロック待ちが 5 秒を超えると、全体が取り消される。
+4. **適用後の確認。** ① と ④ を再実行する。
+   - ① が手順 1 と同じであること。
+   - ④ に複合外部キー 2 つと一意制約があり、`convalidated = true` であること。
+5. **画面での確認。** 見積の追加・編集・並び替え、AI整理タブの「見積に追加」が動くことを見る。
+   - 本番データへの書き込みになるため、人間が行う。
+
+### ロールバック
+
+1. `ki-001-project-company-sql-editor-rollback.sql` の全文を SQL Editor で実行する（人間の承認後）。
+   - アプリは制約に依存しないので、アプリを先に戻す必要はない。
+2. 最後の結果が `history_rows = 0, constraints = 0` なら完了。
+   - 業務データ・RLS・既存の単独の外部キーには触れない。
+   - 戻した後は、直接 INSERT / UPDATE の抜け道が再び開く。
+3. migration ファイルも revert する。

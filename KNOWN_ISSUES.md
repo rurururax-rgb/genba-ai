@@ -7,7 +7,27 @@ Claude Code が実装中に発見した既知の問題を記録するファイ�
 
 ## 未解決
 
-（なし）
+### KI-002: 案件に紐づく他のテーブルでも、他社の案件 ID を直接指定できる
+
+**発見:** 2026-10-10（PR #35 の追加監査）
+**関連:** `supabase/migrations/20261013000002_enforce_project_company_match.sql` / `docs/db/ki-001-link-line-event-on-estimate-add.md`
+
+RLS は行の `company_id` しか確認しない。外部キーの確認は RLS を通らないため、ログイン済みのユーザーは
+PostgREST から `company_id = 自社`、`project_id = 他社の案件` の行を INSERT / UPDATE できる。
+他社のデータは読めないが、他社の案件に自社の行がぶら下がる。他社が案件を物理削除するとカスケードで消え、
+案件 UUID の存在確認にも使える。
+
+- 20261013000002 で対処済み: `estimate_items`・`line_events`（複合外部キー (project_id, company_id)）。
+- 未対処（同じ形の複合外部キーで直せる）: `project_files`、`project_notes`、`ai_summaries`、
+  `estimate_documents`、`schedule_items`、`share_links`、および案件に紐づくその後のテーブル
+  （`cost_ledger_items`・`invoice_documents` など）。
+- 未対処: `estimate_items.group_id` → `estimate_groups` も会社を確認していない。
+- アプリ側: `app/api/ai/chat/confirm-change/route.ts` の `estimate_items` の create / bulk_create は
+  `proposed.project_id` の会社を確かめていない（「RLS が検証する」というコメントは誤り）。
+  20261013000002 の適用後は DB が 23503 で拒否するが、レスポンスは 500 で DB のエラー文を返す。
+  `isActiveProject()` で事前に確かめて 404 を返すように直す。
+
+**対応タイミング:** テーブルごとに食い違いの件数を読み取りで確かめてから、1 テーブルずつ migration を作る。
 
 ---
 
