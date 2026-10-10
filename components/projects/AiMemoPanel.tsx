@@ -199,6 +199,7 @@ export function AiMemoPanel({ projectId }: { projectId: string }) {
   const [editMap,      setEditMap]      = useState<Record<string, string | undefined>>({})
   const [reprocessing, setReprocessing] = useState<Record<string, boolean>>({})
   const [globalAdding, setGlobalAdding] = useState(false)
+  const [addError,     setAddError]     = useState<string | null>(null)
 
   const [openEventId,  setOpenEventId]  = useState<string | null>(null)
   const [unreflecting, setUnreflecting] = useState<Record<string, boolean>>({})
@@ -245,6 +246,14 @@ export function AiMemoPanel({ projectId }: { projectId: string }) {
     setUnassigned(u => apply(u))
   }
 
+  /** 見積追加で案件に紐付いたイベントを「未振り分け」から「この案件」へ移す */
+  function markAssigned(eventId: string, patch: Partial<LineEvent>) {
+    const moved = unassigned.find(e => e.id === eventId)
+    if (!moved) { updateEvent(eventId, patch); return }
+    setUnassigned(u => u.filter(e => e.id !== eventId))
+    setAssigned(a => [{ ...moved, ...patch }, ...a.filter(e => e.id !== eventId)])
+  }
+
   function handleCardClick(eventId: string, term: string, candidate: Candidate) {
     const key = `${eventId}::${term}::${candidate.id}`
     setSelected(p => {
@@ -262,6 +271,9 @@ export function AiMemoPanel({ projectId }: { projectId: string }) {
       byEvent.get(eventId)!.push([key, candidate])
     }
     setGlobalAdding(true)
+    setAddError(null)
+    const doneKeys: string[] = []
+    const errors: string[] = []
     try {
       for (const [eventId, entries] of byEvent) {
         const event = [...assigned, ...unassigned].find(e => e.id === eventId)
@@ -282,11 +294,17 @@ export function AiMemoPanel({ projectId }: { projectId: string }) {
         })
         if (res.ok) {
           setReflected(p => ({ ...p, [eventId]: true }))
-          updateEvent(eventId, { reflected_to_estimate: true })
+          markAssigned(eventId, { reflected_to_estimate: true, project_id: event.project_id ?? projectId })
+          doneKeys.push(...entries.map(([key]) => key))
+        } else {
+          const { error } = (await res.json().catch(() => ({}))) as { error?: string }
+          errors.push(error ?? '見積に追加できませんでした。もう一度お試しください。')
         }
       }
-      setSelected({})
     } finally {
+      // 失敗したイベントの選択は残す（再試行・確認できるように）
+      setSelected(p => { const n = { ...p }; doneKeys.forEach(k => delete n[k]); return n })
+      if (errors.length) setAddError([...new Set(errors)].join('\n'))
       setGlobalAdding(false)
     }
   }
@@ -355,6 +373,13 @@ export function AiMemoPanel({ projectId }: { projectId: string }) {
   return (
     <>
       <div style={{ ...s.container, paddingBottom: totalSelected > 0 ? 104 : 32 }}>
+
+        {addError && (
+          <div role="alert" style={s.errorBanner}>
+            <span style={{ flex: 1, whiteSpace: 'pre-line' as const }}>{addError}</span>
+            <button type="button" onClick={() => setAddError(null)} style={s.errorClose} aria-label="閉じる">×</button>
+          </div>
+        )}
 
         {dateGroups.map(group => (
           <section key={group.key}>
@@ -858,6 +883,16 @@ const s = {
     display: 'flex', flexDirection: 'column' as const, gap: 0,
   },
   empty: { padding: 48, textAlign: 'center' as const },
+  errorBanner: {
+    display: 'flex', alignItems: 'center', gap: 8,
+    margin: '12px 0 0', padding: '8px 4px 8px 12px', borderRadius: 10,
+    background: '#FEF2F2', color: '#B91C1C', border: '1px solid #FECACA',
+    fontSize: 13, lineHeight: 1.5,
+  },
+  errorClose: {
+    minWidth: 44, minHeight: 44, border: 'none', background: 'transparent',
+    color: '#B91C1C', fontSize: 18, cursor: 'pointer',
+  },
 
   dateGroupRow: {
     display: 'flex', alignItems: 'center', gap: 10,
