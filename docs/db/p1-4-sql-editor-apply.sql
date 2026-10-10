@@ -648,11 +648,45 @@ BEGIN
     RAISE EXCEPTION 'P1-4 verify failed: authenticated cannot read cost_ledger_invoices';
   END IF;
 
-  -- 関数の所有者（= 実行時の権限）が請求書・台帳項目に書けること
-  v_fn := to_regprocedure('public.cost_ledger_invoice_insert(uuid, numeric, date, date, text, text, text, text, text, uuid)');
-  IF NOT has_table_privilege((SELECT proowner FROM pg_proc WHERE oid = v_fn), 'public.cost_ledger_invoices', 'SELECT, INSERT, UPDATE, DELETE')
-     OR NOT has_table_privilege((SELECT proowner FROM pg_proc WHERE oid = v_fn), 'public.cost_ledger_items', 'SELECT, UPDATE') THEN
-    RAISE EXCEPTION 'P1-4 verify failed: function owner cannot write cost_ledger_invoices / cost_ledger_items';
+  -- 3つの RPC それぞれの所有者（= SECURITY DEFINER の実行時の権限）が、本体で使う権限を 1 つずつすべて持つこと。
+  -- has_table_privilege に 'SELECT, INSERT' のように複数を渡すと「どれか 1 つ」で true になるため、必ず 1 権限ずつ確かめる。
+  -- FOR UPDATE（行ロック）には UPDATE 権限が要る（insert / update / delete とも台帳項目を、update / delete は請求書もロックする）。
+  -- 欠けている権限をすべて並べて止める（1 つでも欠ければトランザクション全体を取り消す）。
+  SELECT string_agg(format('%s owner=%s lacks %s on %s', req.sig, pg_get_userbyid(f.proowner), req.priv, req.obj),
+                    '; ' ORDER BY req.sig, req.obj, req.priv)
+  INTO v_sig
+  FROM (
+    SELECT fn.sig, 'table' AS kind, 'public.cost_ledger_invoices' AS obj, unnest(fn.invoice_privs) AS priv
+    FROM (VALUES
+      ('public.cost_ledger_invoice_insert(uuid, numeric, date, date, text, text, text, text, text, uuid)', ARRAY['SELECT', 'INSERT']),
+      ('public.cost_ledger_invoice_update(uuid, jsonb)', ARRAY['SELECT', 'UPDATE']),
+      ('public.cost_ledger_invoice_delete(uuid)', ARRAY['SELECT', 'UPDATE', 'DELETE'])
+    ) AS fn(sig, invoice_privs)
+    UNION ALL
+    SELECT fn.sig, c.kind, c.obj, c.priv
+    FROM (VALUES
+      ('public.cost_ledger_invoice_insert(uuid, numeric, date, date, text, text, text, text, text, uuid)'),
+      ('public.cost_ledger_invoice_update(uuid, jsonb)'),
+      ('public.cost_ledger_invoice_delete(uuid)')
+    ) AS fn(sig),
+    (VALUES
+      ('table', 'public.cost_ledger_items', 'SELECT'),
+      ('table', 'public.cost_ledger_items', 'UPDATE'),
+      ('table', 'public.projects', 'SELECT'),
+      ('table', 'public.company_members', 'SELECT'),
+      ('schema', 'public', 'USAGE'),
+      ('schema', 'auth', 'USAGE'),
+      ('function', 'auth.uid()', 'EXECUTE')
+    ) AS c(kind, obj, priv)
+  ) AS req
+  JOIN pg_proc f ON f.oid = to_regprocedure(req.sig)
+  WHERE NOT CASE req.kind
+    WHEN 'table'  THEN has_table_privilege(f.proowner, req.obj, req.priv)
+    WHEN 'schema' THEN has_schema_privilege(f.proowner, req.obj, req.priv)
+    ELSE               has_function_privilege(f.proowner, req.obj, req.priv)
+  END;
+  IF v_sig IS NOT NULL THEN
+    RAISE EXCEPTION 'P1-4 verify failed: function owner lacks privileges: %', v_sig;
   END IF;
 
   -- P1-3 のトリガーは有効なまま
@@ -686,5 +720,6 @@ SELECT
   (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public' AND p.prosecdef
      AND p.proname IN ('cost_ledger_invoice_insert', 'cost_ledger_invoice_update', 'cost_ledger_invoice_delete')) AS definer_rpcs,
+  -- 書き込み権限を 1 つでも持つロールの数（複数の権限を渡すと「どれか 1 つ」で true になる＝ここではその判定が目的）
   (SELECT count(*) FROM unnest(ARRAY['anon', 'authenticated']) r
    WHERE has_table_privilege(r, 'public.cost_ledger_invoices', 'INSERT, UPDATE, DELETE, TRUNCATE')) AS direct_write_roles;

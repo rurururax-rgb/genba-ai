@@ -569,15 +569,25 @@ $$;
 DELETE FROM supabase_migrations.schema_migrations WHERE version = '20261012000001';
 
 DO $verify$
+DECLARE
+  r text;
+  p text;
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
              WHERE n.nspname = 'public' AND p.prosecdef
                AND p.proname IN ('cost_ledger_invoice_insert', 'cost_ledger_invoice_update', 'cost_ledger_invoice_delete')) THEN
     RAISE EXCEPTION 'P1-4 rollback verify failed: RPC is still SECURITY DEFINER';
   END IF;
-  IF NOT has_table_privilege('authenticated', 'public.cost_ledger_invoices', 'INSERT, UPDATE, DELETE') THEN
-    RAISE EXCEPTION 'P1-4 rollback verify failed: authenticated cannot write cost_ledger_invoices';
-  END IF;
+  -- 複数の権限を 1 回で渡すと「どれか 1 つ」で true になるため、1 権限ずつ確かめる
+  FOREACH r IN ARRAY ARRAY['anon', 'authenticated'] LOOP
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+      FOREACH p IN ARRAY ARRAY['INSERT', 'UPDATE', 'DELETE', 'TRUNCATE'] LOOP
+        IF NOT has_table_privilege(r, 'public.cost_ledger_invoices', p) THEN
+          RAISE EXCEPTION 'P1-4 rollback verify failed: % has no % on cost_ledger_invoices', r, p;
+        END IF;
+      END LOOP;
+    END IF;
+  END LOOP;
 END
 $verify$;
 
@@ -589,5 +599,9 @@ SELECT
   (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
    WHERE n.nspname = 'public' AND p.prosecdef
      AND p.proname IN ('cost_ledger_invoice_insert', 'cost_ledger_invoice_update', 'cost_ledger_invoice_delete')) AS definer_rpcs,
+  -- 4 つの書き込み権限をすべて持つロールの数（1 権限ずつ AND で数える）
   (SELECT count(*) FROM unnest(ARRAY['anon', 'authenticated']) r
-   WHERE has_table_privilege(r, 'public.cost_ledger_invoices', 'INSERT, UPDATE, DELETE, TRUNCATE')) AS direct_write_roles;
+   WHERE has_table_privilege(r, 'public.cost_ledger_invoices', 'INSERT')
+     AND has_table_privilege(r, 'public.cost_ledger_invoices', 'UPDATE')
+     AND has_table_privilege(r, 'public.cost_ledger_invoices', 'DELETE')
+     AND has_table_privilege(r, 'public.cost_ledger_invoices', 'TRUNCATE')) AS direct_write_roles;

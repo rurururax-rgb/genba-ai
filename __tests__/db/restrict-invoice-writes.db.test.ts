@@ -6,8 +6,11 @@
  *   実際のロール（anon / authenticated / service_role）に SET ROLE して権限・RLS・関数の動作を確かめる。
  *   本番・Preview の DB には接続しない。この migration は本番に未適用（人間の承認後に適用する）。
  *
- * 関数の所有者はテストでは superuser（RLS も権限も素通りする最悪の条件）。
+ * 関数の所有者は、ほとんどのテストで superuser（RLS も権限も素通りする最悪の条件）。
  * それでも他社のデータに届かないことを確かめる＝関数内の明示的な所属確認だけで分離できていることの確認になる。
+ * SQL Editor 用スクリプトのテストでは、所有者を superuser でない一般ロールにもして確かめる。
+ * - 必要な権限が 1 つでも欠ければ、適用は全体を取り消す。
+ * - 必要な権限だけを持つ所有者なら動く。
  */
 
 import { randomUUID } from 'node:crypto'
@@ -827,4 +830,169 @@ describe('SQL Editor 用スクリプト（1 トランザクションでの適用
     expect(await runScript(c, APPLY)).toEqual(APPLIED)
     await c.end()
   })
+
+  // ── RPC の所有者の権限（superuser ではない所有者で確かめる） ──
+  // has_table_privilege に複数の権限を渡すと「どれか 1 つ」で true になるため、1 権限ずつ確かめていること
+
+  const OWNER = 'p14_owner'
+  const RPCS = [
+    'public.cost_ledger_invoice_insert(uuid, numeric, date, date, text, text, text, text, text, uuid)',
+    'public.cost_ledger_invoice_update(uuid, jsonb)',
+    'public.cost_ledger_invoice_delete(uuid)',
+  ]
+  /** 本体で使う権限（1 行 = 1 権限）。label は検証エラーの「lacks <権限> on <対象>」の部分 */
+  const OWNER_GRANTS = [
+    { label: 'SELECT on public.cost_ledger_invoices', sql: `GRANT SELECT ON public.cost_ledger_invoices TO ${OWNER}` },
+    { label: 'INSERT on public.cost_ledger_invoices', sql: `GRANT INSERT ON public.cost_ledger_invoices TO ${OWNER}` },
+    { label: 'UPDATE on public.cost_ledger_invoices', sql: `GRANT UPDATE ON public.cost_ledger_invoices TO ${OWNER}` },
+    { label: 'DELETE on public.cost_ledger_invoices', sql: `GRANT DELETE ON public.cost_ledger_invoices TO ${OWNER}` },
+    { label: 'SELECT on public.cost_ledger_items', sql: `GRANT SELECT ON public.cost_ledger_items TO ${OWNER}` },
+    { label: 'UPDATE on public.cost_ledger_items', sql: `GRANT UPDATE ON public.cost_ledger_items TO ${OWNER}` },
+    { label: 'SELECT on public.projects', sql: `GRANT SELECT ON public.projects TO ${OWNER}` },
+    { label: 'SELECT on public.company_members', sql: `GRANT SELECT ON public.company_members TO ${OWNER}` },
+    { label: 'USAGE on public', sql: `GRANT USAGE ON SCHEMA public TO ${OWNER}` },
+    { label: 'USAGE on auth', sql: `GRANT USAGE ON SCHEMA auth TO ${OWNER}` },
+    { label: 'EXECUTE on auth.uid()', sql: `GRANT EXECUTE ON FUNCTION auth.uid() TO ${OWNER}` },
+  ]
+
+  /**
+   * 3 つの RPC の所有者を、superuser でも BYPASSRLS でもない一般ロールにした DB。
+   * grants に挙げた権限だけを与える（public・auth.uid() の PUBLIC 向け既定権限も外し、3 ロールにだけ残す）。
+   */
+  async function dbWithOwner(grants: string[]) {
+    const c = await freshDb()
+    await c.query(`DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${OWNER}') THEN
+        CREATE ROLE ${OWNER} NOLOGIN NOSUPERUSER NOBYPASSRLS;
+      END IF;
+    END $$`)
+    await c.query(`
+      REVOKE USAGE ON SCHEMA public FROM PUBLIC;
+      REVOKE EXECUTE ON FUNCTION auth.uid() FROM PUBLIC;
+      GRANT EXECUTE ON FUNCTION auth.uid() TO anon, authenticated, service_role;`)
+    for (const fn of RPCS) await c.query(`ALTER FUNCTION ${fn} OWNER TO ${OWNER}`)
+    for (const sql of grants) await c.query(sql)
+    const { rows } = await c.query(`
+      SELECT r.rolsuper, r.rolbypassrls, count(*)::int AS rpcs FROM pg_proc p JOIN pg_roles r ON r.oid = p.proowner
+      WHERE p.proname LIKE 'cost_ledger_invoice_%' GROUP BY 1, 2`)
+    expect(rows).toEqual([{ rolsuper: false, rolbypassrls: false, rpcs: 3 }])
+    return c
+  }
+
+  it('所有者に必要な権限が 1 つでも欠けていれば、適用スクリプトは全体を取り消して止まる（1 権限ずつ）', async () => {
+    for (const missing of OWNER_GRANTS) {
+      const c = await dbWithOwner(OWNER_GRANTS.filter(g => g !== missing).map(g => g.sql))
+      const fnBefore = await fnSources(c)
+      const aclBefore = await invoiceAcl(c)
+      const e = await runScriptExpectingError(c, APPLY)
+      expect(e.message, missing.label).toMatch(/^P1-4 verify failed: function owner lacks privileges: /)
+      expect(e.message, missing.label).toContain(`owner=${OWNER} lacks ${missing.label}`)
+      // 欠けた権限だけが、それを使う RPC の数だけ挙がる（請求書の INSERT は登録、UPDATE は編集と削除、DELETE は削除だけ）
+      const usedBy: Record<string, number> = {
+        'INSERT on public.cost_ledger_invoices': 1,
+        'UPDATE on public.cost_ledger_invoices': 2,
+        'DELETE on public.cost_ledger_invoices': 1,
+      }
+      expect(e.message.match(/ owner=p14_owner lacks /g), missing.label).toHaveLength(usedBy[missing.label] ?? 3)
+      expect(await fnSources(c), missing.label).toEqual(fnBefore)
+      expect(await invoiceAcl(c), missing.label).toEqual(aclBefore)
+      expect(await history(c), missing.label).toHaveLength(0)
+      expect(await state(c), missing.label).toEqual(UNCHANGED)
+      await c.end()
+    }
+  }, 180_000)
+
+  it('請求書テーブルに SELECT しか無い所有者（複数権限をまとめて渡す確認なら通ってしまう形）でも止まる', async () => {
+    const c = await dbWithOwner(OWNER_GRANTS.filter(g => !/^(INSERT|UPDATE|DELETE) on public\.cost_ledger_invoices$/.test(g.label)).map(g => g.sql))
+    // 旧来の確認（OR）なら true になってしまうことを、この DB で確かめておく
+    const { rows: [old] } = await c.query(
+      `SELECT has_table_privilege('${OWNER}', 'public.cost_ledger_invoices', 'SELECT, INSERT, UPDATE, DELETE') AS v`)
+    expect(old.v).toBe(true)
+    const e = await runScriptExpectingError(c, APPLY)
+    expect(e.message).toMatch(/^P1-4 verify failed: function owner lacks privileges: /)
+    for (const [fn, priv] of [
+      ['cost_ledger_invoice_insert', 'INSERT'], ['cost_ledger_invoice_update', 'UPDATE'],
+      ['cost_ledger_invoice_delete', 'UPDATE'], ['cost_ledger_invoice_delete', 'DELETE'],
+    ]) {
+      expect(e.message).toMatch(new RegExp(`public\\.${fn}\\([^)]*\\) owner=${OWNER} lacks ${priv} on public\\.cost_ledger_invoices`))
+    }
+    expect(e.message.match(/ owner=p14_owner lacks /g)).toHaveLength(4)
+    expect(await history(c)).toHaveLength(0)
+    expect(await state(c)).toEqual(UNCHANGED)
+    await c.end()
+  }, 60_000)
+
+  it('手順書の事前確認 SQL（所有者の権限）は適用スクリプトと同じ基準: 欠けた権限を 1 行ずつ返し、揃っていれば 0 行', async () => {
+    const doc = readFileSync(path.join(DOCS, 'p1-4-restrict-cost-ledger-invoice-writes.md'), 'utf8')
+    const start = doc.indexOf('-- 3つの RPC それぞれの所有者')
+    const end = doc.indexOf('ORDER BY 1, 3, 4;', start)
+    expect(start).toBeGreaterThan(0)
+    expect(end).toBeGreaterThan(start)
+    const precheck = doc.slice(start, end + 'ORDER BY 1, 3, 4;'.length)
+
+    const ok = await dbWithOwner(OWNER_GRANTS.map(g => g.sql))
+    expect((await ok.query(precheck)).rows).toEqual([])
+    await ok.end()
+
+    const c = await dbWithOwner(OWNER_GRANTS.filter(g => !/^(INSERT|UPDATE|DELETE) on public\.cost_ledger_invoices$/.test(g.label)).map(g => g.sql))
+    const { rows } = await c.query(precheck)
+    expect(rows.map(r => [r.sig.replace(/\(.*$/, ''), r.owner, r.obj, r.priv])).toEqual([
+      ['public.cost_ledger_invoice_delete', OWNER, 'public.cost_ledger_invoices', 'DELETE'],
+      ['public.cost_ledger_invoice_delete', OWNER, 'public.cost_ledger_invoices', 'UPDATE'],
+      ['public.cost_ledger_invoice_insert', OWNER, 'public.cost_ledger_invoices', 'INSERT'],
+      ['public.cost_ledger_invoice_update', OWNER, 'public.cost_ledger_invoices', 'UPDATE'],
+    ])
+    await c.end()
+  }, 60_000)
+
+  it('必要な権限だけを持つ一般ロールが所有者でも適用でき、自社の登録・編集・削除と他社の分離が動く', async () => {
+    const c = await dbWithOwner(OWNER_GRANTS.map(g => g.sql))
+    expect(await runScript(c, APPLY)).toEqual(APPLIED)
+    const { rows: owners } = await c.query(
+      "SELECT DISTINCT pg_get_userbyid(proowner) AS owner FROM pg_proc WHERE proname LIKE 'cost_ledger_invoice_%' AND prosecdef")
+    expect(owners).toEqual([{ owner: OWNER }])
+
+    const [companyA, companyB, userX, userY] = [randomUUID(), randomUUID(), randomUUID(), randomUUID()]
+    await c.query('INSERT INTO auth.users (id) VALUES ($1), ($2)', [userX, userY])
+    await c.query('INSERT INTO companies (id, name) VALUES ($1, $2), ($3, $4)', [companyA, 'A', companyB, 'B'])
+    await c.query('INSERT INTO company_members (company_id, user_id) VALUES ($1, $2), ($3, $4)', [companyA, userX, companyB, userY])
+    const { rows: [project] } = await c.query('INSERT INTO projects (company_id) VALUES ($1) RETURNING id', [companyA])
+    const { rows: [item] } = await c.query(
+      "INSERT INTO cost_ledger_items (project_id, company_id, name) VALUES ($1, $2, 'x') RETURNING id", [project.id, companyA])
+    const sum = async () => (await c.query(`
+      SELECT i.actual_cost::text AS actual, (SELECT count(*)::int FROM cost_ledger_invoices v WHERE v.cost_ledger_item_id = i.id) AS n,
+             i.actual_cost IS NOT DISTINCT FROM (SELECT sum(v.amount) FROM cost_ledger_invoices v WHERE v.cost_ledger_item_id = i.id) AS ok
+      FROM cost_ledger_items i WHERE i.id = $1`, [item.id])).rows[0]
+
+    const u = await server.connect(c.database!)
+    const inserted = await as(u, userX, () => rpcInsert(u, item.id, 12000))
+    const second = await as(u, userX, () => rpcInsert(u, item.id, 3000))
+    expect(await sum()).toEqual({ actual: '15000', n: 2, ok: true })
+    await as(u, userX, () => rpcUpdate(u, inserted.invoice.id, { amount: 10000 }))
+    expect(await sum()).toEqual({ actual: '13000', n: 2, ok: true })
+    await as(u, userX, () => rpcDelete(u, second.invoice.id))
+    expect(await sum()).toEqual({ actual: '10000', n: 1, ok: true })
+
+    // 他社のユーザーは登録・編集・削除のどれもできない（CL404・何も変わらない）
+    for (const call of <Call[]>[
+      () => rpcInsert(u, item.id, 1),
+      () => rpcUpdate(u, inserted.invoice.id, { amount: 1 }),
+      () => rpcDelete(u, inserted.invoice.id),
+    ]) {
+      expect((await pgError(as(u, userY, call))).code).toBe('CL404')
+    }
+    expect(await sum()).toEqual({ actual: '10000', n: 1, ok: true })
+
+    // 直接の書き込みは権限で拒否される
+    for (const sql of [
+      `INSERT INTO cost_ledger_invoices (cost_ledger_item_id, project_id, amount) VALUES ('${item.id}', '${project.id}', 1)`,
+      'UPDATE cost_ledger_invoices SET amount = 1',
+      'DELETE FROM cost_ledger_invoices',
+    ]) {
+      expect((await pgError(as(u, userX, () => u.query(sql)))).code).toBe('42501')
+    }
+    expect(await sum()).toEqual({ actual: '10000', n: 1, ok: true })
+    await u.end()
+    await c.end()
+  }, 60_000)
 })

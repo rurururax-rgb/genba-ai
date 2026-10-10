@@ -61,8 +61,12 @@ DEFINER 関数は所有者の権限で動き、RLS が効かない。そのた�
 - `search_path = ''` に固定し、すべて schema 修飾で参照する。一時テーブルで同名の表を作っても影響しない（テストで確認）。
 - EXECUTE は authenticated のみ。PUBLIC・anon・service_role には付けない。
 
-隔離 DB のテストは関数の所有者を superuser（RLS も権限も素通り）にして行っており、所有者にかかわらず
-関数内の確認だけで分離できていることを確かめている。
+隔離 DB のテストは、関数の所有者を 2 通りにして行っている。
+
+- superuser（RLS も権限も素通り）。所有者にかかわらず、関数内の確認だけで分離できていることを確かめる。
+- 必要な権限だけを持つ一般ロール（superuser でも BYPASSRLS でもない）。
+  この所有者でも登録・編集・削除と他社分離が動くことを確かめる。
+  さらに、権限を 1 つ欠かした所有者では、適用スクリプトが全体を取り消して止まることを確かめる。
 
 ### 同時実行・P1-3
 
@@ -172,12 +176,49 @@ WHERE attrelid = 'public.cost_ledger_invoices'::regclass AND attacl IS NOT NULL;
 SELECT tablename, policyname, cmd, roles::text, qual, with_check FROM pg_policies
 WHERE schemaname = 'public' AND tablename IN ('cost_ledger_invoices', 'cost_ledger_items') ORDER BY 1, 2;
 
--- 関数の所有者がテーブルを読み書きできること（期待値: すべて true）
-SELECT pg_get_userbyid(p.proowner) AS owner,
-       has_table_privilege(p.proowner, 'public.cost_ledger_invoices', 'SELECT, INSERT, UPDATE, DELETE') AS invoices_rw,
-       has_table_privilege(p.proowner, 'public.cost_ledger_items', 'SELECT, UPDATE') AS items_rw,
-       has_table_privilege(p.proowner, 'public.company_members', 'SELECT') AS members_r
-FROM pg_proc p WHERE p.oid = 'public.cost_ledger_invoice_delete(uuid)'::regprocedure;
+-- 3つの RPC それぞれの所有者が、本体で使う権限を 1 つずつすべて持つこと
+-- 期待値: 0 行（1 行でも出たら適用しない。適用スクリプトの検証も同じ条件で全体を取り消す）
+-- ※ has_table_privilege に 'SELECT, INSERT' のように複数を渡すと「どれか 1 つ」で true になるので、必ず 1 権限ずつ確かめる
+--   FOR UPDATE（行ロック）には UPDATE 権限が要る
+-- ※ RPC が 3 つ揃っていないと行が出ないため、上の rpc_count = 3 と合わせて判断する
+SELECT req.sig, pg_get_userbyid(f.proowner) AS owner, req.obj, req.priv
+FROM (
+  SELECT fn.sig, 'table' AS kind, 'public.cost_ledger_invoices' AS obj, unnest(fn.invoice_privs) AS priv
+  FROM (VALUES
+    ('public.cost_ledger_invoice_insert(uuid, numeric, date, date, text, text, text, text, text, uuid)', ARRAY['SELECT', 'INSERT']),
+    ('public.cost_ledger_invoice_update(uuid, jsonb)', ARRAY['SELECT', 'UPDATE']),
+    ('public.cost_ledger_invoice_delete(uuid)', ARRAY['SELECT', 'UPDATE', 'DELETE'])
+  ) AS fn(sig, invoice_privs)
+  UNION ALL
+  SELECT fn.sig, c.kind, c.obj, c.priv
+  FROM (VALUES
+    ('public.cost_ledger_invoice_insert(uuid, numeric, date, date, text, text, text, text, text, uuid)'),
+    ('public.cost_ledger_invoice_update(uuid, jsonb)'),
+    ('public.cost_ledger_invoice_delete(uuid)')
+  ) AS fn(sig),
+  (VALUES
+    ('table', 'public.cost_ledger_items', 'SELECT'),
+    ('table', 'public.cost_ledger_items', 'UPDATE'),
+    ('table', 'public.projects', 'SELECT'),
+    ('table', 'public.company_members', 'SELECT'),
+    ('schema', 'public', 'USAGE'),
+    ('schema', 'auth', 'USAGE'),
+    ('function', 'auth.uid()', 'EXECUTE')
+  ) AS c(kind, obj, priv)
+) AS req
+JOIN pg_proc f ON f.oid = to_regprocedure(req.sig)
+WHERE NOT CASE req.kind
+  WHEN 'table'  THEN has_table_privilege(f.proowner, req.obj, req.priv)
+  WHEN 'schema' THEN has_schema_privilege(f.proowner, req.obj, req.priv)
+  ELSE               has_function_privilege(f.proowner, req.obj, req.priv)
+END
+ORDER BY 1, 3, 4;
+
+-- 参考: RPC の所有者（3 つとも記録しておく）
+SELECT p.oid::regprocedure AS fn, pg_get_userbyid(p.proowner) AS owner
+FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = 'public' AND p.proname IN ('cost_ledger_invoice_insert', 'cost_ledger_invoice_update', 'cost_ledger_invoice_delete')
+ORDER BY 1;
 
 -- 参考: 請求書があるのに actual_cost が合計と違う既存行（適用しても修正されない。P1-3 適用後は 0 件の想定）
 SELECT count(*) FROM public.cost_ledger_items i
@@ -210,7 +251,14 @@ WHERE i.deleted_at IS NULL
   - EXECUTE 権限が想定と違う。
   - 書き込み権限が残っている。
   - authenticated が SELECT できない。
-  - 関数の所有者がテーブルを読み書きできない。
+  - 3 つの RPC のどれかの所有者に、本体で使う権限が 1 つでも欠けている。
+    権限は 1 つずつ確かめる。欠けたものは「関数・所有者・権限・対象」の形ですべてエラーに並べる。
+    対象は次のとおり。
+    - `cost_ledger_invoices`: SELECT。登録は INSERT、編集は UPDATE、削除は UPDATE と DELETE も
+    - `cost_ledger_items`: SELECT と UPDATE
+    - `projects`・`company_members`: SELECT
+    - schema `public`・`auth`: USAGE
+    - `auth.uid()`: EXECUTE
   - P1-3 のトリガーが無効。
 
 ### 3. 適用後の確認（読み取りのみ）
