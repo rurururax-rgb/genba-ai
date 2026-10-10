@@ -125,6 +125,36 @@ export function parseInvoiceRequest(body: unknown): Parsed {
   }
 }
 
+/** PATCH /api/cost-ledger/invoices/[invoiceId] で変更できる列（RPC cost_ledger_invoice_update と同じ） */
+export type InvoicePatch = Partial<Pick<InvoiceRequest, 'amount' | 'invoice_date' | 'payment_date' | 'note'>>
+
+/**
+ * 請求書の変更内容を検証する。含まれるキーだけを変更する（null は「空にする」）。
+ * それ以外のキー（台帳項目の付け替え・source・画像ハッシュ等）は無視し、RPC には送らない。
+ */
+export function parseInvoicePatch(body: unknown): { ok: true; value: InvoicePatch } | { ok: false; error: string } {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { ok: false, error: 'Invalid request' }
+  const b = body as Record<string, unknown>
+  const patch: InvoicePatch = {}
+  if (b.amount !== undefined) {
+    if (!isInvoiceAmount(b.amount)) return { ok: false, error: '金額を正しく入力してください' }
+    patch.amount = b.amount
+  }
+  for (const key of ['invoice_date', 'payment_date'] as const) {
+    if (b[key] === undefined) continue
+    const d = optionalDate(b[key])
+    if (d === undefined) return { ok: false, error: '日付の形式が正しくありません' }
+    patch[key] = d
+  }
+  if (b.note !== undefined) {
+    const note = optionalText(b.note, MAX_NOTE)
+    if (note === undefined) return { ok: false, error: 'Invalid request' }
+    patch.note = note
+  }
+  if (Object.keys(patch).length === 0) return { ok: false, error: '更新するフィールドがありません' }
+  return { ok: true, value: patch }
+}
+
 // ── 同じ登録操作の再送の判定 ─────────────────────────────────
 
 /** idempotency_key で見つかった保存済みの行（比較に必要な列） */

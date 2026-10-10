@@ -4,8 +4,17 @@ import {
   actualCostMatchesInvoices, findSimilarInvoices, isUuid, parseInvoiceRequest, sameInvoiceContent,
   type ExistingInvoice, type InvoiceRequest, type StoredInvoice,
 } from '@/lib/cost-ledger/invoice-dedupe'
+import { mapCostLedgerDbError, toNumberOrNull } from '@/lib/cost-ledger/rpc-errors'
 
 type ServerClient = Awaited<ReturnType<typeof getServerClient>>
+
+/** RPC cost_ledger_invoice_insert / update の戻り値 */
+type RpcInvoiceResult = {
+  invoice: Record<string, unknown>
+  item_id: string
+  actual_cost: number | string | null
+  invoice_count: number
+}
 
 type Params = { params: Promise<{ id: string }> }
 
@@ -40,8 +49,10 @@ export async function GET(_req: NextRequest, { params }: Params) {
 //   - document_sha256 … 同じ案件に同じ画像の OCR 登録は1件まで（別の台帳項目でも拒否）
 //   - OCR 登録で請求書番号・業者名・金額・請求日が以前の請求書と似ている場合は確認を求める
 //       （confirm_similar: true で登録できる。ハッシュの一意制約はすり抜けられない）
+// 登録と actual_cost の再集計は RPC cost_ledger_invoice_insert（migration 20261010000002）で
+// 1トランザクションに行う。「似ている請求書」の確認と再送の判定はこの API で行う。
 // project_id は本文から受け取らず、親の台帳項目から取得する。
-// 応答に DB のエラー文は含めない。
+// 応答に DB のエラー文は含めない（SQLSTATE を lib/cost-ledger/rpc-errors で変換する）。
 // ─────────────────────────────────────────────
 
 const INVOICE_COLUMNS =
@@ -159,24 +170,21 @@ export async function POST(req: NextRequest, { params }: Params) {
     }
   }
 
-  // ── 書き込み ──
-  const { data: invoice, error } = await supabase
-    .from('cost_ledger_invoices')
-    .insert({
-      cost_ledger_item_id: itemId,
-      project_id:      projectId,
-      amount:          body.amount,
-      invoice_date:    body.invoice_date,
-      payment_date:    body.payment_date,
-      note:            body.note,
-      source:          body.source,
-      vendor_name:     body.vendor_name,
-      invoice_number:  body.invoice_number,
-      document_sha256: body.document_sha256,
-      idempotency_key: body.idempotency_key,
-    })
-    .select(INVOICE_COLUMNS)
-    .single()
+  // ── 書き込み（RPC: 請求書の登録と actual_cost の再集計を1トランザクションで行う） ──
+  // 親の台帳項目を FOR UPDATE でロックするため、同じ項目への同時操作は直列化される。
+  // 失敗すれば登録も再集計も行われない（「請求は保存済みだが原価は古い」状態にならない）
+  const { data: result, error } = await supabase.rpc('cost_ledger_invoice_insert', {
+    p_item_id:         itemId,
+    p_amount:          body.amount,
+    p_invoice_date:    body.invoice_date,
+    p_payment_date:    body.payment_date,
+    p_note:            body.note,
+    p_source:          body.source,
+    p_vendor_name:     body.vendor_name,
+    p_invoice_number:  body.invoice_number,
+    p_document_sha256: body.document_sha256,
+    p_idempotency_key: body.idempotency_key,
+  })
 
   if (error) {
     if (error.code === '23505') {
@@ -190,20 +198,18 @@ export async function POST(req: NextRequest, { params }: Params) {
         if (dup) return duplicateDocument(dup)
       }
       // 既存行が見えない（他社のキーと衝突した等）。中身は返さない
-      return NextResponse.json({ error: '登録できませんでした。画面を再読み込みしてください。', code: 'conflict' }, { status: 409 })
     }
     console.error('[cost-ledger invoices POST]', error.code)
-    if (error.code === '23514') return NextResponse.json({ error: '入力内容を確認してください' }, { status: 400 })
-    return NextResponse.json({ error: '登録できませんでした。もう一度お試しください。' }, { status: 500 })
+    const mapped = mapCostLedgerDbError(error, 'Item not found or no access')
+    return NextResponse.json(mapped.body, { status: mapped.status })
   }
 
-  // 親の actual_cost を再集計。失敗しても請求は保存済みなので「登録失敗」にはしない
-  const sync = await recalcActualCost(supabase, itemId)
+  const saved = result as RpcInvoiceResult
   return NextResponse.json({
-    invoice,
-    newActualCost: sync.ok ? sync.total : null,
-    replayed: false,
-    synced: sync.ok,
+    invoice:       saved.invoice,
+    newActualCost: toNumberOrNull(saved.actual_cost),
+    replayed:      false,
+    synced:        true,
   })
 }
 
@@ -262,45 +268,4 @@ async function readActualCostConsistency(
   const amounts = (rows ?? []).map((r: { amount: number | string | null }) => r.amount)
   if (!actualCostMatchesInvoices(current.actual_cost as number | null, amounts)) return { ok: false }
   return { ok: true, actualCost: Number(current.actual_cost) }
-}
-
-/** 内訳合計で actual_cost を更新する。読み取り・更新のどちらかが失敗したら ok: false */
-async function recalcActualCost(supabase: ServerClient, itemId: string): Promise<{ ok: true; total: number } | { ok: false }> {
-  const { data: rows, error } = await supabase
-    .from('cost_ledger_invoices')
-    .select('amount')
-    .eq('cost_ledger_item_id', itemId)
-  if (error) return { ok: false }
-  const total = (rows ?? []).reduce((s: number, r: { amount: number | null }) => s + Number(r.amount ?? 0), 0)
-  const { data: updated, error: upErr } = await supabase
-    .from('cost_ledger_items')
-    .update({ actual_cost: total, updated_at: new Date().toISOString() })
-    .eq('id', itemId)
-    .select('id')
-  if (upErr || updated?.length !== 1) return { ok: false }
-  return { ok: true, total }
-}
-
-// ─────────────────────────────────────────────
-// ヘルパー: 内訳合計を集計して actual_cost を更新
-// ─────────────────────────────────────────────
-
-export async function syncActualCost(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  supabase: any,
-  itemId: string,
-): Promise<number> {
-  const { data: rows } = await supabase
-    .from('cost_ledger_invoices')
-    .select('amount')
-    .eq('cost_ledger_item_id', itemId)
-
-  const total = (rows ?? []).reduce((s: number, r: { amount: number }) => s + (r.amount ?? 0), 0)
-
-  await supabase
-    .from('cost_ledger_items')
-    .update({ actual_cost: total, updated_at: new Date().toISOString() })
-    .eq('id', itemId)
-
-  return total
 }

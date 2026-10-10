@@ -2,11 +2,16 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { NextRequest } from 'next/server'
 
 /**
- * POST /api/cost-ledger/[id]/invoices の二重登録防止（P1-1 / PR #30）。
+ * 業者請求書 API（POST /api/cost-ledger/[id]/invoices・PATCH/DELETE /api/cost-ledger/invoices/[invoiceId]）と、
+ * 実績原価（actual_cost）の直接編集の保護（PATCH /api/cost-ledger/[id]・GET /api/cost-ledger の invoice_count）。
+ * 二重登録防止（P1-1 / PR #30）と RPC への切り替え（P1-3 / PR #32）。
  * Supabase はメモリ上の偽クライアントで置き換える。
  *   - RLS: cost_ledger_items / projects は自社 company_id の行、cost_ledger_invoices は親の台帳項目が見える行だけ
  *   - migration 20261010000001 の一意制約（同じ案件 × 同じ画像の OCR、idempotency_key）と CHECK 制約を再現する
- * 実 DB の RLS・制約そのものの検証ではない（それは migration の PGlite 検証と本番適用後の確認 SQL で行った）。
+ *   - rpc(): migration 20261010000002 の cost_ledger_invoice_insert / update / delete を再現する
+ *     （書き込みと再集計は一体。エラー時は何も変わらない）
+ *   - dbLockTrigger: migration 20261011000001（未適用）のトリガーを再現する
+ * 実 DB の RLS・制約・関数そのものの検証ではない（それは __tests__/db の隔離 DB 検証で行う）。
  */
 
 type Row = Record<string, unknown>
@@ -33,8 +38,13 @@ const SHA_B = 'b'.repeat(64)
 
 let currentUser: string | null
 let tables: Record<string, Row[]>
-let failNextActualCostUpdate: boolean
+/** 次の rpc() を指定の SQLSTATE で失敗させる（何も保存しない。実 DB のトランザクション取り消しと同じ） */
+let failNextRpc: string | null
 let failInvoiceRead: boolean
+/** 次の請求書件数の確認を 0 件と答える（アプリの確認と書き込みの間に請求書が登録された競合を再現） */
+let missNextCount: boolean
+/** migration 20261011000001 のトリガー（請求書がある項目の actual_cost を合計以外にさせない）を有効にする */
+let dbLockTrigger: boolean
 /** 次の idempotency_key での検索を空にする（INSERT 前の確認をすり抜けた同時送信を再現し、23505 からの再取得を通す） */
 let missNextKeyLookup: boolean
 
@@ -64,9 +74,11 @@ function seed() {
       },
     ],
   }
-  failNextActualCostUpdate = false
+  failNextRpc = null
   failInvoiceRead = false
   missNextKeyLookup = false
+  missNextCount = false
+  dbLockTrigger = false
 }
 
 function myCompanies() {
@@ -118,6 +130,7 @@ function from(table: string) {
   let payload: Row | null = null
   let writeResult: { rows: Row[]; error: { code: string; message: string } | null } | null = null
   let byKey = false
+  let headCount = false
 
   const doWrite = () => {
     if (writeResult) return writeResult
@@ -133,11 +146,15 @@ function from(table: string) {
       return (writeResult = { rows: [inserted], error: null })
     }
     // update
-    if (table === 'cost_ledger_items' && 'actual_cost' in payload! && failNextActualCostUpdate) {
-      failNextActualCostUpdate = false
-      return (writeResult = { rows: [], error: { code: '57014', message: 'canceling statement due to statement timeout' } })
-    }
     const rows = visible(table).filter(r => filters.every(f => f(r)))
+    if (table === 'cost_ledger_items' && dbLockTrigger && 'actual_cost' in payload!) {
+      for (const r of rows) {
+        const sum = invoiceSum(r.id as string)
+        if (sum.count > 0 && Number(payload!.actual_cost) !== sum.total) {
+          return (writeResult = { rows: [], error: { code: 'CL423', message: 'actual_cost_locked' } })
+        }
+      }
+    }
     for (const r of rows) Object.assign(r, payload)
     return (writeResult = { rows, error: null })
   }
@@ -147,7 +164,14 @@ function from(table: string) {
       const w = doWrite()
       return { data: w.error ? null : w.rows.map(r => pick(r, cols)), error: w.error }
     }
-    if (table === 'cost_ledger_invoices' && failInvoiceRead) return { data: null, error: { code: '57014', message: 'timeout' } }
+    if (table === 'cost_ledger_invoices' && failInvoiceRead) return { data: null, error: { code: '57014', message: 'timeout' }, count: null }
+    if (headCount) {
+      if (table === 'cost_ledger_invoices' && missNextCount) {
+        missNextCount = false
+        return { data: null, error: null, count: 0 }
+      }
+      return { data: null, error: null, count: visible(table).filter(r => filters.every(f => f(r))).length }
+    }
     if (table === 'cost_ledger_invoices' && byKey && missNextKeyLookup) {
       missNextKeyLookup = false
       return { data: [], error: null }
@@ -162,7 +186,11 @@ function from(table: string) {
     return Promise.resolve({ data: null, error: { code: 'PGRST116', message: 'not exactly one row' } })
   }
   const q = {
-    select: (c?: string) => { cols = c ?? null; return q },
+    select: (c?: string, opts?: { count?: string; head?: boolean }) => {
+      if (mode === 'select' && opts?.head) headCount = true
+      cols = c ?? null
+      return q
+    },
     eq: (col: string, v: unknown) => { if (col === 'idempotency_key') byKey = true; filters.push(r => r[col] === v); return q },
     is: (col: string, v: unknown) => { filters.push(r => (r[col] ?? null) === v); return q },
     in: (col: string, vs: unknown[]) => { filters.push(r => vs.includes(r[col])); return q },
@@ -176,14 +204,102 @@ function from(table: string) {
   return q
 }
 
+function invoiceSum(itemId: string) {
+  const rows = tables.cost_ledger_invoices.filter(r => r.cost_ledger_item_id === itemId)
+  return { count: rows.length, total: rows.reduce((s, r) => s + Number(r.amount), 0) }
+}
+
+/** RPC が返す請求書の列（画像ハッシュ・idempotency_key・project_id は返さない） */
+const RPC_INVOICE_COLUMNS = 'id, cost_ledger_item_id, amount, invoice_date, payment_date, note, source, vendor_name, invoice_number, created_at'
+
+type RpcError = { code: string; message: string; details?: string; hint?: string }
+const rpcFail = (code: string, message: string) => ({ data: null, error: { code, message, details: 'internal detail: relation cost_ledger_items', hint: null } as RpcError & { hint: null } })
+
+/** 親の台帳項目（自社・未削除・案件も未削除）。無ければ null（CL404） */
+function lockableItem(itemId: unknown) {
+  const item = visible('cost_ledger_items').find(i => i.id === itemId && i.deleted_at == null)
+  if (!item) return null
+  const project = visible('projects').find(p => p.id === item.project_id && p.deleted_at == null && p.company_id === item.company_id)
+  return project ? item : null
+}
+
+/** 再集計（RPC と同じく、0件なら NULL） */
+function recalc(item: Row) {
+  const sum = invoiceSum(item.id as string)
+  item.actual_cost = sum.count === 0 ? null : sum.total
+  return { actual_cost: item.actual_cost, invoice_count: sum.count }
+}
+
+const rpcCalls: string[] = []
+
+/** migration 20261010000002 の3関数（書き込みと再集計は一体。失敗時は何も変えない） */
+async function rpc(fn: string, args: Row) {
+  rpcCalls.push(fn)
+  if (!currentUser) return rpcFail('CL401', 'unauthenticated')
+  if (failNextRpc) {
+    const code = failNextRpc
+    failNextRpc = null
+    return rpcFail(code, 'canceling statement due to lock timeout')
+  }
+  const trim = (v: unknown) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null)
+
+  if (fn === 'cost_ledger_invoice_insert') {
+    const amount = args.p_amount as number
+    const source = (args.p_source as string | null) ?? 'manual'
+    if (typeof amount !== 'number' || amount === 0 || Math.abs(amount) >= 1e12 || !['ocr', 'manual'].includes(source)) {
+      return rpcFail('CL400', 'invalid_input')
+    }
+    const item = lockableItem(args.p_item_id)
+    if (!item) return rpcFail('CL404', 'not_found')
+    const row: Row = {
+      cost_ledger_item_id: item.id, project_id: item.project_id, amount,
+      invoice_date: args.p_invoice_date ?? null, payment_date: args.p_payment_date ?? null, note: trim(args.p_note),
+      source, vendor_name: source === 'ocr' ? trim(args.p_vendor_name) : null,
+      invoice_number: source === 'ocr' ? trim(args.p_invoice_number) : null,
+      document_sha256: args.p_document_sha256 ?? null, idempotency_key: args.p_idempotency_key ?? null,
+    }
+    const err = constraintError(row)
+    if (err) return { data: null, error: err }
+    const inserted = { id: id(500 + ++seq), created_at: `2026-10-10T00:00:${String(seq).padStart(2, '0')}Z`, ...row }
+    tables.cost_ledger_invoices.push(inserted)
+    return { data: { invoice: pick(inserted, RPC_INVOICE_COLUMNS), item_id: item.id, ...recalc(item) }, error: null }
+  }
+
+  if (fn === 'cost_ledger_invoice_update' || fn === 'cost_ledger_invoice_delete') {
+    const patch = (args.p_patch ?? null) as Row | null
+    if (fn === 'cost_ledger_invoice_update') {
+      const keys = patch ? Object.keys(patch) : []
+      if (keys.length === 0 || keys.some(k => !['amount', 'invoice_date', 'payment_date', 'note'].includes(k))) {
+        return rpcFail('CL400', 'invalid_input')
+      }
+      if ('amount' in patch! && (typeof patch!.amount !== 'number' || patch!.amount === 0)) return rpcFail('CL400', 'invalid_input')
+    }
+    const inv = visible('cost_ledger_invoices').find(r => r.id === args.p_invoice_id)
+    if (!inv) return rpcFail('CL404', 'not_found')
+    const item = lockableItem(inv.cost_ledger_item_id)
+    if (!item) return rpcFail('CL404', 'not_found')
+    if (fn === 'cost_ledger_invoice_delete') {
+      tables.cost_ledger_invoices = tables.cost_ledger_invoices.filter(r => r !== inv)
+      return { data: { deleted_id: inv.id, item_id: item.id, ...recalc(item) }, error: null }
+    }
+    for (const [k, v] of Object.entries(patch!)) inv[k] = k === 'note' ? trim(v) : v
+    return { data: { invoice: pick(inv, RPC_INVOICE_COLUMNS), item_id: item.id, ...recalc(item) }, error: null }
+  }
+  return rpcFail('PGRST202', 'Could not find the function')
+}
+
 vi.mock('@/lib/supabase/server', () => ({
   getServerClient: async () => ({
     auth: { getUser: async () => ({ data: { user: currentUser ? { id: currentUser } : null } }) },
     from,
+    rpc,
   }),
 }))
 
 const { POST, GET } = await import('@/app/api/cost-ledger/[id]/invoices/route')
+const invoiceRoute = await import('@/app/api/cost-ledger/invoices/[invoiceId]/route')
+const itemRoute = await import('@/app/api/cost-ledger/[id]/route')
+const listRoute = await import('@/app/api/cost-ledger/route')
 
 async function post(itemId: string, body: unknown) {
   const req = new NextRequest(`http://localhost/api/cost-ledger/${itemId}/invoices`, {
@@ -206,9 +322,36 @@ const manual = (over: Record<string, unknown> = {}) => ({
 const invoiceCount = () => tables.cost_ledger_invoices.length
 const actualCost = (itemId: string) => tables.cost_ledger_items.find(i => i.id === itemId)!.actual_cost
 
+async function patchInvoice(invoiceId: string, body: unknown) {
+  const req = new NextRequest(`http://localhost/api/cost-ledger/invoices/${invoiceId}`, {
+    method: 'PATCH', body: typeof body === 'string' ? body : JSON.stringify(body),
+  })
+  const res = await invoiceRoute.PATCH(req, { params: Promise.resolve({ invoiceId }) })
+  return { status: res.status, json: await res.json() as Record<string, unknown> }
+}
+
+async function deleteInvoice(invoiceId: string) {
+  const req = new NextRequest(`http://localhost/api/cost-ledger/invoices/${invoiceId}`, { method: 'DELETE' })
+  const res = await invoiceRoute.DELETE(req, { params: Promise.resolve({ invoiceId }) })
+  return { status: res.status, json: await res.json() as Record<string, unknown> }
+}
+
+async function patchItem(itemId: string, body: unknown) {
+  const req = new NextRequest(`http://localhost/api/cost-ledger/${itemId}`, {
+    method: 'PATCH', body: typeof body === 'string' ? body : JSON.stringify(body),
+  })
+  const res = await itemRoute.PATCH(req, { params: Promise.resolve({ id: itemId }) })
+  return { status: res.status, json: await res.json() as Record<string, unknown> }
+}
+
+/** DB のエラー文・内部情報が応答に含まれていないこと */
+const expectNoLeak = (json: unknown) =>
+  expect(JSON.stringify(json)).not.toMatch(/internal detail|relation|lock timeout|invalid_input|CL4\d\d|SECRET|777/)
+
 beforeEach(() => {
   currentUser = ME
   seq = 0
+  rpcCalls.length = 0
   seed()
 })
 
@@ -495,62 +638,291 @@ describe('対象・入力の検証（書き込み前に拒否）', () => {
   })
 })
 
-describe('actual_cost の再集計（16）', () => {
-  it('保存後の再集計に失敗しても登録失敗にしない（synced: false・newActualCost: null）', async () => {
-    failNextActualCostUpdate = true
+describe('actual_cost の再集計（16 / RPC で登録と一体）', () => {
+  it('登録は RPC 1回で行い、API から actual_cost を別に書き込まない', async () => {
     const r = await post(I_A1, ocr())
-    expect(r.status).toBe(200)
-    expect(r.json).toEqual(expect.objectContaining({ synced: false, newActualCost: null, replayed: false }))
-    expect(invoiceCount()).toBe(2)
-    // 再送しても二重にならない（保存済みとして返る）
-    const again = await post(I_A1, ocr())
-    expect(again.json.replayed).toBe(true)
-    expect(invoiceCount()).toBe(2)
+    expect(r.json).toEqual(expect.objectContaining({ synced: true, replayed: false, newActualCost: 33000 }))
+    expect(rpcCalls).toEqual(['cost_ledger_invoice_insert'])
   })
 
-  it('再集計失敗 → 応答喪失 → 同じキーで再送：請求は1件のまま、古い actual_cost を正常反映と表示しない', async () => {
-    // 1・2. 初回 INSERT は成功、actual_cost の再集計は失敗（actual_cost は古いまま null）
-    failNextActualCostUpdate = true
-    await post(I_A1, manual({ idempotency_key: KEY1, amount: 50000 }))   // 3. この応答は届かなかったとする
-    expect(actualCost(I_A1)).toBeNull()
-    // 3. 同じキーで再送
+  it.each([
+    ['55P03', 503, 'busy'],     // ロック待ち 5 秒超過
+    ['40P01', 503, 'busy'],     // デッドロック
+    ['CL409', 409, 'inconsistent'],
+    ['CL404', 404, 'not_found'],
+    ['XX000', 500, undefined],  // 想定外
+  ])('RPC が %s で失敗したら請求書も原価も保存されず、%i を返す（DB のエラー文は返さない）', async (code, status, errCode) => {
+    tables.cost_ledger_items.find(i => i.id === I_A1)!.actual_cost = 100000
+    failNextRpc = code
+    const r = await post(I_A1, ocr())
+    expect(r.status).toBe(status)
+    expect(r.json.code).toBe(errCode)
+    expectNoLeak(r.json)
+    expect(invoiceCount()).toBe(1)
+    expect(actualCost(I_A1)).toBe(100000)
+  })
+
+  it('エラー（503）→ 同じキーで再送：1件だけ保存され、原価は1回分だけ加算される', async () => {
+    failNextRpc = '55P03'
+    expect((await post(I_A1, manual({ idempotency_key: KEY1, amount: 50000 }))).status).toBe(503)
     const retry = await post(I_A1, manual({ idempotency_key: KEY1, amount: 50000 }))
     expect(retry.status).toBe(200)
-    // 4. 請求書は1件のみ・原価を二重加算しない（再送では書き込まない）
+    expect(retry.json).toEqual(expect.objectContaining({ replayed: false, synced: true, newActualCost: 50000 }))
+    // さらに応答喪失 → 再送しても増えない
+    const again = await post(I_A1, manual({ idempotency_key: KEY1, amount: 50000 }))
+    expect(again.json).toEqual(expect.objectContaining({ replayed: true, synced: true, newActualCost: 50000 }))
     expect(tables.cost_ledger_invoices.filter(i => i.cost_ledger_item_id === I_A1)).toHaveLength(1)
-    expect(actualCost(I_A1)).toBeNull()
-    // 5. 「保存済み」だが「原価合計も正常」とは言わない
-    expect(retry.json).toEqual(expect.objectContaining({ replayed: true, synced: false, newActualCost: null }))
-  })
-
-  it('再送時に actual_cost が古い値（見積原価など）のままでも synced: true にしない', async () => {
-    tables.cost_ledger_items.find(i => i.id === I_A1)!.actual_cost = 100000   // 初期化時の見積原価
-    failNextActualCostUpdate = true
-    await post(I_A1, ocr())
-    const retry = await post(I_A1, ocr())
-    expect(retry.json).toEqual(expect.objectContaining({ replayed: true, synced: false, newActualCost: null }))
-    expect(actualCost(I_A1)).toBe(100000)
+    expect(actualCost(I_A1)).toBe(50000)
   })
 
   it('登録しなかった場合（重複）は再集計しない', async () => {
     await post(I_A1, ocr())
-    tables.cost_ledger_items.find(i => i.id === I_A1)!.actual_cost = 12345   // 手入力の値とする
+    tables.cost_ledger_items.find(i => i.id === I_A1)!.actual_cost = 12345   // 不整合な既存データとする
     await post(I_A1, ocr({ idempotency_key: KEY2 }))
     expect(actualCost(I_A1)).toBe(12345)
   })
 
-  it('再送（replayed）では再集計しない。内訳合計と一致しない actual_cost は synced: false', async () => {
+  it('再送（replayed）では再集計しない。内訳合計と一致しない actual_cost は synced: false（既存の不整合データ）', async () => {
     await post(I_A1, ocr())
     tables.cost_ledger_items.find(i => i.id === I_A1)!.actual_cost = 12345
     const r = await post(I_A1, ocr())
     expect(r.json).toEqual(expect.objectContaining({ replayed: true, synced: false, newActualCost: null }))
-    expect(actualCost(I_A1)).toBe(12345)   // 書き換えない
+    expect(actualCost(I_A1)).toBe(12345)   // 書き換えない（既存データの自動修正はしない）
   })
 
   it('再送で actual_cost が内訳合計と一致していれば synced: true と DB の値を返す', async () => {
     await post(I_A1, ocr())
     const r = await post(I_A1, ocr())
     expect(r.json).toEqual(expect.objectContaining({ replayed: true, synced: true, newActualCost: 33000 }))
+  })
+
+  it('同じ項目への同時登録（別の操作）は両方保存され、合計が正しい', async () => {
+    const results = await Promise.all([
+      post(I_A1, manual({ idempotency_key: KEY1, amount: 10000 })),
+      post(I_A1, manual({ idempotency_key: KEY2, amount: 2500 })),
+      post(I_A1, manual({ amount: 300 })),
+    ])
+    expect(results.map(r => r.status)).toEqual([200, 200, 200])
+    expect(actualCost(I_A1)).toBe(12800)
+  })
+})
+
+describe('請求書の編集（PATCH /api/cost-ledger/invoices/[invoiceId]）', () => {
+  async function twoInvoices() {
+    const a = await post(I_A1, manual({ idempotency_key: KEY1, amount: 20000 }))
+    const b = await post(I_A1, manual({ idempotency_key: KEY2, amount: 5000 }))
+    return { a: (a.json.invoice as Row).id as string, b: (b.json.invoice as Row).id as string }
+  }
+
+  it('金額・日付・備考を変更し、actual_cost を再集計した値を返す', async () => {
+    const { a } = await twoInvoices()
+    const r = await patchInvoice(a, { amount: 21000, invoice_date: '2026-10-05', note: '  追加分  ' })
+    expect(r.status).toBe(200)
+    expect(r.json).toEqual(expect.objectContaining({ newActualCost: 26000, itemId: I_A1, invoiceCount: 2 }))
+    expect(r.json.invoice).toEqual(expect.objectContaining({ amount: 21000, invoice_date: '2026-10-05', note: '追加分' }))
+    expect(r.json.invoice).not.toHaveProperty('document_sha256')
+    expect(actualCost(I_A1)).toBe(26000)
+    expect(rpcCalls.at(-1)).toBe('cost_ledger_invoice_update')
+  })
+
+  it('許可されない列（台帳項目の付け替え・source など）は送られても無視し、RPC に渡さない', async () => {
+    const { a } = await twoInvoices()
+    const r = await patchInvoice(a, { amount: 1000, cost_ledger_item_id: I_A2, source: 'ocr', project_id: P_A2 })
+    expect(r.status).toBe(200)
+    expect(tables.cost_ledger_invoices.find(i => i.id === a)).toEqual(expect.objectContaining({ cost_ledger_item_id: I_A1, source: 'manual' }))
+  })
+
+  it.each([
+    ['金額 0', { amount: 0 }],
+    ['金額が文字列', { amount: '1000' }],
+    ['存在しない日付', { invoice_date: '2026-02-30' }],
+    ['変更する列がない', { cost_ledger_item_id: I_A2 }],
+    ['本文が JSON でない', 'not json'],
+  ])('不正な入力は 400（RPC を呼ばない）: %s', async (_label, body) => {
+    const { a } = await twoInvoices()
+    rpcCalls.length = 0
+    const r = await patchInvoice(a, body)
+    expect(r.status).toBe(400)
+    expect(rpcCalls).toEqual([])
+    expect(actualCost(I_A1)).toBe(25000)
+  })
+
+  it('請求書 ID が UUID でなければ 400', async () => {
+    expect((await patchInvoice('x', { amount: 1 })).status).toBe(400)
+  })
+
+  it('他社の請求書・存在しない請求書は 404（他社の情報を返さない）', async () => {
+    const other = await patchInvoice(id(301), { amount: 1 })
+    expect(other.status).toBe(404)
+    expectNoLeak(other.json)
+    expect(tables.cost_ledger_invoices.find(i => i.id === id(301))!.amount).toBe(777)
+    expect((await patchInvoice(id(999), { amount: 1 })).status).toBe(404)
+  })
+
+  it('ロック待ち超過（55P03）は 503 busy。金額も原価も変わらず、再試行で反映される', async () => {
+    const { a } = await twoInvoices()
+    failNextRpc = '55P03'
+    const r = await patchInvoice(a, { amount: 30000 })
+    expect(r.status).toBe(503)
+    expect(r.json.code).toBe('busy')
+    expectNoLeak(r.json)
+    expect(actualCost(I_A1)).toBe(25000)
+    expect((await patchInvoice(a, { amount: 30000 })).json.newActualCost).toBe(35000)
+  })
+
+  it('同じ金額への再送（応答喪失後）は結果が変わらない', async () => {
+    const { a } = await twoInvoices()
+    await patchInvoice(a, { amount: 30000 })
+    const again = await patchInvoice(a, { amount: 30000 })
+    expect(again.json.newActualCost).toBe(35000)
+  })
+
+  it('未ログインは 401', async () => {
+    currentUser = null
+    expect((await patchInvoice(id(301), { amount: 1 })).status).toBe(401)
+  })
+})
+
+describe('請求書の削除（DELETE /api/cost-ledger/invoices/[invoiceId]）', () => {
+  it('削除して再集計。最後の1件を削除すると actual_cost は NULL（直接入力に戻る）', async () => {
+    const a = ((await post(I_A1, manual({ idempotency_key: KEY1, amount: 20000 }))).json.invoice as Row).id as string
+    const b = ((await post(I_A1, manual({ idempotency_key: KEY2, amount: 5000 }))).json.invoice as Row).id as string
+    const r1 = await deleteInvoice(a)
+    expect(r1.status).toBe(200)
+    expect(r1.json).toEqual({ newActualCost: 5000, itemId: I_A1, invoiceCount: 1 })
+    const r2 = await deleteInvoice(b)
+    expect(r2.json).toEqual({ newActualCost: null, itemId: I_A1, invoiceCount: 0 })
+    expect(actualCost(I_A1)).toBeNull()
+    // 0件になったので直接入力できる
+    expect((await patchItem(I_A1, { actual_cost: 18000 })).status).toBe(200)
+  })
+
+  it('削除済み（再送・別画面で削除済み）は 404 で、原価は変わらない', async () => {
+    const a = ((await post(I_A1, manual({ amount: 20000 }))).json.invoice as Row).id as string
+    await deleteInvoice(a)
+    const again = await deleteInvoice(a)
+    expect(again.status).toBe(404)
+    expect(again.json.code).toBe('not_found')
+    expect(actualCost(I_A1)).toBeNull()
+  })
+
+  it('他社の請求書は削除できない（404）', async () => {
+    const r = await deleteInvoice(id(301))
+    expect(r.status).toBe(404)
+    expectNoLeak(r.json)
+    expect(tables.cost_ledger_invoices.some(i => i.id === id(301))).toBe(true)
+  })
+
+  it('RPC の失敗（40P01）は 503 で、請求書は残り原価も変わらない', async () => {
+    const a = ((await post(I_A1, manual({ amount: 20000 }))).json.invoice as Row).id as string
+    failNextRpc = '40P01'
+    const r = await deleteInvoice(a)
+    expect(r.status).toBe(503)
+    expect(tables.cost_ledger_invoices.some(i => i.id === a)).toBe(true)
+    expect(actualCost(I_A1)).toBe(20000)
+  })
+
+  it('ID が UUID でなければ 400', async () => {
+    expect((await deleteInvoice('x')).status).toBe(400)
+  })
+})
+
+describe('実績原価の直接編集（PATCH /api/cost-ledger/[id]）', () => {
+  it('請求書が0件の項目は従来どおり直接入力できる', async () => {
+    const r = await patchItem(I_A1, { actual_cost: 42000 })
+    expect(r.status).toBe(200)
+    expect(actualCost(I_A1)).toBe(42000)
+  })
+
+  it('請求書がある項目は 409 actual_cost_locked で拒否し、値は変わらない', async () => {
+    await post(I_A1, manual({ amount: 30000 }))
+    const r = await patchItem(I_A1, { actual_cost: 99999 })
+    expect(r.status).toBe(409)
+    expect(r.json).toEqual(expect.objectContaining({ code: 'actual_cost_locked' }))
+    expect(actualCost(I_A1)).toBe(30000)
+    // 名前・予算など他の列と一緒に送っても全体を拒否する
+    expect((await patchItem(I_A1, { name: '変更', actual_cost: 1 })).status).toBe(409)
+    expect(tables.cost_ledger_items.find(i => i.id === I_A1)!.name).toBe('システムバス')
+  })
+
+  it('請求書がある項目でも、actual_cost 以外の列は変更できる', async () => {
+    await post(I_A1, manual({ amount: 30000 }))
+    const r = await patchItem(I_A1, { budget_cost: 28000, note: 'メモ' })
+    expect(r.status).toBe(200)
+    expect(actualCost(I_A1)).toBe(30000)
+  })
+
+  it('請求書の件数を確認できなければ書き込まない（500・安全側）', async () => {
+    failInvoiceRead = true
+    const r = await patchItem(I_A1, { actual_cost: 1 })
+    expect(r.status).toBe(500)
+    expectNoLeak(r.json)
+    expect(actualCost(I_A1)).toBeNull()
+  })
+
+  it('確認と書き込みの間に請求書が登録された競合は、DB のトリガー（未適用 migration）があれば 409 で止まる', async () => {
+    await post(I_A1, manual({ amount: 30000 }))
+    dbLockTrigger = true
+    missNextCount = true   // アプリの確認では 0 件に見えた
+    const r = await patchItem(I_A1, { actual_cost: 99999 })
+    expect(r.status).toBe(409)
+    expect(r.json.code).toBe('actual_cost_locked')
+    expectNoLeak(r.json)
+    expect(actualCost(I_A1)).toBe(30000)
+  })
+
+  it('（トリガー未適用の現状）同じ競合ではアプリの確認をすり抜けて書き込まれてしまう — 残るリスクの記録', async () => {
+    await post(I_A1, manual({ amount: 30000 }))
+    missNextCount = true
+    expect((await patchItem(I_A1, { actual_cost: 99999 })).status).toBe(200)
+    expect(actualCost(I_A1)).toBe(99999)
+  })
+
+  it('他社・存在しない項目は 404', async () => {
+    expect((await patchItem(I_B1, { actual_cost: 1 })).status).toBe(404)
+    expect(actualCost(I_B1)).toBe(777)
+    expect((await patchItem(I_B1, { name: 'x' })).status).toBe(404)
+  })
+
+  it('本文が JSON でない・更新する列がない場合は 400', async () => {
+    expect((await patchItem(I_A1, 'not json')).status).toBe(400)
+    expect((await patchItem(I_A1, { project_id: P_A2 })).status).toBe(400)
+  })
+})
+
+describe('一覧（GET /api/cost-ledger）の invoice_count（17. 内訳を開いていない行でも判定）', () => {
+  async function list() {
+    const res = await listRoute.GET(new NextRequest(`http://localhost/api/cost-ledger?project_id=${P_A1}`))
+    return { status: res.status, json: await res.json() as { items?: Row[]; error?: string } }
+  }
+
+  beforeEach(() => {
+    tables.estimate_items = []
+    for (const p of tables.projects) Object.assign(p, { contract_amount: null })
+  })
+
+  it('各項目に請求書の件数を付けて返す（削除済み項目は含めない）', async () => {
+    await post(I_A1, manual({ amount: 1000 }))
+    await post(I_A1, manual({ amount: 2000 }))
+    const r = await list()
+    expect(r.status).toBe(200)
+    const byId = Object.fromEntries(r.json.items!.map(i => [i.id, i.invoice_count]))
+    expect(byId).toEqual({ [I_A1]: 2, [I_A1_2]: 0 })
+  })
+
+  it('再読み込み：請求書を削除すると件数が 0 に戻り、直接入力できる', async () => {
+    const a = ((await post(I_A1, manual({ amount: 1000 }))).json.invoice as Row).id as string
+    await deleteInvoice(a)
+    const r = await list()
+    expect(r.json.items!.find(i => i.id === I_A1)!.invoice_count).toBe(0)
+  })
+
+  it('件数の読み取りに失敗したら一覧ごと 500（件数不明のまま編集可能な状態にしない）', async () => {
+    failInvoiceRead = true
+    const r = await list()
+    expect(r.status).toBe(500)
+    expect(r.json.items).toBeUndefined()
+    expectNoLeak(r.json)
   })
 })
 

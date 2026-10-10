@@ -24,6 +24,8 @@ type CostItem = {
   sort_order: number
   source: string
   estimate_item_id: string | null
+  /** 業者請求書の件数（一覧 API が返す）。1件以上なら実績原価は請求書の合計で、直接編集できない */
+  invoice_count?: number
 }
 
 type Invoice = {
@@ -1123,7 +1125,9 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                     : idx % 2 === 0 ? C.bg : '#FAFCFA'
                   const isOpen   = expandedIds[item.id]
                   const invs     = invoicesMap[item.id] ?? []
-                  const hasInvoices = invs.length > 0
+                  // 内訳を開いていない行も一覧 API の件数で判定する（開いた行は読み込んだ内訳の件数）
+                  const invoiceCount = invoicesMap[item.id] ? invs.length : (item.invoice_count ?? 0)
+                  const hasInvoices = invoiceCount > 0
 
                   return (
                     <React.Fragment key={item.id}>
@@ -1313,7 +1317,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                                   <span style={{ color: C.text, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
                                     {fmtYen(item.actual_cost)}
                                   </span>
-                                  <span style={st.invBadge}>{invs.length}件</span>
+                                  <span style={st.invBadge}>{invoiceCount}件</span>
                                 </div>
                               ) : editing?.id === item.id && editing.field === 'actual_cost' ? (
                                 <input ref={editRef} className="cl-edit-input" style={{ ...st.input, textAlign: 'right' }}
@@ -1431,9 +1435,12 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                                 itemId={item.id}
                                 invoices={invs}
                                 onReload={() => reloadAfterInvoiceWrite(item.id)}
-                                onInvoicesChange={newInvs =>
+                                onInvoicesChange={newInvs => {
                                   setInvoices(p => ({ ...p, [item.id]: newInvs }))
-                                }
+                                  setItems(prev => prev.map(i =>
+                                    i.id === item.id ? { ...i, invoice_count: newInvs.length } : i
+                                  ))
+                                }}
                                 onActualCostChange={newCost => {
                                   setItems(prev => prev.map(i =>
                                     i.id === item.id ? { ...i, actual_cost: newCost } : i

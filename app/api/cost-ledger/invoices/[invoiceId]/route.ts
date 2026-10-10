@@ -1,12 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
-import { syncActualCost } from '../../[id]/invoices/route'
+import { isUuid, parseInvoicePatch } from '@/lib/cost-ledger/invoice-dedupe'
+import { mapCostLedgerDbError, toNumberOrNull } from '@/lib/cost-ledger/rpc-errors'
 
 type Params = { params: Promise<{ invoiceId: string }> }
+
+const NOT_FOUND = '請求書が見つかりません。画面を再読み込みしてください。'
 
 // ─────────────────────────────────────────────
 // PATCH /api/cost-ledger/invoices/[invoiceId]
 // 内訳を更新し、親の actual_cost を再集計する
+//
+// RPC cost_ledger_invoice_update（migration 20261010000002）で、変更と再集計を1トランザクションで行う。
+// 変更できるのは amount / invoice_date / payment_date / note のみ。
+// 応答に DB のエラー文は含めない。
 // ─────────────────────────────────────────────
 
 export async function PATCH(req: NextRequest, { params }: Params) {
@@ -15,42 +22,35 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  // 既存レコードを取得（RLS + 親アイテムID取得のため）
-  const { data: existing } = await supabase
-    .from('cost_ledger_invoices')
-    .select('id, cost_ledger_item_id')
-    .eq('id', invoiceId)
-    .single()
-  if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  if (!isUuid(invoiceId)) return NextResponse.json({ error: 'Invalid request' }, { status: 400 })
+  const parsed = parseInvoicePatch(await req.json().catch(() => null))
+  if (!parsed.ok) return NextResponse.json({ error: parsed.error }, { status: 400 })
 
-  const body = await req.json() as { amount?: number; invoice_date?: string | null; payment_date?: string | null; note?: string | null }
-  const patch: Record<string, unknown> = {}
-  if (body.amount       !== undefined) patch.amount       = body.amount
-  if (body.invoice_date !== undefined) patch.invoice_date = body.invoice_date
-  if (body.payment_date !== undefined) patch.payment_date = body.payment_date
-  if (body.note         !== undefined) patch.note         = body.note
-
-  if (Object.keys(patch).length === 0) {
-    return NextResponse.json({ error: '更新するフィールドがありません' }, { status: 400 })
+  const { data, error } = await supabase.rpc('cost_ledger_invoice_update', {
+    p_invoice_id: invoiceId,
+    p_patch:      parsed.value,
+  })
+  if (error) {
+    console.error('[cost-ledger invoices PATCH]', error.code)
+    const mapped = mapCostLedgerDbError(error, NOT_FOUND)
+    return NextResponse.json(mapped.body, { status: mapped.status })
   }
 
-  const { data: invoice, error } = await supabase
-    .from('cost_ledger_invoices')
-    .update(patch)
-    .eq('id', invoiceId)
-    .select('id, cost_ledger_item_id, amount, invoice_date, payment_date, note, created_at')
-    .single()
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-
-  const newActualCost = await syncActualCost(supabase, existing.cost_ledger_item_id)
-
-  return NextResponse.json({ invoice, newActualCost })
+  const r = data as { invoice: Record<string, unknown>; item_id: string; actual_cost: unknown; invoice_count: number }
+  return NextResponse.json({
+    invoice:       r.invoice,
+    newActualCost: toNumberOrNull(r.actual_cost),
+    itemId:        r.item_id,
+    invoiceCount:  r.invoice_count,
+  })
 }
 
 // ─────────────────────────────────────────────
 // DELETE /api/cost-ledger/invoices/[invoiceId]
 // 内訳を削除し、親の actual_cost を再集計する
+//
+// RPC cost_ledger_invoice_delete で、削除と再集計を1トランザクションで行う。
+// 最後の1件を削除したら actual_cost は NULL（直接入力モードへ戻る）。
 // ─────────────────────────────────────────────
 
 export async function DELETE(_req: NextRequest, { params }: Params) {
@@ -59,37 +59,19 @@ export async function DELETE(_req: NextRequest, { params }: Params) {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-  const { data: existing } = await supabase
-    .from('cost_ledger_invoices')
-    .select('id, cost_ledger_item_id')
-    .eq('id', invoiceId)
-    .single()
-  if (!existing) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+  if (!isUuid(invoiceId)) return NextResponse.json({ error: 'Invalid request' }, { status: 400 })
 
-  const { error } = await supabase
-    .from('cost_ledger_invoices')
-    .delete()
-    .eq('id', invoiceId)
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-
-  // 内訳が0件になった場合は actual_cost を null に戻す
-  const { data: remaining } = await supabase
-    .from('cost_ledger_invoices')
-    .select('id')
-    .eq('cost_ledger_item_id', existing.cost_ledger_item_id)
-
-  let newActualCost: number | null
-  if ((remaining ?? []).length === 0) {
-    // 内訳が全件削除されたら direct 入力モードへ戻す（null）
-    await supabase
-      .from('cost_ledger_items')
-      .update({ actual_cost: null, updated_at: new Date().toISOString() })
-      .eq('id', existing.cost_ledger_item_id)
-    newActualCost = null
-  } else {
-    newActualCost = await syncActualCost(supabase, existing.cost_ledger_item_id)
+  const { data, error } = await supabase.rpc('cost_ledger_invoice_delete', { p_invoice_id: invoiceId })
+  if (error) {
+    console.error('[cost-ledger invoices DELETE]', error.code)
+    const mapped = mapCostLedgerDbError(error, NOT_FOUND)
+    return NextResponse.json(mapped.body, { status: mapped.status })
   }
 
-  return NextResponse.json({ newActualCost, itemId: existing.cost_ledger_item_id })
+  const r = data as { deleted_id: string; item_id: string; actual_cost: unknown; invoice_count: number }
+  return NextResponse.json({
+    newActualCost: toNumberOrNull(r.actual_cost),
+    itemId:        r.item_id,
+    invoiceCount:  r.invoice_count,
+  })
 }

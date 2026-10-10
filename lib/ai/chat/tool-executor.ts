@@ -7,6 +7,7 @@
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { countItemInvoices } from '@/lib/cost-ledger/actual-cost-lock'
 import {
   classifySearchResults,
   isFound,
@@ -348,6 +349,21 @@ export async function executeUpdateCostLedger(
   }
   if (current.project_id !== ctx.projectId) {
     return { status: 'not_found', query: args.item_id, hint: 'この案件の原価台帳項目ではありません。' }
+  }
+
+  // 業者請求書がある項目の実績原価は請求書の合計。直接変更の提案は作らない
+  // （確定時も confirm-change が 409 で拒否する。ここでは提案の段階で理由を伝える）
+  if (args.actual_cost !== undefined) {
+    const count = await countItemInvoices(ctx.supabase, args.item_id)
+    if (count === null || count > 0) {
+      return {
+        status: 'not_found',
+        query: args.item_id,
+        hint: count === null
+          ? '請求書の登録状況を確認できなかったため、実績原価の変更案は作れませんでした。もう一度お試しください。'
+          : `「${current.name}」には業者請求書が登録されているため、実績原価は直接変更できません。原価台帳の請求内訳で請求書を追加・編集してください。`,
+      }
+    }
   }
 
   const proposed: CostLedgerWrite = { id: args.item_id }

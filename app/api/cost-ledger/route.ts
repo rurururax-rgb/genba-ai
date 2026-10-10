@@ -3,8 +3,10 @@ import { getServerClient } from '@/lib/supabase/server'
 
 // ──────────────────────────────────────────────────────────
 // GET /api/cost-ledger?project_id=xxx
-// 原価台帳アイテム一覧 + 粗利サマリを返す
+// 原価台帳アイテム一覧（各項目の業者請求書の件数 invoice_count つき）+ 粗利サマリを返す
 // ──────────────────────────────────────────────────────────
+
+const INVOICE_COUNT_CHUNK = 100
 
 export async function GET(req: NextRequest) {
   const projectId = req.nextUrl.searchParams.get('project_id')
@@ -22,7 +24,25 @@ export async function GET(req: NextRequest) {
     .is('deleted_at', null)
     .order('sort_order')
 
-  if (itemsErr) return NextResponse.json({ error: itemsErr.message }, { status: 500 })
+  if (itemsErr) return NextResponse.json({ error: '原価台帳を読み込めませんでした' }, { status: 500 })
+
+  // 各項目の業者請求書の件数（請求書がある項目の実績原価は画面で直接編集させない）。
+  // 内訳パネルを開いていない行でも判定できるよう、一覧と一緒に返す。
+  // 読み取りに失敗したら一覧ごと失敗にする（件数不明のまま直接編集できる状態にしない）
+  const invoiceCounts = new Map<string, number>()
+  const itemIds = (items ?? []).map(i => i.id as string)
+  for (let i = 0; i < itemIds.length; i += INVOICE_COUNT_CHUNK) {
+    const { data: rows, error: invErr } = await supabase
+      .from('cost_ledger_invoices')
+      .select('cost_ledger_item_id')
+      .in('cost_ledger_item_id', itemIds.slice(i, i + INVOICE_COUNT_CHUNK))
+    if (invErr) return NextResponse.json({ error: '原価台帳を読み込めませんでした' }, { status: 500 })
+    for (const r of rows ?? []) {
+      const key = r.cost_ledger_item_id as string
+      invoiceCounts.set(key, (invoiceCounts.get(key) ?? 0) + 1)
+    }
+  }
+  const itemsWithCounts = (items ?? []).map(i => ({ ...i, invoice_count: invoiceCounts.get(i.id as string) ?? 0 }))
 
   // 見積サマリ（粗利ウィジェット用 + 業者別売上額計算用）
   const { data: estimateItems, error: estErr } = await supabase
@@ -71,7 +91,7 @@ export async function GET(req: NextRequest) {
   }
 
   return NextResponse.json({
-    items: items ?? [],
+    items: itemsWithCounts,
     vendorSelling,
     summary: {
       estimate_revenue:      estimateRevenue,

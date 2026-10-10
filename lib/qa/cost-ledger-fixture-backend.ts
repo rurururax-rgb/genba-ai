@@ -15,9 +15,10 @@
 import {
   actualCostMatchesInvoices, findSimilarInvoices, parseInvoiceRequest, sameInvoiceContent, type ExistingInvoice,
 } from '@/lib/cost-ledger/invoice-dedupe'
+import { ACTUAL_COST_LOCKED_MESSAGE } from '@/lib/cost-ledger/rpc-errors'
 
 export const COST_FIXTURE_PROJECT_ID = '00000000-0000-4000-8000-000000000c01'
-const STORAGE_KEY = 'ragz-qa-cost-ledger-fixture-v2'
+const STORAGE_KEY = 'ragz-qa-cost-ledger-fixture-v3'
 
 type CostItem = {
   id: string; name: string; quantity: number; unit: string
@@ -31,8 +32,8 @@ type FixtureInvoice = ExistingInvoice & {
   document_sha256: string | null
   idempotency_key: string | null
 }
-/** 次の1回だけ起こす障害（Browser QA で通信エラー・再集計失敗を再現する） */
-export type CostFixtureFault = 'lose_next_response' | 'fail_next_sync'
+/** 次の1回だけ起こす障害（Browser QA で通信エラー・RPC の失敗を再現する） */
+export type CostFixtureFault = 'lose_next_response' | 'fail_next_rpc'
 type State = { items: CostItem[]; invoices: FixtureInvoice[]; faults: CostFixtureFault[]; blocked: string[] }
 
 const row = (n: number, p: Partial<CostItem>): CostItem => ({
@@ -130,11 +131,12 @@ function postInvoice(s: State, item: CostItem, raw: unknown): { res: Response; l
     source: b.source, vendor_name: b.vendor_name, invoice_number: b.invoice_number,
     document_sha256: b.document_sha256, idempotency_key: b.idempotency_key, created_at: new Date().toISOString(),
   }
+  // 本番は RPC で登録と再集計を1トランザクションで行う。失敗時は何も保存されない（ロック待ち超過を再現）
+  if (takeFault(s, 'fail_next_rpc')) {
+    return { res: json({ error: '他の操作と重なりました。少し待ってからもう一度お試しください。', code: 'busy' }, 503) }
+  }
   s.invoices.push(inv)
   const loseResponse = takeFault(s, 'lose_next_response')
-  if (takeFault(s, 'fail_next_sync')) {
-    return { res: json({ invoice: publicInvoice(inv), newActualCost: null, replayed: false, synced: false }), loseResponse }
-  }
   item.actual_cost = s.invoices.filter(i => i.cost_ledger_item_id === item.id).reduce((a, i) => a + Number(i.amount), 0)
   return { res: json({ invoice: publicInvoice(inv), newActualCost: item.actual_cost, replayed: false, synced: true }), loseResponse }
 }
@@ -166,6 +168,7 @@ function handle(url: URL, method: string, init: RequestInit | undefined): Respon
 
   if (p === '/api/cost-ledger' && method === 'GET') {
     const items = [...s.items].sort((a, b) => a.sort_order - b.sort_order)
+      .map(i => ({ ...i, invoice_count: s.invoices.filter(v => v.cost_ledger_item_id === i.id).length }))
     return json({ items, vendorSelling: {}, summary: summaryOf(items) })
   }
   if (p === '/api/cost-ledger' && method === 'POST') {
@@ -178,6 +181,10 @@ function handle(url: URL, method: string, init: RequestInit | undefined): Respon
     const it = s.items.find(i => i.id === m![1])
     if (!it) return json({ error: 'not found' }, 404)
     if (method === 'PATCH') {
+      // 本番 API と同じく、請求書がある項目の実績原価は直接変更できない
+      if ('actual_cost' in body && s.invoices.some(v => v.cost_ledger_item_id === it.id)) {
+        return json({ error: ACTUAL_COST_LOCKED_MESSAGE, code: 'actual_cost_locked' }, 409)
+      }
       for (const f of PATCH_FIELDS) if (body[f] !== undefined) (it as Record<string, unknown>)[f] = body[f]
       save(s); return json(it)
     }
@@ -206,15 +213,18 @@ function handle(url: URL, method: string, init: RequestInit | undefined): Respon
       if (it) it.actual_cost = rest.length ? rest.reduce((a, i) => a + Number(i.amount), 0) : null
       return it?.actual_cost ?? null
     }
+    const countOf = () => s.invoices.filter(i => i.cost_ledger_item_id === inv.cost_ledger_item_id).length
     if (method === 'PATCH') {
+      if (takeFault(s, 'fail_next_rpc')) { save(s); return json({ error: '他の操作と重なりました。少し待ってからもう一度お試しください。', code: 'busy' }, 503) }
       if (typeof body.amount === 'number') inv.amount = body.amount
       const newActualCost = recalc(); save(s)
-      return json({ invoice: publicInvoice(inv), newActualCost })
+      return json({ invoice: publicInvoice(inv), newActualCost, itemId: inv.cost_ledger_item_id, invoiceCount: countOf() })
     }
     if (method === 'DELETE') {
+      if (takeFault(s, 'fail_next_rpc')) { save(s); return json({ error: '他の操作と重なりました。少し待ってからもう一度お試しください。', code: 'busy' }, 503) }
       s.invoices = s.invoices.filter(i => i.id !== inv.id)
       const newActualCost = recalc(); save(s)
-      return json({ newActualCost, itemId: inv.cost_ledger_item_id })
+      return json({ newActualCost, itemId: inv.cost_ledger_item_id, invoiceCount: countOf() })
     }
   }
   if (p === '/api/project-billing' && method === 'GET') return json([])
