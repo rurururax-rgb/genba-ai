@@ -19,7 +19,7 @@ SQLSTATE `CL423`（`actual_cost_locked`）で拒否する。API は 409 `actual_
 | 画面・API・AI確定からの直接変更（請求書あり） | アプリの件数確認で 409 | 同左 + DB でも拒否 |
 | 件数確認と書き込みの間に請求書が登録される競合 | **すり抜ける** | 拒否 |
 | PostgREST からの `cost_ledger_items` 直接 UPDATE | **すり抜ける** | 拒否 |
-| PostgREST からの `cost_ledger_invoices` 直接 INSERT/UPDATE/DELETE | 合計とずれうる | **ずれうる（この migration の対象外）** |
+| PostgREST からの `cost_ledger_invoices` 直接 INSERT/UPDATE/DELETE | 合計とずれうる | **ずれうる（この migration の対象外。P1-4 で拒否: `p1-4-restrict-cost-ledger-invoice-writes.md`）** |
 
 テーブル・列・RLS ポリシー・既存データは変更しない。既存の不整合データ（請求書があるのに
 actual_cost が合計と違う行）も修正しない。その行も actual_cost 以外の列は従来どおり更新でき、
