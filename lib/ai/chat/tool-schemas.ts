@@ -586,6 +586,7 @@ export const chatTools: Tool[] = [
       '',
       '【制約】',
       '- estimate_cost（見積原価スナップショット）は変更不可',
+      '- 業者請求書が登録されている項目の actual_cost は請求書の合計のため変更不可（請求内訳の追加・編集で変わる）',
       '- 原価情報は顧客向け回答・提案に含めないこと',
     ].join('\n'),
     input_schema: {

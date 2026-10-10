@@ -58,7 +58,8 @@ export type InvoicePayload = {
 
 export type PostInvoiceResult =
   /** 保存できた。replayed = 以前の送信で保存済みだった（新しい行は作っていない） */
-  | { kind: 'saved'; invoice: SavedInvoice; newActualCost: number | null; synced: boolean; replayed: boolean }
+  /** invoiceCount = 登録後の DB 上の請求書件数（再送の応答など、分からなければ null） */
+  | { kind: 'saved'; invoice: SavedInvoice; newActualCost: number | null; invoiceCount: number | null; synced: boolean; replayed: boolean }
   /** 同じ案件に同じ画像が登録済み */
   | { kind: 'duplicate_document'; message: string; existing: ExistingDocument | null }
   /** 以前の請求書と似ている（確認すれば登録できる） */
@@ -98,6 +99,7 @@ export async function postInvoice(
       kind: 'saved',
       invoice: body.invoice as SavedInvoice,
       newActualCost: typeof body.newActualCost === 'number' ? body.newActualCost : null,
+      invoiceCount: typeof body.invoiceCount === 'number' ? body.invoiceCount : null,
       synced: body.synced !== false,
       replayed: body.replayed === true,
     }

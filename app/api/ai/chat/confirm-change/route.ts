@@ -12,6 +12,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
 import type { ConfirmableChange } from '@/lib/ai/chat/types'
 import { calculateSellingPrice, DEFAULT_MARKUP_RATE } from '@/lib/estimate/pricing'
+import { countItemInvoices } from '@/lib/cost-ledger/actual-cost-lock'
+import { ACTUAL_COST_LOCKED_MESSAGE, mapCostLedgerDbError } from '@/lib/cost-ledger/rpc-errors'
 
 // ── 書き込み許可フィールドのホワイトリスト ────────────────────────────────
 
@@ -238,15 +240,29 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: '更新するフィールドがありません' }, { status: 400 })
       }
 
+      // 業者請求書がある項目の実績原価は請求書の合計。AI の提案でも直接は書き換えない
+      if ('actual_cost' in safeFields) {
+        const count = await countItemInvoices(supabase, itemId)
+        if (count === null) return NextResponse.json({ error: '保存できませんでした。もう一度お試しください。' }, { status: 500 })
+        if (count > 0) {
+          return NextResponse.json({ error: ACTUAL_COST_LOCKED_MESSAGE, code: 'actual_cost_locked' }, { status: 409 })
+        }
+      }
+
       const { data, error } = await supabase
         .from('cost_ledger_items')
         .update({ ...safeFields, updated_at: new Date().toISOString() })
         .eq('id', itemId)
         .is('deleted_at', null)
         .select('id, name, budget_cost, actual_cost, vendor_name, note')
-        .single()
+        .maybeSingle()
 
-      if (error || !data) return NextResponse.json({ error: error?.message ?? 'Not found or unauthorized' }, { status: error ? 500 : 404 })
+      if (error) {
+        console.error('[confirm-change cost_ledger_items]', error.code)
+        const mapped = mapCostLedgerDbError(error)
+        return NextResponse.json(mapped.body, { status: mapped.status })
+      }
+      if (!data) return NextResponse.json({ error: 'Not found or unauthorized' }, { status: 404 })
       return NextResponse.json({ ok: true, change_id: change.id, data })
     }
   }

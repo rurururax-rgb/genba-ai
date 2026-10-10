@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/button'
 import { parseNumericInput, resolveNumericCommit } from '@/lib/input/numeric-input'
 import { jsonInit, writeRequest } from '@/lib/api/write-request'
 import { createRegisterAttempt, postInvoice, type RegisterAttempt } from '@/lib/cost-ledger/invoice-client'
+import { actualCostLockState, staleInvoiceCaches } from '@/lib/cost-ledger/invoice-lock-state'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -24,6 +25,9 @@ type CostItem = {
   sort_order: number
   source: string
   estimate_item_id: string | null
+  /** 業者請求書の件数（一覧 API が DB から数えた値）。1件以上なら実績原価は請求書の合計で、直接編集できない。
+   *  null / 未設定 = 不明（実績原価は編集させない） */
+  invoice_count?: number | null
 }
 
 type Invoice = {
@@ -142,7 +146,8 @@ function InvoicePanel({
 }: {
   itemId: string
   invoices: Invoice[]
-  onInvoicesChange: (invs: Invoice[]) => void
+  /** dbCount = 書き込み後に DB が返した請求書件数（分からなければ null → 呼び出し側で読み直す） */
+  onInvoicesChange: (invs: Invoice[], dbCount: number | null) => void
   onActualCostChange: (newCost: number | null) => void
   /** 保存されたか分からない・再集計に失敗したときに、台帳と内訳を DB から読み直す */
   onReload: () => void
@@ -200,7 +205,7 @@ function InvoicePanel({
           onReload()
           return
         }
-        onInvoicesChange([...invoices, result.invoice as Invoice])
+        onInvoicesChange([...invoices, result.invoice as Invoice], result.invoiceCount)
         onActualCostChange(result.newActualCost)
         return
       }
@@ -221,7 +226,7 @@ function InvoicePanel({
     const amount = parseNumericInput(editAmt)
     // 解釈できない / 0 以下 / 変更なし → 保存せず元の値のまま
     if (amount == null || amount <= 0 || amount === inv.amount) { setEditId(null); return }
-    const result = await writeRequest<{ invoice: Invoice; newActualCost: number }>(
+    const result = await writeRequest<{ invoice: Invoice; newActualCost: number; invoiceCount?: number }>(
       `/api/cost-ledger/invoices/${inv.id}`, jsonInit('PATCH', { amount }), '金額の保存に失敗しました',
     )
     if (!result.ok || !result.data) {
@@ -229,19 +234,19 @@ function InvoicePanel({
       alert(`${result.ok ? '金額の保存に失敗しました' : result.message}\n変更は保存されていません。`)
       return
     }
-    const { invoice: updated, newActualCost } = result.data
-    onInvoicesChange(invoices.map(i => i.id === inv.id ? updated : i))
+    const { invoice: updated, newActualCost, invoiceCount } = result.data
+    onInvoicesChange(invoices.map(i => i.id === inv.id ? updated : i), invoiceCount ?? null)
     onActualCostChange(newActualCost)
     setEditId(null)
   }
 
   async function handleDelete(inv: Invoice) {
-    const result = await writeRequest<{ newActualCost: number | null }>(
+    const result = await writeRequest<{ newActualCost: number | null; invoiceCount?: number }>(
       `/api/cost-ledger/invoices/${inv.id}`, jsonInit('DELETE'), '削除に失敗しました',
     )
     if (!result.ok || !result.data) { alert(`${result.ok ? '削除に失敗しました' : result.message}\n削除されていません。`); return }
-    const { newActualCost } = result.data
-    onInvoicesChange(invoices.filter(i => i.id !== inv.id))
+    const { newActualCost, invoiceCount } = result.data
+    onInvoicesChange(invoices.filter(i => i.id !== inv.id), invoiceCount ?? null)
     onActualCostChange(newActualCost)
   }
 
@@ -482,6 +487,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
   const [expandedIds, setExpanded]   = useState<Record<string, boolean>>({})
   const [invoicesMap, setInvoices]   = useState<Record<string, Invoice[]>>({})
   const [loadingInv,  setLoadingInv] = useState<Record<string, boolean>>({})
+  const [invLoadError, setInvLoadError] = useState<Record<string, boolean>>({})
   const [checked,     setChecked]    = useState<Record<string, boolean>>({})
   const [viewMode,    setViewMode]   = useState<'item' | 'vendor'>('vendor')
   const [vendorSelling, setVendorSelling] = useState<Record<string, number>>({})
@@ -499,6 +505,10 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
   const sumTotal = useMemo(() => { let t = 0; sumSelection.forEach(v => { t += v }); return t }, [sumSelection])
 
   const editRef = useRef<HTMLInputElement>(null)
+  // load() から最新の内訳キャッシュ・開閉状態を参照するため（load は projectId だけに依存させる）
+  const invoicesMapRef = useRef(invoicesMap)
+  const expandedRef    = useRef(expandedIds)
+  useEffect(() => { invoicesMapRef.current = invoicesMap; expandedRef.current = expandedIds })
   const billingEditRef = useRef<HTMLInputElement>(null)
 
   // ── 業者別集計（フロントエンドのみ、DB変更不要） ──────────
@@ -538,6 +548,26 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
     has_budget_data: false, has_completion_data: false, has_actual_data: false,
   }
 
+  // ── 1項目の内訳を DB から読む。読めた件数で一覧の invoice_count も更新する（新しい DB の結果を優先） ──
+  const fetchInvoices = useCallback(async (itemId: string) => {
+    setLoadingInv(p => ({ ...p, [itemId]: true }))
+    try {
+      const res = await fetch(`/api/cost-ledger/${itemId}/invoices`).catch(() => null as Response | null)
+      const data = res?.ok ? await res.json().catch(() => null) as Invoice[] | null : null
+      if (Array.isArray(data)) {
+        setInvoices(p => ({ ...p, [itemId]: data }))
+        setItems(prev => prev.map(i => i.id === itemId ? { ...i, invoice_count: data.length } : i))
+        setInvLoadError(p => ({ ...p, [itemId]: false }))
+      } else {
+        // 読めなかった内訳は表示しない（古い内容・空の一覧を正しいものとして見せない）
+        setInvoices(p => { const n = { ...p }; delete n[itemId]; return n })
+        setInvLoadError(p => ({ ...p, [itemId]: true }))
+      }
+    } finally {
+      setLoadingInv(p => ({ ...p, [itemId]: false }))
+    }
+  }, [])
+
   const load = useCallback(async () => {
     try {
       const res = await fetch(`/api/cost-ledger?project_id=${projectId}`).catch(() => null as Response | null)
@@ -545,7 +575,14 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
         setLoadError('ネットワークエラーが発生しました')
       } else if (res.ok) {
         const d = await res.json()
-        setItems(d.items ?? [])
+        const nextItems: CostItem[] = d.items ?? []
+        setItems(nextItems)
+        // 一覧の件数（DB）と食い違う内訳のキャッシュは捨て、開いている内訳は読み直す
+        const stale = staleInvoiceCaches(nextItems, invoicesMapRef.current)
+        if (stale.length > 0) {
+          setInvoices(p => { const n = { ...p }; for (const id of stale) delete n[id]; return n })
+          for (const id of stale) if (expandedRef.current[id]) void fetchInvoices(id)
+        }
         setVendorSelling(d.vendorSelling ?? {})
         const smry: Summary = d.summary ?? EMPTY_SUMMARY
         setSummary(smry)
@@ -563,7 +600,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
       setLoading(false)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId])
+  }, [projectId, fetchInvoices])
 
   useEffect(() => { load() }, [load])
   useEffect(() => { if (editing) editRef.current?.focus() }, [editing])
@@ -636,29 +673,15 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
   // ── 請求の登録後・保存結果が不明なとき: 台帳と（開いたことのある）内訳を DB から読み直す ──
   function reloadAfterInvoiceWrite(itemId: string) {
     load()
-    if (!invoicesMap[itemId]) return
-    fetch(`/api/cost-ledger/${itemId}/invoices`)
-      .then(res => (res.ok ? res.json() as Promise<Invoice[]> : null))
-      .then(data => { if (data) setInvoices(p => ({ ...p, [itemId]: data })) })
-      .catch(() => {/* 内訳は次に開いたときに読み直す */})
+    if (expandedIds[itemId] || invoicesMap[itemId]) void fetchInvoices(itemId)
   }
 
   // ── 内訳パネル開閉 ───────────────────────────────────────
   async function toggleInvoices(itemId: string) {
     const wasOpen = expandedIds[itemId]
     setExpanded(p => ({ ...p, [itemId]: !wasOpen }))
-    if (!wasOpen && !invoicesMap[itemId]) {
-      setLoadingInv(p => ({ ...p, [itemId]: true }))
-      try {
-        const res = await fetch(`/api/cost-ledger/${itemId}/invoices`)
-        if (res.ok) {
-          const data = await res.json() as Invoice[]
-          setInvoices(p => ({ ...p, [itemId]: data }))
-        }
-      } finally {
-        setLoadingInv(p => ({ ...p, [itemId]: false }))
-      }
-    }
+    // 開くたびに DB から読み直す（以前に開いたときの内容は別画面での登録・削除で古くなっている可能性がある）
+    if (!wasOpen) await fetchInvoices(itemId)
   }
 
   // ── 見積と同期 ──────────────────────────────────────────
@@ -772,7 +795,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
     const result = await writeRequest<CostItem>('/api/cost-ledger', jsonInit('POST', { project_id: projectId, sort_order: maxOrder + 1 }), '行の追加に失敗しました')
     if (result.ok && result.data) {
       const item = result.data
-      setItems(prev => [...prev, item])
+      setItems(prev => [...prev, { ...item, invoice_count: 0 }])  // 作ったばかりの行に請求書は無い
     } else {
       alert(`${result.ok ? '行の追加に失敗しました' : result.message}\n行は追加されていません。`)
     }
@@ -1123,7 +1146,9 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                     : idx % 2 === 0 ? C.bg : '#FAFCFA'
                   const isOpen   = expandedIds[item.id]
                   const invs     = invoicesMap[item.id] ?? []
-                  const hasInvoices = invs.length > 0
+                  // 一覧 API（DB）の件数で判定する。件数不明・内訳のキャッシュと食い違うときは編集させない
+                  const lock = actualCostLockState(item.invoice_count, invoicesMap[item.id])
+                  const hasInvoices = lock.locked
 
                   return (
                     <React.Fragment key={item.id}>
@@ -1309,11 +1334,14 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                               background: isSel ? C.accentLight : undefined,
                             }}>
                               {hasInvoices ? (
-                                <div style={{ ...st.editCell, gap: 6 }}>
+                                <div style={{ ...st.editCell, gap: 6, cursor: 'default' }}
+                                  title={lock.count != null
+                                    ? '業者請求書の合計です。金額は「分割請求の内訳」で変更してください'
+                                    : '請求書の件数を確認できないため編集できません'}>
                                   <span style={{ color: C.text, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
                                     {fmtYen(item.actual_cost)}
                                   </span>
-                                  <span style={st.invBadge}>{invs.length}件</span>
+                                  <span style={st.invBadge}>{lock.count != null ? `${lock.count}件` : '件数確認中'}</span>
                                 </div>
                               ) : editing?.id === item.id && editing.field === 'actual_cost' ? (
                                 <input ref={editRef} className="cl-edit-input" style={{ ...st.input, textAlign: 'right' }}
@@ -1422,18 +1450,27 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                       {isOpen && (
                         <tr>
                           <td colSpan={COL_COUNT} style={{ padding: 0 }}>
-                            {loadingInv[item.id] ? (
+                            {loadingInv[item.id] && !invoicesMap[item.id] ? (
                               <div style={{ padding: '10px 40px', color: C.textMuted, fontSize: 12, fontFamily: FONT }}>
                                 読み込み中...
+                              </div>
+                            ) : invLoadError[item.id] && !invoicesMap[item.id] ? (
+                              <div style={{ padding: '10px 40px', color: C.red, fontSize: 12, fontFamily: FONT }}>
+                                内訳を読み込めませんでした。閉じてもう一度開いてください。
                               </div>
                             ) : (
                               <InvoicePanel
                                 itemId={item.id}
                                 invoices={invs}
                                 onReload={() => reloadAfterInvoiceWrite(item.id)}
-                                onInvoicesChange={newInvs =>
+                                onInvoicesChange={(newInvs, dbCount) => {
                                   setInvoices(p => ({ ...p, [item.id]: newInvs }))
-                                }
+                                  // 件数は DB が返した値。返らなければ不明（編集不可）にして読み直す
+                                  setItems(prev => prev.map(i =>
+                                    i.id === item.id ? { ...i, invoice_count: dbCount } : i
+                                  ))
+                                  if (dbCount == null || dbCount !== newInvs.length) reloadAfterInvoiceWrite(item.id)
+                                }}
                                 onActualCostChange={newCost => {
                                   setItems(prev => prev.map(i =>
                                     i.id === item.id ? { ...i, actual_cost: newCost } : i

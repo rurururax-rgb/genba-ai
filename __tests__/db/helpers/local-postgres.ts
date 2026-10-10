@@ -24,6 +24,7 @@ const MIGRATIONS = path.resolve(__dirname, '../../../supabase/migrations')
 export const MIGRATION_COST_LEDGER_ITEMS = '20260912000001_reconcile_cost_ledger_items.sql'
 export const MIGRATION_P1_1 = '20261010000001_add_dedupe_keys_to_cost_ledger_invoices.sql'
 export const MIGRATION_P1_2 = '20261010000002_atomic_cost_ledger_invoice_writes.sql'
+export const MIGRATION_P1_3 = '20261011000001_lock_actual_cost_with_invoices.sql'
 
 export function readMigration(name: string): string {
   return readFileSync(path.join(MIGRATIONS, name), 'utf8')
