@@ -1,13 +1,18 @@
 'use client'
 
+import { useSyncExternalStore } from 'react'
 import { InvoiceTab } from '@/components/projects/InvoiceTab'
 import type { InvoiceIssuerProfile } from '@/lib/company/invoice-issuer'
 import {
-  INVOICE_FIXTURE_PROJECT_ID, installInvoiceFixtureBackend, resetInvoiceFixture,
+  INVOICE_FIXTURE_PROJECT_ID, installInvoiceFixtureBackend, isInvoiceFixtureBackendActive, resetInvoiceFixture,
 } from '@/lib/qa/invoice-fixture-backend'
 
-// InvoiceTab が最初の通信を行う前に fetch を差し替える（モジュール評価時）
-installInvoiceFixtureBackend()
+function subscribeFixtureBackend(onChange: () => void) {
+  const uninstall = installInvoiceFixtureBackend()
+  if (!uninstall) return () => {}
+  onChange()
+  return uninstall
+}
 
 /** 架空の発行者情報（実在の会社・口座ではない） */
 const QA_ISSUER: InvoiceIssuerProfile = {
@@ -23,6 +28,11 @@ const QA_ISSUER: InvoiceIssuerProfile = {
 }
 
 export function InvoiceFixture() {
+  // fetch はこのページのマウント中だけ差し替え、離れたら元に戻す（subscribe で差し替え、unsubscribe で戻す）。
+  // 子の effect は親より先に走るため、差し替えが済むまで InvoiceTab を描画しない
+  // （InvoiceTab の最初の通信が実サーバーへ出ないようにする）
+  const ready = useSyncExternalStore(subscribeFixtureBackend, isInvoiceFixtureBackendActive, () => false)
+
   return (
     <div style={{ minHeight: '100vh' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '6px 12px', background: '#FEF3C7', color: '#92400E', fontSize: 12 }}>
@@ -36,14 +46,16 @@ export function InvoiceFixture() {
           初期データに戻す
         </button>
       </div>
-      <InvoiceTab
-        projectId={INVOICE_FIXTURE_PROJECT_ID}
-        projectInfo={{
-          id: INVOICE_FIXTURE_PROJECT_ID, name: 'QA-請求書 金額入力', customer_name: 'QA顧客',
-          payment_contract_pct: 30, payment_start_pct: 40, payment_completion_pct: 30,
-        }}
-        issuer={QA_ISSUER}
-      />
+      {ready && (
+        <InvoiceTab
+          projectId={INVOICE_FIXTURE_PROJECT_ID}
+          projectInfo={{
+            id: INVOICE_FIXTURE_PROJECT_ID, name: 'QA-請求書 金額入力', customer_name: 'QA顧客',
+            payment_contract_pct: 30, payment_start_pct: 40, payment_completion_pct: 30,
+          }}
+          issuer={QA_ISSUER}
+        />
+      )}
     </div>
   )
 }
