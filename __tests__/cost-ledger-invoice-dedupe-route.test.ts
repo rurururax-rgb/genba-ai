@@ -45,6 +45,11 @@ let failInvoiceRead: boolean
 let missNextCount: boolean
 /** migration 20261011000001 のトリガー（請求書がある項目の actual_cost を合計以外にさせない）を有効にする */
 let dbLockTrigger: boolean
+/** PostgREST の max-rows（1回の応答の最大行数。超えた分は黙って切られる） */
+let maxRows: number
+/** 請求書の一覧読み取り（head でないもの）を、この回数だけ成功させた後に失敗させる（null = 失敗させない） */
+let failInvoiceReadAfter: number | null
+let invoicePageReads: number
 /** 次の idempotency_key での検索を空にする（INSERT 前の確認をすり抜けた同時送信を再現し、23505 からの再取得を通す） */
 let missNextKeyLookup: boolean
 
@@ -79,6 +84,9 @@ function seed() {
   missNextKeyLookup = false
   missNextCount = false
   dbLockTrigger = false
+  maxRows = 1000
+  failInvoiceReadAfter = null
+  invoicePageReads = 0
 }
 
 function myCompanies() {
@@ -131,6 +139,8 @@ function from(table: string) {
   let writeResult: { rows: Row[]; error: { code: string; message: string } | null } | null = null
   let byKey = false
   let headCount = false
+  let orderCol: string | null = null
+  let limitN: number | null = null
 
   const doWrite = () => {
     if (writeResult) return writeResult
@@ -176,7 +186,16 @@ function from(table: string) {
       missNextKeyLookup = false
       return { data: [], error: null }
     }
-    return { data: visible(table).filter(r => filters.every(f => f(r))).map(r => pick(r, cols)), error: null }
+    if (table === 'cost_ledger_invoices' && failInvoiceReadAfter !== null && invoicePageReads++ >= failInvoiceReadAfter) {
+      return { data: null, error: { code: '57014', message: 'timeout' } }
+    }
+    let hit = visible(table).filter(r => filters.every(f => f(r)))
+    if (orderCol) {
+      const c = orderCol
+      hit = [...hit].sort((a, b) => (a[c] == null || b[c] == null ? 0 : a[c]! < b[c]! ? -1 : a[c]! > b[c]! ? 1 : 0))
+    }
+    hit = hit.slice(0, Math.min(limitN ?? Infinity, maxRows))
+    return { data: hit.map(r => pick(r, cols)), error: null }
   }
   const one = (strict: boolean) => {
     const { data, error } = run()
@@ -194,7 +213,9 @@ function from(table: string) {
     eq: (col: string, v: unknown) => { if (col === 'idempotency_key') byKey = true; filters.push(r => r[col] === v); return q },
     is: (col: string, v: unknown) => { filters.push(r => (r[col] ?? null) === v); return q },
     in: (col: string, vs: unknown[]) => { filters.push(r => vs.includes(r[col])); return q },
-    order: () => q,
+    gt: (col: string, v: unknown) => { filters.push(r => (r[col] as string) > (v as string)); return q },
+    order: (col: string) => { orderCol = col; return q },
+    limit: (n: number) => { limitN = n; return q },
     single: () => one(true),
     maybeSingle: () => one(false),
     then: (resolve: (v: unknown) => unknown) => resolve(run()),
@@ -359,7 +380,7 @@ describe('OCR 登録', () => {
   it('1. 初回の OCR 登録ができ、project_id は親の台帳項目から保存される', async () => {
     const r = await post(I_A1, { ...ocr(), project_id: P_A2 /* 本文の project_id は使わない */ })
     expect(r.status).toBe(200)
-    expect(r.json).toEqual(expect.objectContaining({ newActualCost: 33000, replayed: false, synced: true }))
+    expect(r.json).toEqual(expect.objectContaining({ newActualCost: 33000, invoiceCount: 1, replayed: false, synced: true }))
     expect(r.json.invoice).toEqual(expect.objectContaining({ amount: 33000, source: 'ocr', vendor_name: 'QA設備', invoice_number: 'INV-001' }))
     expect(r.json.invoice).not.toHaveProperty('document_sha256')
     const saved = tables.cost_ledger_invoices.at(-1)!
@@ -667,7 +688,7 @@ describe('actual_cost の再集計（16 / RPC で登録と一体）', () => {
     expect((await post(I_A1, manual({ idempotency_key: KEY1, amount: 50000 }))).status).toBe(503)
     const retry = await post(I_A1, manual({ idempotency_key: KEY1, amount: 50000 }))
     expect(retry.status).toBe(200)
-    expect(retry.json).toEqual(expect.objectContaining({ replayed: false, synced: true, newActualCost: 50000 }))
+    expect(retry.json).toEqual(expect.objectContaining({ replayed: false, synced: true, newActualCost: 50000, invoiceCount: 1 }))
     // さらに応答喪失 → 再送しても増えない
     const again = await post(I_A1, manual({ idempotency_key: KEY1, amount: 50000 }))
     expect(again.json).toEqual(expect.objectContaining({ replayed: true, synced: true, newActualCost: 50000 }))
@@ -919,6 +940,52 @@ describe('一覧（GET /api/cost-ledger）の invoice_count（17. 内訳を開�
 
   it('件数の読み取りに失敗したら一覧ごと 500（件数不明のまま編集可能な状態にしない）', async () => {
     failInvoiceRead = true
+    const r = await list()
+    expect(r.status).toBe(500)
+    expect(r.json.items).toBeUndefined()
+    expectNoLeak(r.json)
+  })
+
+  // ── 取得上限（PostgREST max-rows）を超える件数 ──
+  const bulk = (itemId: string, from: number, n: number) => {
+    for (let k = 0; k < n; k++) {
+      tables.cost_ledger_invoices.push({
+        id: id(10000 + from + k), cost_ledger_item_id: itemId, project_id: P_A1, amount: 1,
+        invoice_date: null, payment_date: null, note: null, source: 'manual', created_at: '2026-10-01T00:00:00Z',
+      })
+    }
+  }
+
+  it('1,000件を超える請求書も数え落とさない（max-rows 1000）', async () => {
+    bulk(I_A1, 0, 1500)
+    bulk(I_A1_2, 2000, 3)
+    const r = await list()
+    expect(r.status).toBe(200)
+    const byId = Object.fromEntries(r.json.items!.map(i => [i.id, i.invoice_count]))
+    expect(byId).toEqual({ [I_A1]: 1500, [I_A1_2]: 3 })
+  })
+
+  it('上限で切られた先にしか請求書がない項目を 0件（直接編集できる）と誤認しない', async () => {
+    // 1回の読み取りで返る 1000 行がすべて I_A1。I_A1_2 の1件は 1001 行目以降にしかない
+    bulk(I_A1, 0, 1000)
+    bulk(I_A1_2, 5000, 1)
+    const r = await list()
+    expect(r.json.items!.find(i => i.id === I_A1_2)!.invoice_count).toBe(1)
+    expect(r.json.items!.find(i => i.id === I_A1)!.invoice_count).toBe(1000)
+  })
+
+  it('max-rows が1ページの行数より小さい設定でも正しく数える', async () => {
+    maxRows = 7
+    bulk(I_A1, 0, 25)
+    bulk(I_A1_2, 100, 8)
+    const r = await list()
+    const byId = Object.fromEntries(r.json.items!.map(i => [i.id, i.invoice_count]))
+    expect(byId).toEqual({ [I_A1]: 25, [I_A1_2]: 8 })
+  })
+
+  it('途中のページの読み取りに失敗したら一覧ごと 500（途中までの件数を返さない）', async () => {
+    bulk(I_A1, 0, 1500)
+    failInvoiceReadAfter = 1
     const r = await list()
     expect(r.status).toBe(500)
     expect(r.json.items).toBeUndefined()

@@ -138,7 +138,8 @@ function postInvoice(s: State, item: CostItem, raw: unknown): { res: Response; l
   s.invoices.push(inv)
   const loseResponse = takeFault(s, 'lose_next_response')
   item.actual_cost = s.invoices.filter(i => i.cost_ledger_item_id === item.id).reduce((a, i) => a + Number(i.amount), 0)
-  return { res: json({ invoice: publicInvoice(inv), newActualCost: item.actual_cost, replayed: false, synced: true }), loseResponse }
+  const invoiceCount = s.invoices.filter(i => i.cost_ledger_item_id === item.id).length
+  return { res: json({ invoice: publicInvoice(inv), newActualCost: item.actual_cost, invoiceCount, replayed: false, synced: true }), loseResponse }
 }
 
 const json = (body: unknown, status = 200) =>

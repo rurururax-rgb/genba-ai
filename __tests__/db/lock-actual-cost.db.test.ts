@@ -7,6 +7,8 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import path from 'node:path'
 import type { Client } from 'pg'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import {
@@ -316,5 +318,211 @@ describe('この migration で防げないもの（残るリスクの記録）',
     // ただし、この状態から任意の値への直接変更はできない（合計への修正だけ可能）
     expect((await pgError(asUser(userA, () => directUpdate(userA, item, { actual_cost: '1' })))).code).toBe('CL423')
     expect(await asUser(userA, () => directUpdate(userA, item, { actual_cost: '15000' }))).toBe(1)
+  })
+})
+
+// ── SQL Editor 用の適用・ロールバックスクリプト（docs/db/p1-3-sql-editor-*.sql） ──
+
+describe('SQL Editor 用スクリプト（1 トランザクションでの適用と migration 履歴）', () => {
+  const DOCS = path.resolve(__dirname, '../../docs/db')
+  const APPLY = readFileSync(path.join(DOCS, 'p1-3-sql-editor-apply.sql'), 'utf8')
+  const ROLLBACK = readFileSync(path.join(DOCS, 'p1-3-sql-editor-rollback.sql'), 'utf8')
+  // Supabase CLI の履歴テーブルの代用。P1-2 は SQL Editor で履歴つきで適用済み（本番と同じ前提）
+  const HISTORY_SQL = `
+    CREATE SCHEMA supabase_migrations;
+    CREATE TABLE supabase_migrations.schema_migrations (version text PRIMARY KEY, statements text[], name text);
+    INSERT INTO supabase_migrations.schema_migrations (version, name) VALUES ('20261010000002', 'atomic_cost_ledger_invoice_writes');`
+  const APPLIED = [{ history_rows: '1', triggers: '1', functions: '1' }]
+  const NONE = [{ history_rows: '0', triggers: '0', functions: '0' }]
+
+  let dbSeq = 0
+  /** P1-3 未適用の DB（SQL Editor で適用する前の本番に相当） */
+  async function freshDb(opts: { history?: string | null; withP1_2?: boolean } = {}) {
+    const name = `p13_editor_${++dbSeq}`
+    await server.createDatabase(name)
+    const c = await server.connect(name)
+    await setupBase(c)
+    if (opts.withP1_2 !== false) await c.query(readMigration(MIGRATION_P1_2))
+    if (opts.history !== null) await c.query(opts.history ?? HISTORY_SQL)
+    return c
+  }
+  async function history(c: Client) {
+    const { rows } = await c.query("SELECT version, name FROM supabase_migrations.schema_migrations WHERE version = '20261011000001'")
+    return rows
+  }
+  async function objects(c: Client) {
+    const { rows } = await c.query(`
+      SELECT (SELECT count(*)::int FROM pg_trigger WHERE tgname = 'cost_ledger_items_lock_actual_cost' AND NOT tgisinternal) AS triggers,
+             (SELECT count(*)::int FROM pg_proc WHERE proname = 'cost_ledger_items_lock_actual_cost') AS functions`)
+    return rows[0] as { triggers: number; functions: number }
+  }
+  /** 全文を 1 回のクエリ（simple query protocol・複数文）で送る */
+  async function runScript(c: Client, sql: string) {
+    const res = await c.query(sql)
+    const results = Array.isArray(res) ? res : [res]
+    return results[results.length - 1].rows
+  }
+  /** 失敗したら、SQL Editor で案内しているとおり ROLLBACK だけを送る */
+  async function runScriptExpectingError(c: Client, sql: string) {
+    const e = await pgError(c.query(sql))
+    await c.query('ROLLBACK')
+    return e
+  }
+  /** 請求書 1 件（10,000 円）がある項目。actual_cost は合計どおり */
+  async function seedItem(c: Client) {
+    const company = randomUUID()
+    await c.query('INSERT INTO companies (id, name) VALUES ($1, $2)', [company, 'X'])
+    const { rows: [p] } = await c.query('INSERT INTO projects (company_id) VALUES ($1) RETURNING id', [company])
+    const { rows: [item] } = await c.query(
+      "INSERT INTO cost_ledger_items (project_id, company_id, name, actual_cost) VALUES ($1, $2, 'x', 10000) RETURNING id", [p.id, company])
+    await c.query('INSERT INTO cost_ledger_invoices (cost_ledger_item_id, project_id, amount) VALUES ($1, $2, 10000)', [item.id, p.id])
+    return item.id as string
+  }
+
+  it('適用スクリプトの migration 本体は migration ファイルと完全に一致する（ずれ防止）', () => {
+    const start = APPLY.indexOf('-- >>> MIGRATION BODY\n')
+    const end = APPLY.lastIndexOf('-- <<< MIGRATION BODY')
+    expect(start).toBeGreaterThan(0)
+    expect(APPLY.slice(start + '-- >>> MIGRATION BODY\n'.length, end)).toBe(readMigration(MIGRATION_P1_3))
+    // migration ファイル自体はトランザクション制御を持たない（CLI の実行方法と衝突させない）
+    expect(readMigration(MIGRATION_P1_3)).not.toMatch(/^\s*(BEGIN|COMMIT|ROLLBACK|START TRANSACTION)\s*;/im)
+    // 適用・ロールバックとも 1 トランザクション（BEGIN と COMMIT が 1 回ずつ）
+    for (const sql of [APPLY, ROLLBACK]) {
+      expect(sql.match(/^BEGIN;$/gm)).toHaveLength(1)
+      expect(sql.match(/^COMMIT;$/gm)).toHaveLength(1)
+    }
+  })
+
+  it('成功時: 関数・トリガー・履歴がそろって確定し、トリガーが効く。トランザクションは閉じている', async () => {
+    const c = await freshDb()
+    const item = await seedItem(c)
+    expect(await runScript(c, APPLY)).toEqual(APPLIED)
+    expect(await history(c)).toEqual([{ version: '20261011000001', name: 'lock_actual_cost_with_invoices' }])
+    const { rows } = await c.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE pid = pg_backend_pid() AND state = 'idle in transaction'")
+    expect(rows[0].n).toBe(0)
+    // 権限: アプリのロールはトリガー関数を直接実行できない
+    const { rows: [priv] } = await c.query(`
+      SELECT has_function_privilege('anon', 'public.cost_ledger_items_lock_actual_cost()', 'EXECUTE') AS anon,
+             has_function_privilege('authenticated', 'public.cost_ledger_items_lock_actual_cost()', 'EXECUTE') AS auth`)
+    expect(priv).toEqual({ anon: false, auth: false })
+    expect((await pgError(c.query('UPDATE cost_ledger_items SET actual_cost = 1 WHERE id = $1', [item]))).code).toBe('CL423')
+    await c.end()
+  })
+
+  it('二度目の実行はガードで止まり、何も変わらない（二重登録しない）', async () => {
+    const c = await freshDb()
+    await runScript(c, APPLY)
+    const e = await runScriptExpectingError(c, APPLY)
+    expect(e.message).toBe('P1-3 apply aborted: version 20261011000001 is already recorded')
+    expect(await history(c)).toHaveLength(1)
+    expect(await objects(c)).toEqual({ triggers: 1, functions: 1 })
+    await c.end()
+  })
+
+  it('P1-2 の履歴が無ければ何もせずに止まる', async () => {
+    const c = await freshDb({
+      history: `CREATE SCHEMA supabase_migrations;
+        CREATE TABLE supabase_migrations.schema_migrations (version text PRIMARY KEY, name text);`,
+    })
+    const e = await runScriptExpectingError(c, APPLY)
+    expect(e.message).toBe('P1-3 apply aborted: version 20261010000002 (P1-2) is not recorded')
+    expect(await objects(c)).toEqual({ triggers: 0, functions: 0 })
+    expect(await history(c)).toHaveLength(0)
+    await c.end()
+  })
+
+  it('途中失敗（migration の事前条件: RPC が無い）: 関数もトリガーも履歴も残らない', async () => {
+    const c = await freshDb({ withP1_2: false }) // 履歴だけあって実体が無い
+    const e = await runScriptExpectingError(c, APPLY)
+    expect(e.message).toBe('P1-3 precondition failed: apply 20261010000002 first')
+    expect(await objects(c)).toEqual({ triggers: 0, functions: 0 })
+    expect(await history(c)).toHaveLength(0)
+    await c.end()
+  })
+
+  it('最後の履歴登録で失敗しても、作成済みの関数・トリガーごと取り消される', async () => {
+    // 履歴テーブルに想定外の必須列がある場合を再現（INSERT が最後の段階で失敗する）
+    const c = await freshDb({
+      history: `CREATE SCHEMA supabase_migrations;
+        CREATE TABLE supabase_migrations.schema_migrations (version text PRIMARY KEY, required_extra text);
+        INSERT INTO supabase_migrations.schema_migrations (version, required_extra) VALUES ('20261010000002', 'x');
+        ALTER TABLE supabase_migrations.schema_migrations ALTER COLUMN required_extra SET NOT NULL;`,
+    })
+    const other = await server.connect(c.database!)
+    const pending = c.query(APPLY).then(() => 'ok', (err: { code: string }) => err.code)
+    expect(await pending).toBe('23502') // not_null_violation
+    expect(await objects(other)).toEqual({ triggers: 0, functions: 0 })
+    // エラーの後も実行を続けて COMMIT まで届いた場合: 失敗したトランザクションの COMMIT は ROLLBACK になる
+    const commit = await c.query('COMMIT')
+    expect(commit.command).toBe('ROLLBACK')
+    expect(await objects(c)).toEqual({ triggers: 0, functions: 0 })
+    expect((await c.query("SELECT count(*)::int AS n FROM supabase_migrations.schema_migrations WHERE version = '20261011000001'")).rows[0].n).toBe(0)
+    await other.end()
+    await c.end()
+  })
+
+  it('関数・トリガーはあるのに履歴が無い状態では置き換えずに止まる', async () => {
+    const c = await freshDb()
+    await c.query(readMigration(MIGRATION_P1_3)) // 履歴を残さずに実体だけ作られた状態
+    const e = await runScriptExpectingError(c, APPLY)
+    expect(e.message).toBe('P1-3 apply aborted: cost_ledger_items_lock_actual_cost already exists (history is missing)')
+    expect(await history(c)).toHaveLength(0)
+    await c.end()
+  })
+
+  it('cost_ledger_items のロックが取れなければ 5 秒で諦め、何も残らない', async () => {
+    const c = await freshDb()
+    const holder = await server.connect(c.database!)
+    await holder.query('BEGIN')
+    await holder.query('LOCK TABLE public.cost_ledger_items IN ROW EXCLUSIVE MODE') // 書き込み中のトランザクション
+    const e = await runScriptExpectingError(c, APPLY)
+    expect(e.code).toBe('55P03')
+    await holder.query('ROLLBACK')
+    await holder.end()
+    expect(await objects(c)).toEqual({ triggers: 0, functions: 0 })
+    expect(await history(c)).toHaveLength(0)
+    expect(await runScript(c, APPLY)).toEqual(APPLIED) // 時間をおいて再実行できる
+    await c.end()
+  }, 30_000)
+
+  it('履歴テーブルに name 列が無くても version だけで登録する。履歴テーブルが無ければ止まる', async () => {
+    const c = await freshDb({
+      history: `CREATE SCHEMA supabase_migrations;
+        CREATE TABLE supabase_migrations.schema_migrations (version text PRIMARY KEY);
+        INSERT INTO supabase_migrations.schema_migrations (version) VALUES ('20261010000002');`,
+    })
+    expect(await runScript(c, APPLY)).toEqual(APPLIED)
+    await c.end()
+
+    const d = await freshDb({ history: null })
+    const e = await runScriptExpectingError(d, APPLY)
+    expect(e.message).toBe('P1-3 apply aborted: supabase_migrations.schema_migrations not found')
+    expect(await objects(d)).toEqual({ triggers: 0, functions: 0 })
+    await d.end()
+  })
+
+  it('ロールバックスクリプト: トリガー・関数・履歴を一緒に消し、データ・RLS・P1-2 は残る。二度目は止まる', async () => {
+    const c = await freshDb()
+    const item = await seedItem(c)
+    await runScript(c, APPLY)
+    const before = await policies(c)
+
+    expect(await runScript(c, ROLLBACK)).toEqual(NONE)
+    expect(await objects(c)).toEqual({ triggers: 0, functions: 0 })
+    expect(await policies(c)).toEqual(before)
+    const { rows: [after] } = await c.query(`
+      SELECT (SELECT count(*)::int FROM cost_ledger_invoices) AS invoices,
+             (SELECT actual_cost::text FROM cost_ledger_items WHERE id = $1) AS actual,
+             (SELECT count(*)::int FROM pg_proc WHERE proname LIKE 'cost_ledger_invoice_%') AS rpcs,
+             (SELECT count(*)::int FROM supabase_migrations.schema_migrations WHERE version = '20261010000002') AS p12_history`, [item])
+    expect(after).toEqual({ invoices: 1, actual: '10000', rpcs: 3, p12_history: 1 })
+    // トリガーが無くなったので直接変更は DB では止まらない（アプリ側の確認だけに戻る）
+    expect((await c.query('UPDATE cost_ledger_items SET actual_cost = 1 WHERE id = $1', [item])).rowCount).toBe(1)
+
+    const e = await runScriptExpectingError(c, ROLLBACK)
+    expect(e.message).toBe('P1-3 rollback aborted: nothing to roll back (no history row, no trigger, no function)')
+    // ロールバック後は適用スクリプトをもう一度実行できる
+    expect(await runScript(c, APPLY)).toEqual(APPLIED)
+    await c.end()
   })
 })

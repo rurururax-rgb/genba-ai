@@ -7,6 +7,11 @@ import { getServerClient } from '@/lib/supabase/server'
 // ──────────────────────────────────────────────────────────
 
 const INVOICE_COUNT_CHUNK = 100
+// 1回に読む請求書の行数。PostgREST の max-rows（Supabase の既定は 1000）がこれより小さくても、
+// 「0行が返るまで」読み進めるので数え落とさない
+const INVOICE_PAGE_SIZE = 1000
+// 読み進める回数の上限（無限ループ防止）。超えたら件数不明として一覧ごと失敗にする
+const INVOICE_MAX_PAGES = 1000
 
 export async function GET(req: NextRequest) {
   const projectId = req.nextUrl.searchParams.get('project_id')
@@ -29,19 +34,8 @@ export async function GET(req: NextRequest) {
   // 各項目の業者請求書の件数（請求書がある項目の実績原価は画面で直接編集させない）。
   // 内訳パネルを開いていない行でも判定できるよう、一覧と一緒に返す。
   // 読み取りに失敗したら一覧ごと失敗にする（件数不明のまま直接編集できる状態にしない）
-  const invoiceCounts = new Map<string, number>()
-  const itemIds = (items ?? []).map(i => i.id as string)
-  for (let i = 0; i < itemIds.length; i += INVOICE_COUNT_CHUNK) {
-    const { data: rows, error: invErr } = await supabase
-      .from('cost_ledger_invoices')
-      .select('cost_ledger_item_id')
-      .in('cost_ledger_item_id', itemIds.slice(i, i + INVOICE_COUNT_CHUNK))
-    if (invErr) return NextResponse.json({ error: '原価台帳を読み込めませんでした' }, { status: 500 })
-    for (const r of rows ?? []) {
-      const key = r.cost_ledger_item_id as string
-      invoiceCounts.set(key, (invoiceCounts.get(key) ?? 0) + 1)
-    }
-  }
+  const invoiceCounts = await countInvoicesByItem(supabase, (items ?? []).map(i => i.id as string))
+  if (!invoiceCounts) return NextResponse.json({ error: '原価台帳を読み込めませんでした' }, { status: 500 })
   const itemsWithCounts = (items ?? []).map(i => ({ ...i, invoice_count: invoiceCounts.get(i.id as string) ?? 0 }))
 
   // 見積サマリ（粗利ウィジェット用 + 業者別売上額計算用）
@@ -109,6 +103,40 @@ export async function GET(req: NextRequest) {
       has_actual_data:       actualItems.length > 0,
     },
   })
+}
+
+/**
+ * 台帳項目ごとの請求書の件数。読み取りに失敗したら null（呼び出し側は一覧ごと失敗にする）。
+ * PostgREST は1回の応答の行数に上限（max-rows）があり、上限で切られても応答はエラーにならない。
+ * そのため id の昇順に「前回の最後の id より後」を読み（keyset ページング）、0行が返るまで続ける。
+ * 上限が何行でも数え落とさない（1ページが上限で切られても、次のページがその続きから始まる）。
+ */
+async function countInvoicesByItem(
+  supabase: Awaited<ReturnType<typeof getServerClient>>,
+  itemIds: string[],
+): Promise<Map<string, number> | null> {
+  const counts = new Map<string, number>()
+  for (let i = 0; i < itemIds.length; i += INVOICE_COUNT_CHUNK) {
+    const chunk = itemIds.slice(i, i + INVOICE_COUNT_CHUNK)
+    let after: string | null = null
+    for (let page = 0; ; page++) {
+      if (page >= INVOICE_MAX_PAGES) return null
+      let query = supabase
+        .from('cost_ledger_invoices')
+        .select('id, cost_ledger_item_id')
+        .in('cost_ledger_item_id', chunk)
+      if (after) query = query.gt('id', after)
+      const { data: rows, error } = await query.order('id').limit(INVOICE_PAGE_SIZE)
+      if (error || !Array.isArray(rows)) return null
+      if (rows.length === 0) break
+      for (const r of rows) {
+        const key = r.cost_ledger_item_id as string
+        counts.set(key, (counts.get(key) ?? 0) + 1)
+      }
+      after = rows[rows.length - 1].id as string
+    }
+  }
+  return counts
 }
 
 // ──────────────────────────────────────────────────────────

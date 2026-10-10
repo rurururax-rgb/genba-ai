@@ -208,6 +208,7 @@ export async function POST(req: NextRequest, { params }: Params) {
   return NextResponse.json({
     invoice:       saved.invoice,
     newActualCost: toNumberOrNull(saved.actual_cost),
+    invoiceCount:  saved.invoice_count,
     replayed:      false,
     synced:        true,
   })
