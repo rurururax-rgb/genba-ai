@@ -1,88 +1,43 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
+import { mapAddEstimateItemsError, parseAddRequest } from '@/lib/line-events/add-estimate-items'
 
-type ItemPayload = {
-  name:          string
-  unit:          string
-  selling_price: number | null
-  category?:     string
-  quantity?:     number | null   // 音声抽出した数量（null の場合はデフォルト 1 を使用）
-  memo?:         string | null   // 音声メモ（単位不一致・式固定時の参考情報）
-}
-
-type RequestBody = {
-  project_id: string
-  line_event_id: string
-  items: ItemPayload[]
-}
-
+// POST: AI整理タブの「見積に追加」— LINE イベントの候補を見積項目に追加する。
+//   見積項目の追加と、未振り分けイベントの案件への紐付け（line_events.project_id）・反映済みフラグを
+//   RPC add_line_event_estimate_items で 1 トランザクションで行う（KI-001）。
+//   会社の一致・別案件に紐付け済み・反映済みの確認も RPC 内でイベント行をロックして行う。
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json()) as RequestBody
-    const { project_id, line_event_id, items } = body
-
-    if (!project_id || !line_event_id || !items?.length) {
+    const parsed = parseAddRequest(await request.json().catch(() => null))
+    if (!parsed) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
     }
 
     const supabase = await getServerClient()
-
-    // 認証ユーザーの company_id を取得
-    const {
-      data: { user },
-    } = await supabase.auth.getUser()
+    const { data: { user } } = await supabase.auth.getUser()
     if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
 
-    const { data: membership } = await supabase
-      .from('company_members')
-      .select('company_id')
-      .eq('user_id', user.id)
-      .single()
-
-    if (!membership) {
-      return NextResponse.json({ error: 'No company membership' }, { status: 403 })
+    const { data, error } = await supabase.rpc('add_line_event_estimate_items', {
+      p_project_id:    parsed.project_id,
+      p_line_event_id: parsed.line_event_id,
+      p_items:         parsed.items,
+    })
+    if (error) {
+      console.error('[estimate-items] rpc error:', error.code)
+      const mapped = mapAddEstimateItemsError(error)
+      return NextResponse.json(mapped.body, { status: mapped.status })
     }
 
-    const company_id = membership.company_id
-
-    // estimate_items に INSERT
-    // amount は DB GENERATED（quantity * selling_price）なので送らない
-    const rows = items.map((item, i) => ({
-      project_id,
-      company_id,
-      line_event_id,
-      name:          item.name,
-      unit:          item.unit,
-      selling_price: item.selling_price,
-      category:      item.category ?? null,
-      quantity:      item.quantity ?? 1,
-      memo:          item.memo ?? null,
-      source: 'past_item' as const,
-      sort_order: i,
-    }))
-
-    const { error: insertErr } = await supabase.from('estimate_items').insert(rows)
-    if (insertErr) {
-      console.error('[estimate-items] insert error:', insertErr.message)
-      return NextResponse.json({ error: insertErr.message }, { status: 500 })
-    }
-
-    // line_events.reflected_to_estimate = true に更新
-    const { error: updateErr } = await supabase
-      .from('line_events')
-      .update({ reflected_to_estimate: true })
-      .eq('id', line_event_id)
-
-    if (updateErr) {
-      // 見積追加は成功しているため、フラグ更新失敗はログのみ
-      console.error('[estimate-items] reflected_to_estimate update error:', updateErr.message)
-    }
-
-    return NextResponse.json({ created: rows.length })
+    const result = (data ?? {}) as { created?: number; project_id?: string; linked?: boolean }
+    return NextResponse.json({
+      created:    result.created ?? parsed.items.length,
+      project_id: result.project_id ?? parsed.project_id,
+      linked:     result.linked ?? false,
+    })
   } catch (err) {
-    console.error('[estimate-items] unexpected error:', err)
+    console.error('[estimate-items] unexpected error:', err instanceof Error ? err.name : 'unknown')
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }
