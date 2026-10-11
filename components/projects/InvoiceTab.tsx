@@ -130,10 +130,9 @@ export function printInvoice(invoice: Partial<Invoice>, subtotal: number, tax: n
   // 顧客名末尾の「様」が既に入っている場合は除去して重複を防ぐ
   const customerName = (invoice.customer_name || '').replace(/様$/, '').trim() || '　'
 
-  // Excelの列幅比率: A=2.71, B=25.43, C=5.29, D=5.14, E=18.71, F=38 (合計95.28)
+  // 上段の左右比率はExcelの列幅比率: A=2.71, B=25.43, C=5.29, D=5.14, E=18.71, F=38 (合計95.28)
   // 左ブロック(A-E): 57.28/95.28 = 60.1%  右ブロック(F): 38/95.28 = 39.9%
-  // テーブル列幅(pt換算 A4-198mm内):
-  //   A≈5.6mm  B≈52.8mm  C≈11.0mm  D≈10.7mm  E≈38.9mm  F≈79.1mm
+  // 明細テーブルの列幅は工事名を1行に収めるため Excel 比率から変更している（.items-table colgroup）
 
   const html = `<!DOCTYPE html>
 <html lang="ja">
@@ -179,8 +178,9 @@ html, body {
 .print-hint { color: #a0b8d0; font-size: 9pt; }
 
 /* ─ A4ページ ─ */
+/* 画面でも印刷時と同じ A4 幅（210mm）にして、プレビューと印刷で明細の折り返しが変わらないようにする */
 .page {
-  width: 198mm;
+  width: 210mm;
   min-height: 277mm;
   background: #fff;
   margin: 10mm auto;
@@ -302,13 +302,16 @@ html, body {
   font-size: 8.5pt;
   table-layout: fixed;
 }
-/* Excelの列幅比率を % で再現（合計100%、幅に依存しない） */
+/* 列幅（合計100%、幅に依存しない）。工事名を1行に収めやすいよう工事名を広く、備考を狭くしている */
 .items-table colgroup col.c-no   { width: 3%; }
-.items-table colgroup col.c-name { width: 27%; }
-.items-table colgroup col.c-qty  { width: 6%; }
-.items-table colgroup col.c-unit { width: 6%; }
+.items-table colgroup col.c-name { width: 44%; }
+.items-table colgroup col.c-qty  { width: 7%; }
+.items-table colgroup col.c-unit { width: 7%; }
 .items-table colgroup col.c-amt  { width: 20%; }
-.items-table colgroup col.c-memo { width: 38%; }
+.items-table colgroup col.c-memo { width: 19%; }
+/* ページ境界で行を分割しない。小計〜合計（tfoot）は各ページに繰り返さず、明細の最後に1回だけ出す */
+.items-table tr { break-inside: avoid; page-break-inside: avoid; }
+.items-table tfoot { display: table-row-group; }
 
 .items-table th {
   background: #EFEFEF;
@@ -326,11 +329,13 @@ html, body {
   overflow: hidden;
 }
 .td-no   { text-align: center; font-size: 7.5pt; color: #000; }
-.td-name { }
+/* 工事名・備考は切り捨てない。収まらない文字列（長い英単語を含む）は折り返して全文を出し、行の高さを伸ばす */
+.td-name, .td-memo { overflow: visible; overflow-wrap: anywhere; line-height: 1.35; }
+/* 工事名の1行化は下のスクリプトが行う（8.5pt → 最小7.5pt。それでも収まらなければ 8.5pt で折り返し） */
+.td-name.fit-one-line { white-space: nowrap; }
 .td-qty  { text-align: right; }
 .td-unit { text-align: center; }
 .td-amt  { text-align: right; font-variant-numeric: tabular-nums; }
-.td-memo { }
 
 /* 小計・合計行 */
 .items-table tfoot td {
@@ -353,6 +358,8 @@ html, body {
   line-height: 1.6;
 }
 .notes-label { font-size: 7.5pt; color: #666; margin-bottom: 2pt; font-weight: bold; }
+.notes-label { break-after: avoid; page-break-after: avoid; }
+.notes-section > div:last-child { overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
@@ -440,7 +447,7 @@ html, body {
       ${displayRows.map((item, i) => item
         ? `<tr>
             <td class="td-no">${i + 1}</td>
-            <td class="td-name">${escHtml(item.name)}</td>
+            <td class="td-name"><span class="name-text">${escHtml(item.name)}</span></td>
             <td class="td-qty">${item.quantity !== 1 ? item.quantity : ''}</td>
             <td class="td-unit">${escHtml(item.unit)}</td>
             <td class="td-amt">${item.amount ? '¥' + f(item.amount) : ''}</td>
@@ -487,6 +494,35 @@ html, body {
 
 </div><!-- /doc -->
 </div><!-- /page -->
+
+<script>
+// 工事名を実際の文字幅とセル幅で判定し、1行に収まる最大の文字サイズ（8.5pt〜7.5pt）にする。
+// 7.5pt でも収まらない場合は基本サイズで折り返す（省略・切り捨てはしない）
+(function () {
+  var SIZES = [8.5, 8.25, 8, 7.75, 7.5];
+  function fit() {
+    document.querySelectorAll('.td-name').forEach(function (td) {
+      var text = td.querySelector('.name-text');
+      td.classList.remove('fit-one-line');
+      td.style.fontSize = '';
+      if (!text) return;
+      var cs = getComputedStyle(td);
+      var avail = td.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      td.classList.add('fit-one-line');
+      for (var i = 0; i < SIZES.length; i++) {
+        td.style.fontSize = SIZES[i] + 'pt';
+        if (text.getBoundingClientRect().width <= avail) return;
+      }
+      td.classList.remove('fit-one-line');
+      td.style.fontSize = '';
+    });
+  }
+  fit();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(fit);
+  window.addEventListener('load', fit);
+  window.addEventListener('beforeprint', fit);
+})();
+</script>
 
 </body>
 </html>`
