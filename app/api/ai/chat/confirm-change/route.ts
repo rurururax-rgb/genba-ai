@@ -6,11 +6,13 @@
  * - project_id / company_id はリクエストボディに含まれても、
  *   セッションから取得した値で上書きするか RLS で検証する
  * - 書き込み可能フィールドをホワイトリスト制御し SQL injection / 不正書き込みを防ぐ
+ * - 工種（group_id / target_group_id）は同じ会社・同じ案件の有効なものだけ許可する（KI-002）
+ * - DB のエラー文は利用者に返さない（サーバーログのみ。dbErrorResponse）
  */
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
-import { isActiveProject } from '@/lib/estimate/ownership'
+import { checkOptionalGroup, isActiveProject, isUuid } from '@/lib/estimate/ownership'
 import type { ConfirmableChange } from '@/lib/ai/chat/types'
 import { calculateSellingPrice, DEFAULT_MARKUP_RATE } from '@/lib/estimate/pricing'
 import { countItemInvoices } from '@/lib/cost-ledger/actual-cost-lock'
@@ -40,6 +42,34 @@ function pickAllowed(
   )
 }
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v != null && typeof v === 'object' && !Array.isArray(v)
+}
+
+const invalidRequest = () => NextResponse.json({ error: 'Invalid request' }, { status: 400 })
+
+/** checkOptionalGroup の結果を応答に変える。'ok' なら null */
+function groupCheckResponse(result: 'ok' | 'invalid' | 'not_found'): NextResponse | null {
+  if (result === 'invalid') return invalidRequest()
+  if (result === 'not_found') return NextResponse.json({ error: 'Group not found' }, { status: 404 })
+  return null
+}
+
+/**
+ * 想定外の DB エラー。詳細（SQL・制約名・ID）はサーバーログにだけ残し、利用者には固定文言を返す。
+ * 入力値の形式違い（22xxx・NOT NULL・CHECK）は 400、参照先が無い（外部キー）は 404、重複は 409。
+ */
+function dbErrorResponse(tag: string, error: { code?: string | null; message?: string }): NextResponse {
+  console.error(`[confirm-change ${tag}]`, error.code, error.message)
+  const code = error.code ?? ''
+  if (code.startsWith('22') || code === '23502' || code === '23514') {
+    return NextResponse.json({ error: '入力内容を確認してください' }, { status: 400 })
+  }
+  if (code === '23503') return NextResponse.json({ error: '関連するデータが見つかりません' }, { status: 404 })
+  if (code === '23505') return NextResponse.json({ error: '登録できませんでした。画面を再読み込みしてください。' }, { status: 409 })
+  return NextResponse.json({ error: '保存できませんでした。もう一度お試しください。' }, { status: 500 })
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
@@ -55,9 +85,15 @@ export async function POST(req: NextRequest) {
     .single()
   if (!membership) return NextResponse.json({ error: 'No company' }, { status: 403 })
 
-  const body = await req.json() as { change: ConfirmableChange }
-  const { change } = body
+  let body: { change?: ConfirmableChange }
+  try {
+    body = await req.json() as { change?: ConfirmableChange }
+  } catch {
+    return invalidRequest()
+  }
+  const change = isPlainObject(body) ? body.change : undefined
   if (!change) return NextResponse.json({ error: 'change required' }, { status: 400 })
+  if (!isPlainObject(change) || !isPlainObject(change.proposed)) return invalidRequest()
 
   const { target_table, change_type, proposed, original } = change
 
@@ -85,8 +121,12 @@ export async function POST(req: NextRequest) {
       const rawRate = (projectData as { markup_rate?: number | null } | null)?.markup_rate
       const markupRate: number = rawRate != null && rawRate > 0 ? rawRate : DEFAULT_MARKUP_RATE
 
-      // project_id は上で自社の有効な案件か確認済み（group_id の確認は PR-2 で対応）
+      // project_id は上で自社の有効な案件か確認済み。group_id は同じ会社・同じ案件の有効な工種だけ（null・省略は未分類）
       const safeFields = pickAllowed(proposed, ESTIMATE_ITEM_ALLOWED)
+      const groupError = groupCheckResponse(
+        await checkOptionalGroup(supabase, safeFields.group_id, rawProjectId, membership.company_id),
+      )
+      if (groupError) return groupError
 
       // 売価モード決定:
       //   AI が selling_price を明示 → MANUAL（提案値を尊重）
@@ -120,7 +160,7 @@ export async function POST(req: NextRequest) {
         .select('id, name, quantity, unit, selling_price, amount, cost_price, vendor_name, memo, group_id, selling_price_mode')
         .single()
 
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      if (error) return dbErrorResponse('estimate_items create', error)
       return NextResponse.json({ ok: true, change_id: change.id, data })
     }
 
@@ -137,6 +177,16 @@ export async function POST(req: NextRequest) {
       }
       if (!Array.isArray(srcItems) || srcItems.length === 0) {
         return NextResponse.json({ error: 'items is empty' }, { status: 400 })
+      }
+      if (!srcItems.every(isPlainObject)) return invalidRequest()
+
+      // 追加先の工種（target_group_id）と、各行の group_id（登録時は target_group_id で上書きされる）を
+      // 1件でも不正なら何も登録しない。同じ会社・同じ案件の有効な工種だけ許可（null・省略は未分類）
+      for (const groupId of [targetGroupId, ...srcItems.map(item => item.group_id)]) {
+        const groupError = groupCheckResponse(
+          await checkOptionalGroup(supabase, groupId, rawProjectId, membership.company_id),
+        )
+        if (groupError) return groupError
       }
 
       // 案件掛け率を1回だけ取得（全行共通）
@@ -183,29 +233,55 @@ export async function POST(req: NextRequest) {
         .insert(rows)
         .select('id, name, quantity, unit, selling_price, amount, selling_price_mode')
 
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      if (error) return dbErrorResponse('estimate_items bulk_create', error)
       return NextResponse.json({ ok: true, change_id: change.id, inserted_count: data?.length ?? 0, data })
     }
 
     if (change_type === 'update') {
       const itemId = proposed.id as string | undefined
       if (!itemId) return NextResponse.json({ error: 'proposed.id required for update' }, { status: 400 })
+      if (!isUuid(itemId)) return invalidRequest()
 
       const safeFields = pickAllowed(proposed, ESTIMATE_ITEM_ALLOWED)
       if (Object.keys(safeFields).length === 0) {
         return NextResponse.json({ error: '更新するフィールドがありません' }, { status: 400 })
       }
 
+      // 更新先は DB の行で決める（proposed の project_id / company_id は使わない）。
+      // 他社・削除済み・存在しない項目、削除済み案件の項目は区別せず 404
+      const { data: target } = await supabase
+        .from('estimate_items')
+        .select('id, project_id, company_id')
+        .eq('id', itemId)
+        .is('deleted_at', null)
+        .maybeSingle()
+      if (
+        !target || target.company_id !== membership.company_id
+        || !(await isActiveProject(supabase, target.project_id, membership.company_id))
+      ) {
+        return NextResponse.json({ error: 'Not found or unauthorized' }, { status: 404 })
+      }
+      // 工種の変更先は、この項目と同じ会社・同じ案件の有効な工種だけ（null は未分類に戻す）
+      if ('group_id' in safeFields) {
+        const groupError = groupCheckResponse(
+          await checkOptionalGroup(supabase, safeFields.group_id, target.project_id, membership.company_id),
+        )
+        if (groupError) return groupError
+      }
+
       const { data, error } = await supabase
         .from('estimate_items')
         .update({ ...safeFields, updated_at: new Date().toISOString() })
         .eq('id', itemId)
+        .eq('company_id', membership.company_id)
+        .eq('project_id', target.project_id)
         .is('deleted_at', null)
         .select('id, name, quantity, unit, selling_price, amount, cost_price, vendor_name, memo, group_id')
-        .single()
+        .maybeSingle()
 
-      // RLS が弾いた場合は data が null になる
-      if (error || !data) return NextResponse.json({ error: error?.message ?? 'Not found or unauthorized' }, { status: error ? 500 : 404 })
+      if (error) return dbErrorResponse('estimate_items update', error)
+      // 確認後に削除・移動された場合も更新されていないので 404
+      if (!data) return NextResponse.json({ error: 'Not found or unauthorized' }, { status: 404 })
       return NextResponse.json({ ok: true, change_id: change.id, data })
     }
 
@@ -227,7 +303,7 @@ export async function POST(req: NextRequest) {
         .update({ deleted_at: new Date().toISOString() })
         .eq('id', itemId)
 
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      if (error) return dbErrorResponse('estimate_items delete', error)
 
       const itemName = (original?.name ?? '項目') as string
       return NextResponse.json({ ok: true, change_id: change.id, deleted_name: itemName })
@@ -296,7 +372,7 @@ export async function POST(req: NextRequest) {
         .select('id, name, spec, unit, selling_price, cost_price, url, category, created_at')
         .single()
 
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      if (error) return dbErrorResponse('company_estimate_items create', error)
       return NextResponse.json({ ok: true, change_id: change.id, data })
     }
 
@@ -315,9 +391,10 @@ export async function POST(req: NextRequest) {
         .eq('id', itemId)
         .eq('company_id', membership.company_id)
         .select('id, name, spec, unit, selling_price, cost_price, url, category')
-        .single()
+        .maybeSingle()
 
-      if (error || !data) return NextResponse.json({ error: error?.message ?? 'Not found or unauthorized' }, { status: error ? 500 : 404 })
+      if (error) return dbErrorResponse('company_estimate_items update', error)
+      if (!data) return NextResponse.json({ error: 'Not found or unauthorized' }, { status: 404 })
       return NextResponse.json({ ok: true, change_id: change.id, data })
     }
 
@@ -331,7 +408,7 @@ export async function POST(req: NextRequest) {
         .eq('id', itemId)
         .eq('company_id', membership.company_id)
 
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      if (error) return dbErrorResponse('company_estimate_items delete', error)
       return NextResponse.json({ ok: true, change_id: change.id })
     }
   }
@@ -387,7 +464,7 @@ export async function POST(req: NextRequest) {
         .select('id, project_id, status, memo, created_at')
         .single()
 
-      if (error) return NextResponse.json({ error: error.message }, { status: 500 })
+      if (error) return dbErrorResponse('invoice_documents create', error)
       return NextResponse.json({ ok: true, change_id: change.id, data })
     }
   }

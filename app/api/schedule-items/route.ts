@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
 import { getProjectSchedule, createScheduleItem } from '@/lib/services/schedule'
+import { checkOptionalGroup } from '@/lib/estimate/ownership'
 
 // GET /api/schedule-items?project_id=xxx
 export async function GET(request: NextRequest) {
@@ -71,6 +72,12 @@ export async function POST(request: NextRequest) {
     .single()
   if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
 
+  // 見積の工種は同じ会社・この案件の有効なものだけ（null・省略は紐付けなし）。
+  // estimate_groups の RLS は company_id しか見ず、外部キー検査は RLS を通らないため書き込み前に確かめる
+  const group = await checkOptionalGroup(supabase, body.estimate_group_id, body.project_id, membership.company_id)
+  if (group === 'invalid') return NextResponse.json({ error: 'Invalid request' }, { status: 400 })
+  if (group === 'not_found') return NextResponse.json({ error: 'Group not found' }, { status: 404 })
+
   try {
     const item = await createScheduleItem(supabase, body.project_id, membership.company_id, {
       name:              body.name,
@@ -87,7 +94,8 @@ export async function POST(request: NextRequest) {
     })
     return NextResponse.json(item, { status: 201 })
   } catch (err) {
+    // DB のエラー文はログにだけ残し、利用者には固定文言を返す
     console.error('[schedule-items POST]', err instanceof Error ? err.message : err)
-    return NextResponse.json({ error: err instanceof Error ? err.message : 'error' }, { status: 500 })
+    return NextResponse.json({ error: '保存できませんでした。もう一度お試しください。' }, { status: 500 })
   }
 }

@@ -105,6 +105,58 @@ describe('POST /api/line-events/[id]/notes', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// KI-002 PR-2: 工種（見積グループ）の所属確認。fakeClient は estimate_groups を常に空で返す
+// （＝他社・別案件・削除済み・存在しない）。実 DB での検証は __tests__/db/company-isolation-groups.db.test.ts
+// ─────────────────────────────────────────────────────────────────────────────
+
+const G_FOREIGN = '00000000-0000-4000-8000-000000000041'
+
+describe('checkOptionalGroup', () => {
+  it('null・省略は ok、UUID でない値は invalid、見つからない工種は not_found', async () => {
+    const { checkOptionalGroup } = await import('@/lib/estimate/ownership')
+    const db = fakeClient() as never
+    expect(await checkOptionalGroup(db, undefined, P_B, CO_A)).toBe('ok')
+    expect(await checkOptionalGroup(db, null, P_B, CO_A)).toBe('ok')
+    expect(await checkOptionalGroup(db, 'not-a-uuid', P_B, CO_A)).toBe('invalid')
+    expect(await checkOptionalGroup(db, 123, P_B, CO_A)).toBe('invalid')
+    expect(await checkOptionalGroup(db, G_FOREIGN, P_B, CO_A)).toBe('not_found')
+  })
+})
+
+describe('POST /api/ai/chat/confirm-change の工種', () => {
+  const confirm = async (change_type: string, proposed: Record<string, unknown>) =>
+    (await import('@/app/api/ai/chat/confirm-change/route')).POST(json('/api/ai/chat/confirm-change', {
+      change: { id: 'c', target_table: 'estimate_items', change_type, proposed },
+    }))
+  const item = { name: '項目', quantity: 1, unit: '式' }
+
+  beforeEach(() => { ownership.activeProject = true })
+
+  it.each<[string, () => Promise<Response>]>([
+    ['create の group_id', () => confirm('create', { project_id: P_B, ...item, group_id: G_FOREIGN })],
+    ['bulk_create の target_group_id', () => confirm('bulk_create', { project_id: P_B, target_group_id: G_FOREIGN, items: [item] })],
+    ['bulk_create の行の group_id', () => confirm('bulk_create', { project_id: P_B, items: [item, { ...item, group_id: G_FOREIGN }] })],
+  ])('%s が自社のこの案件の工種でなければ 404 を返し、書き込まない', async (_l, call) => {
+    const res = await call()
+    expect(res.status).toBe(404)
+    expect(await res.json()).toEqual({ error: 'Group not found' })
+    expect(writes).toEqual([])
+  })
+
+  it('工種 ID の形式が不正なら 400 を返し、書き込まない', async () => {
+    const res = await confirm('create', { project_id: P_B, ...item, group_id: 'not-a-uuid' })
+    expect(res.status).toBe(400)
+    expect(writes).toEqual([])
+  })
+
+  it('update は DB 上の項目が見つからなければ 404 を返し、書き込まない', async () => {
+    const res = await confirm('update', { id: G_FOREIGN, name: '書き換え', project_id: P_B })
+    expect(res.status).toBe(404)
+    expect(writes).toEqual([])
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // 朝のブリーフィング・請求状況（admin クライアントは RLS を通らない）
 // ─────────────────────────────────────────────────────────────────────────────
 
