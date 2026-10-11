@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
+import { isActiveProject } from '@/lib/estimate/ownership'
 
 // ──────────────────────────────────────────────────────────
 // GET /api/cost-ledger?project_id=xxx
@@ -157,6 +158,10 @@ export async function POST(req: NextRequest) {
 
   const body = await req.json() as { project_id: string; sort_order?: number; vendor_name?: string }
   if (!body.project_id) return NextResponse.json({ error: 'project_id required' }, { status: 400 })
+  // 他社・存在しない・削除済みの案件は区別せず 404（RLS は company_id しか見ないため書き込み前に確かめる）
+  if (!(await isActiveProject(supabase, body.project_id, membership.company_id))) {
+    return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+  }
 
   const { data, error } = await supabase
     .from('cost_ledger_items')

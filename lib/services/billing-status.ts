@@ -115,22 +115,43 @@ export type CompanyBillingStatus = {
 type RawMilestone = {
   id:             string
   project_id:     string
+  company_id:     string | null
   type:           string
   invoice_date:   string | null
   invoice_amount: number | null
   payment_date:   string | null
-  projects:       { id: string; name: string; deleted_at: string | null }
+  projects:       EmbeddedProject | null
 }
 
 type RawInvoice = {
   id:             string
   project_id:     string
+  company_id:     string | null
   invoice_number: string | null
   customer_name:  string | null
   status:         string
   issued_at:      string | null
   payment_due_at: string | null
-  projects:       { id: string; name: string; deleted_at: string | null }
+  projects:       EmbeddedProject | null
+}
+
+type EmbeddedProject = { id: string; name: string; company_id: string | null; deleted_at: string | null }
+
+/**
+ * 行に埋め込んだ案件が、行と同じ会社（companyId 指定時はその会社）のものか。
+ *
+ * project_billing_milestones / invoice_documents の RLS は行の company_id しか見ず、project_id の外部キー検査は
+ * RLS を通らないため、「company_id = 自社・project_id = 他社の案件」という行を作れてしまう（KI-002）。
+ * admin クライアント（朝のブリーフィング）は RLS を通らないので、そのまま埋め込むと他社の案件名を取得してしまう。
+ * 案件名を使う前に必ずこれで確かめ、合わない行は捨てる。
+ */
+export function isOwnCompanyProjectRow<T extends { company_id: string | null; projects: { company_id: string | null } | null }>(
+  row: T,
+  companyId?: string,
+): row is T & { projects: NonNullable<T['projects']> } {
+  if (row.company_id == null || row.projects == null) return false
+  if (row.projects.company_id !== row.company_id) return false
+  return companyId == null || row.company_id === companyId
 }
 
 // ── メイン関数（DashboardとAI Toolが共用） ────────────────────────────
@@ -157,25 +178,26 @@ export async function getCompanyBillingStatus(
   let milestonesQuery = supabase
     .from('project_billing_milestones')
     .select(`
-      id, project_id, type,
+      id, project_id, company_id, type,
       invoice_date, invoice_amount,
       payment_date,
-      projects!inner ( id, name, deleted_at )
+      projects!inner ( id, name, company_id, deleted_at )
     `)
     .is('projects.deleted_at', null)
-  if (companyId) milestonesQuery = milestonesQuery.eq('company_id', companyId)
+  // 行だけでなく埋め込む案件も対象会社に絞る（取得後も isOwnCompanyProjectRow で確かめる）
+  if (companyId) milestonesQuery = milestonesQuery.eq('company_id', companyId).eq('projects.company_id', companyId)
 
   let invoicesQuery = supabase
     .from('invoice_documents')
     .select(`
-      id, project_id,
+      id, project_id, company_id,
       invoice_number, customer_name,
       status, issued_at, payment_due_at,
-      projects!inner ( id, name, deleted_at )
+      projects!inner ( id, name, company_id, deleted_at )
     `)
     .in('status', ['draft', 'issued', 'paid'])
     .is('projects.deleted_at', null)
-  if (companyId) invoicesQuery = invoicesQuery.eq('company_id', companyId)
+  if (companyId) invoicesQuery = invoicesQuery.eq('company_id', companyId).eq('projects.company_id', companyId)
 
   const [activeRes, milestonesRes, invoicesRes] = await Promise.all([
     activeQuery,
@@ -187,7 +209,8 @@ export async function getCompanyBillingStatus(
 
   // ── milestone 状態分類 ──────────────────────────────────
 
-  const allMilestones = (milestonesRes.data ?? []) as unknown as RawMilestone[]
+  const allMilestones = ((milestonesRes.data ?? []) as unknown as RawMilestone[])
+    .filter(m => isOwnCompanyProjectRow(m, companyId))
 
   let milestone_unset_count = 0
   const unpaid_milestones: MilestoneStatus[] = []
@@ -239,7 +262,8 @@ export async function getCompanyBillingStatus(
 
   // ── invoice_documents 状態分類 ──────────────────────────
 
-  const allInvoices = (invoicesRes.data ?? []) as unknown as RawInvoice[]
+  const allInvoices = ((invoicesRes.data ?? []) as unknown as RawInvoice[])
+    .filter(inv => isOwnCompanyProjectRow(inv, companyId))
 
   const draft_invoices:  InvoiceDocStatus[] = []
   const issued_invoices: InvoiceDocStatus[] = []

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
+import { isActiveProject } from '@/lib/estimate/ownership'
 
 // POST /api/cost-ledger/sync
 // estimate_items の差分を cost_ledger_items に反映する
@@ -25,6 +26,9 @@ export async function POST(req: NextRequest) {
 
   const projectId = body.project_id
   const companyId = member.company_id
+  if (!(await isActiveProject(supabase, projectId, companyId))) {
+    return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+  }
 
   // 現在の見積項目
   const { data: estimateItems, error: estErr } = await supabase

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
+import { isActiveProject } from '@/lib/estimate/ownership'
 
 // GET /api/project-notes?project_id=xxx
 export async function GET(request: NextRequest) {
@@ -40,6 +41,10 @@ export async function POST(request: NextRequest) {
       .eq('user_id', user.id)
       .single()
     if (!membership) return NextResponse.json({ error: 'No company membership' }, { status: 403 })
+    // 他社・存在しない・削除済みの案件は区別せず 404（RLS は company_id しか見ないため書き込み前に確かめる）
+    if (!(await isActiveProject(supabase, project_id, membership.company_id))) {
+      return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    }
 
     const { data, error } = await supabase
       .from('project_notes')
