@@ -147,7 +147,8 @@ html, body {
   color: #000;
   background: #f0f0f0;
 }
-@page { size: A4 portrait; margin: 0; }
+/* 余白は @page で取る（2ページ目以降にも効く）。印刷時の .page は padding 0 にして二重にしない */
+@page { size: A4 portrait; margin: 10mm 8mm 8mm; }
 @media print {
   html, body { background: #fff; }
   .no-print { display: none !important; }
@@ -178,7 +179,7 @@ html, body {
 .print-hint { color: #a0b8d0; font-size: 9pt; }
 
 /* ─ A4ページ ─ */
-/* 画面でも印刷時と同じ A4 幅（210mm）にして、プレビューと印刷で明細の折り返しが変わらないようにする */
+/* 画面は A4 幅（210mm）＋ @page と同じ余白の padding。本文幅 194mm が印刷時と同じになり、明細の折り返しが変わらない */
 .page {
   width: 210mm;
   min-height: 277mm;
@@ -188,7 +189,7 @@ html, body {
   box-sizing: border-box;
 }
 @media print {
-  .page { margin: 0; width: 100%; padding: 10mm 8mm 8mm; }
+  .page { margin: 0; width: 100%; min-height: 0; padding: 0; }
 }
 
 /* ─ ドキュメント外枠（枠なし） ─ */

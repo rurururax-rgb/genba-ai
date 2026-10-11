@@ -40,6 +40,14 @@ describe('printInvoice 明細テーブル', () => {
     expect(html).toMatch(/\.td-name, \.td-memo \{ overflow: visible; overflow-wrap: anywhere;/)
   })
 
+  it('余白は @page（全ページ）で取り、印刷時の .page に padding を重ねない', async () => {
+    const html = await print([])
+    expect(html).toContain('@page { size: A4 portrait; margin: 10mm 8mm 8mm; }')
+    expect(html).toMatch(/@media print \{\s*\.page \{ margin: 0; width: 100%; min-height: 0; padding: 0; \}/)
+    // 画面プレビューは A4 幅に同じ余白を padding で付け、本文幅を印刷時と揃える
+    expect(html).toMatch(/\.page \{\s*width: 210mm;[\s\S]*?padding: 10mm 8mm 8mm;/)
+  })
+
   it('工事名は HTML エスケープされる', async () => {
     const html = await print([{ name: '<b>A&B</b>', quantity: 1, unit: '式', amount: 1, memo: '' }])
     expect(html).toContain('<span class="name-text">&lt;b&gt;A&amp;B&lt;/b&gt;</span>')
