@@ -46,3 +46,14 @@ export async function isActiveGroupInProject(
     .maybeSingle()
   return data != null
 }
+
+/** LINE イベントが存在し、companyId のものか（line_event_notes の起点に使う。他社・存在しないは区別しない） */
+export async function isOwnLineEvent(supabase: ServerClient, eventId: string, companyId: string): Promise<boolean> {
+  if (!isUuid(eventId)) return false
+  const { data } = await supabase
+    .from('line_events')
+    .select('id, company_id')
+    .eq('id', eventId)
+    .maybeSingle()
+  return data != null && data.company_id === companyId
+}

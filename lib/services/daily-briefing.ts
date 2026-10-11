@@ -26,7 +26,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { CompanyBillingStatus } from './billing-status'
-import { getCompanyBillingStatus } from './billing-status'
+import { getCompanyBillingStatus, isOwnCompanyProjectRow } from './billing-status'
 
 // ── 型定義 ───────────────────────────────────────────────────────────
 
@@ -100,12 +100,13 @@ export async function getDailyBriefingItems(
 
   let overdueMilQ = supabase
     .from('project_billing_milestones')
-    .select(`project_id, projects!inner ( id, name, status, deleted_at )`)
+    .select(`project_id, company_id, projects!inner ( id, name, status, company_id, deleted_at )`)
     .not('invoice_date', 'is', null)
     .not('invoice_amount', 'is', null)
     .lte('invoice_date', today)
     .is('projects.deleted_at', null)
-  if (companyId) overdueMilQ = overdueMilQ.eq('company_id', companyId)
+  // 埋め込む案件も対象会社に絞る（他社の案件名を出さない。取得後も isOwnCompanyProjectRow で確かめる）
+  if (companyId) overdueMilQ = overdueMilQ.eq('company_id', companyId).eq('projects.company_id', companyId)
 
   let doneQ = supabase.from('projects').select('id, name').is('deleted_at', null).eq('status', 'done')
   if (companyId) doneQ = doneQ.eq('company_id', companyId)
@@ -230,10 +231,12 @@ export async function getDailyBriefingItems(
   // Case A: milestone.invoice_date <= today AND no invoice_documents
   type MilestoneRow = {
     project_id: string
-    projects: { id: string; name: string; status: string; deleted_at: string | null }
+    company_id: string | null
+    projects: { id: string; name: string; status: string; company_id: string | null; deleted_at: string | null } | null
   }
   const seenMilestoneProjects = new Set<string>()
   for (const row of (overdueMilestoneProjectsRes.data ?? []) as unknown as MilestoneRow[]) {
+    if (!isOwnCompanyProjectRow(row, companyId)) continue
     // skip done projects (Case B handles them)
     if (row.projects.status === 'done') continue
     if (projectsWithInvoice.has(row.project_id)) continue

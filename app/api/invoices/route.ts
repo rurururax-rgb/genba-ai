@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
+import { isActiveProject } from '@/lib/estimate/ownership'
 
 async function getCompanyId(supabase: Awaited<ReturnType<typeof getServerClient>>) {
   const { data: { user } } = await supabase.auth.getUser()
@@ -36,6 +37,10 @@ export async function POST(req: NextRequest) {
   } = body
 
   if (!project_id) return NextResponse.json({ error: 'project_id required' }, { status: 400 })
+  // 他社・存在しない・削除済みの案件は区別せず 404（RLS は company_id しか見ないため書き込み前に確かめる）
+  if (!(await isActiveProject(supabase, project_id, company_id))) {
+    return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+  }
 
   const { data, error } = await supabase
     .from('invoice_documents')

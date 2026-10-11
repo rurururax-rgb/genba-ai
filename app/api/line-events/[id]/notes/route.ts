@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
+import { isActiveProject, isOwnLineEvent } from '@/lib/estimate/ownership'
 
 export async function POST(
   request: NextRequest,
@@ -17,7 +18,17 @@ export async function POST(
 
   const formData = await request.formData()
   const noteType  = formData.get('note_type') as string
-  const projectId = formData.get('project_id') as string | null
+  const projectId = (formData.get('project_id') as string | null) || null
+
+  // 起点の LINE イベント・案件は自社のものに限る。line_event_notes の RLS は company_id しか見ず、
+  // anchor_event_id / project_id の外部キー検査は RLS を通らないため書き込み前に確かめる。
+  // 他社・存在しない・削除済みは区別せず 404（写真のアップロードより前に判定する）
+  if (!(await isOwnLineEvent(supabase, anchorEventId, membership.company_id))) {
+    return NextResponse.json({ error: 'LINE event not found' }, { status: 404 })
+  }
+  if (projectId && !(await isActiveProject(supabase, projectId, membership.company_id))) {
+    return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+  }
 
   // ── テキスト追記 ──
   if (noteType === 'text') {
@@ -29,7 +40,7 @@ export async function POST(
       .insert({
         anchor_event_id: anchorEventId,
         company_id:      membership.company_id,
-        project_id:      projectId || null,
+        project_id:      projectId,
         note_type:       'text',
         content,
       })
@@ -61,7 +72,7 @@ export async function POST(
         id:              noteId,
         anchor_event_id: anchorEventId,
         company_id:      membership.company_id,
-        project_id:      projectId || null,
+        project_id:      projectId,
         note_type:       'photo',
         storage_path:    storagePath,
       })

@@ -10,6 +10,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
+import { isActiveProject } from '@/lib/estimate/ownership'
 import type { ConfirmableChange } from '@/lib/ai/chat/types'
 import { calculateSellingPrice, DEFAULT_MARKUP_RATE } from '@/lib/estimate/pricing'
 import { countItemInvoices } from '@/lib/cost-ledger/actual-cost-lock'
@@ -70,6 +71,10 @@ export async function POST(req: NextRequest) {
       // project_id は proposed に含まれている（executor が ctx.projectId を注入済み）
       const rawProjectId = proposed.project_id as string | undefined
       if (!rawProjectId) return NextResponse.json({ error: 'project_id missing in proposed' }, { status: 400 })
+      // 他社・存在しない・削除済みの案件は区別せず 404（RLS は company_id しか見ないため書き込み前に確かめる）
+      if (!(await isActiveProject(supabase, rawProjectId, membership.company_id))) {
+        return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+      }
 
       // 案件掛け率を取得（column 未存在 / RLS ブロック時は DEFAULT_MARKUP_RATE にフォールバック）
       const { data: projectData } = await supabase
@@ -80,7 +85,7 @@ export async function POST(req: NextRequest) {
       const rawRate = (projectData as { markup_rate?: number | null } | null)?.markup_rate
       const markupRate: number = rawRate != null && rawRate > 0 ? rawRate : DEFAULT_MARKUP_RATE
 
-      // ユーザーがこの project に属する company_id を持つかを RLS が検証する
+      // project_id は上で自社の有効な案件か確認済み（group_id の確認は PR-2 で対応）
       const safeFields = pickAllowed(proposed, ESTIMATE_ITEM_ALLOWED)
 
       // 売価モード決定:
@@ -126,6 +131,10 @@ export async function POST(req: NextRequest) {
       const srcItems      = proposed.items as Record<string, unknown>[] | undefined
 
       if (!rawProjectId) return NextResponse.json({ error: 'project_id missing' }, { status: 400 })
+      // 他社・存在しない・削除済みの案件は区別せず 404（RLS は company_id しか見ないため書き込み前に確かめる）
+      if (!(await isActiveProject(supabase, rawProjectId, membership.company_id))) {
+        return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+      }
       if (!Array.isArray(srcItems) || srcItems.length === 0) {
         return NextResponse.json({ error: 'items is empty' }, { status: 400 })
       }

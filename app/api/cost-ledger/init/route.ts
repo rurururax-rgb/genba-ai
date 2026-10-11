@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
+import { isActiveProject } from '@/lib/estimate/ownership'
 
 // POST /api/cost-ledger/init
 // estimate_items を cost_ledger_items へ一括コピーして台帳を初期化する
@@ -21,6 +22,9 @@ export async function POST(req: NextRequest) {
 
   const projectId = body.project_id
   const companyId = membership.company_id
+  if (!(await isActiveProject(supabase, projectId, companyId))) {
+    return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+  }
 
   // 既存の台帳アイテムがある場合はスキップ（初期化済み）
   const { count } = await supabase

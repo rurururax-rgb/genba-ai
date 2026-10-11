@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
+import { isActiveProject } from '@/lib/estimate/ownership'
 
 const DEFAULT_MILESTONES = [
   { type: '契約金',  sort_order: 0 },
@@ -24,6 +25,10 @@ export async function GET(req: NextRequest) {
     .eq('user_id', user.id)
     .single()
   if (!member) return NextResponse.json({ error: 'No company' }, { status: 403 })
+  // 初回アクセスで既定の行を作るため、他社・存在しない・削除済みの案件は区別せず 404 にしてから読む
+  if (!(await isActiveProject(supabase, projectId, member.company_id))) {
+    return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+  }
 
   const { data: existing } = await supabase
     .from('project_billing_milestones')
