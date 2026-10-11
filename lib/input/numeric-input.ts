@@ -53,3 +53,32 @@ export function resolveNumericCommit(draft: string): NumericCommit {
   const value = parseNumericInput(draft)
   return value == null ? { action: 'revert' } : { action: 'save', value }
 }
+
+/**
+ * <input type="number"> の入力中の文字列（draft）。
+ *
+ * 数値で制御する（value={0}）と、React は DOM の "01000" と state の 1000 を等しいとみなして
+ * DOM を書き換えないため、先頭の 0 が画面に残る。入力中は文字列で持ち、確定値（数値）と分ける。
+ *
+ *   '01000' → '1000'   '001000' → '1000'   '-05' → '-5'   '0' → '0'   '0.5' → '0.5'   '' → ''
+ *
+ * type="number" の value は、ブラウザが数値として解釈できる文字列か ''（空欄・途中の '-' など）だけ。
+ */
+export function normalizeNumberDraft(raw: string): string {
+  return raw.replace(/^(-?)0+(?=\d)/, '$1')
+}
+
+/** draft が表す数値。空欄（入力途中）は 0 として扱う（合計の計算・保存用） */
+export function numberDraftValue(draft: string): number {
+  if (draft === '') return 0
+  const n = Number(draft)
+  return Number.isFinite(n) ? n : 0
+}
+
+/**
+ * 外から値が変わったとき（支払種別の自動入力・保存後の再読み込みなど）の draft。
+ * draft が今の値を表していれば、入力中の文字列（空欄・'1.' など）をそのまま残す。
+ */
+export function syncNumberDraft(draft: string, value: number): string {
+  return numberDraftValue(draft) === value ? draft : String(value)
+}
