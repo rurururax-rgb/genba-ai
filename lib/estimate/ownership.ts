@@ -47,6 +47,18 @@ export async function isActiveGroupInProject(
   return data != null
 }
 
+/**
+ * 省略可能な工種 ID の確認。undefined / null（未分類・紐付け解除）は 'ok'。
+ * UUID でない値は 'invalid'（400）、他社・別案件・削除済み・存在しない工種は区別せず 'not_found'（404）。
+ */
+export async function checkOptionalGroup(
+  supabase: ServerClient, groupId: unknown, projectId: string, companyId: string,
+): Promise<'ok' | 'invalid' | 'not_found'> {
+  if (groupId == null) return 'ok'
+  if (!isUuid(groupId)) return 'invalid'
+  return (await isActiveGroupInProject(supabase, groupId, projectId, companyId)) ? 'ok' : 'not_found'
+}
+
 /** LINE イベントが存在し、companyId のものか（line_event_notes の起点に使う。他社・存在しないは区別しない） */
 export async function isOwnLineEvent(supabase: ServerClient, eventId: string, companyId: string): Promise<boolean> {
   if (!isUuid(eventId)) return false
