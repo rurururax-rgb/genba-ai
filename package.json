@@ -4,6 +4,9 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:start": "bash scripts/dev-server.sh start",
+    "dev:status": "bash scripts/dev-server.sh status",
+    "dev:stop": "bash scripts/dev-server.sh stop",
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
