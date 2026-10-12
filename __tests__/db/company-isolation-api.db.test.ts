@@ -6,8 +6,9 @@
  *   実際の API ルート・サービスを「ログイン済みユーザー（authenticated + RLS）」または「admin（RLS を通らない）」として動かす。
  *   本番・Preview の DB には接続しない。
  *
- * 前提（DB にはまだ制約が無い）: RLS は行の company_id しか見ないため、
- *   company_id = 自社・project_id = 他社の案件 という行を DB に直接作れる（DB 側の制約は PR-3 で追加する）。
+ * 前提: RLS は行の company_id しか見ないため、DB 側の制約（PR-3: 20261014000001）が無い DB では
+ *   company_id = 自社・project_id = 他社の案件 という行を直接作れる。API 側の確認はそれとは別に守りとして残す。
+ *   ブリーフィングの検証では、制約導入前に紛れ込んだ行を想定し、外部キーを一時的に無効化して作る。
  */
 
 import { randomUUID } from 'node:crypto'
@@ -231,14 +232,21 @@ describe('POST /api/line-events/[id]/notes の起点イベント', () => {
 
 describe('朝のブリーフィング: 他社の案件を指す行があっても他社の案件名・ID を出さない', () => {
   beforeAll(async () => {
-    // A社のユーザーが、API を通さず DB に直接（RLS 有効の authenticated として）B社の案件を指す行を作る。
-    // DB にはまだ制約が無いため成功する（= 守りはアプリ側の確認だけ）
-    await asUser(USER_A,
+    // B社の案件を指す A社の行（制約 20261014000001 の導入前に作られた行を想定）。
+    // 制約がある DB では作れないため、このトランザクションだけ外部キーのトリガーを止めて作る
+    await admin.query('BEGIN')
+    await admin.query("SET LOCAL session_replication_role = 'replica'")
+    await admin.query(
       `INSERT INTO project_billing_milestones (company_id, project_id, type, sort_order, invoice_date, invoice_amount)
        VALUES ($1, $2, '契約金', 0, $3, 500000)`, [COMPANY_A, PROJECT_B, longAgo])
-    await asUser(USER_A,
+    await admin.query(
       `INSERT INTO invoice_documents (company_id, project_id, status, payment_due_at, invoice_number)
        VALUES ($1, $2, 'issued', $3, 'INV-X'), ($1, $2, 'draft', NULL, 'INV-Y')`, [COMPANY_A, PROJECT_B, longAgo])
+    await admin.query('COMMIT')
+    // 制約がある DB では、A社のユーザーが同じ行を直接作ろうとしても拒否される
+    await expect(asUser(USER_A,
+      `INSERT INTO project_billing_milestones (company_id, project_id, type, sort_order, invoice_date, invoice_amount)
+       VALUES ($1, $2, '契約金', 0, $3, 500000)`, [COMPANY_A, PROJECT_B, longAgo])).rejects.toMatchObject({ code: '23503' })
     // 比較用の A社の正常な行（自社案件の期限超過マイルストーン）
     await admin.query(
       `INSERT INTO project_billing_milestones (company_id, project_id, type, sort_order, invoice_date, invoice_amount)

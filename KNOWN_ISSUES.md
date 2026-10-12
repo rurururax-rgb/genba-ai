@@ -20,9 +20,12 @@ PostgREST から `company_id = 自社`、`project_id = 他社の案件` の行�
 - 20261013000002 で対処済み: `estimate_items`・`line_events`（複合外部キー (project_id, company_id)。
   `line_events` は company_id が NULL だと複合外部キーを素通りするため、CHECK (project_id IS NULL OR company_id IS NOT NULL) も追加）。
 - 他のテーブルに複合外部キーを足すときも、company_id が NULL 許容なら同じ CHECK が必要。
-- 未対処（同じ形の複合外部キーで直せる）: `project_files`、`project_notes`、`ai_summaries`、
-  `estimate_documents`、`schedule_items`、`share_links`、および案件に紐づくその後のテーブル
-  （`cost_ledger_items`・`invoice_documents` など）。
+- KI-002 PR-3（`20261014000001_enforce_project_company_match_more_tables.sql`・**本番未適用**）で対処:
+  `project_files`、`project_notes`、`ai_summaries`、`estimate_documents`、`schedule_items`、`share_links`、
+  `cost_ledger_items`、`invoice_documents`、`project_billing_milestones`、`estimate_groups`、`line_event_notes`、
+  `schedule_draft_adoptions`。手順は `docs/db/ki-002-pr3-project-company-match.md`。
+- 未対処: `estimate_revisions`・`cost_ledger_invoices`（本番で直接作られ、リポジトリに定義が無い。
+  `docs/db/ki-002-pr3-project-company-precheck.sql` の ⑥ で本番の定義を読み取りで確かめてから別 PR で扱う）。
 - 未対処: `estimate_items.group_id` → `estimate_groups` も会社を確認していない。
 - アプリ側: `app/api/ai/chat/confirm-change/route.ts` の `estimate_items` の create / bulk_create は
   `proposed.project_id` の会社を確かめていない（「RLS が検証する」というコメントは誤り）。

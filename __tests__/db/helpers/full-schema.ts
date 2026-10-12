@@ -72,10 +72,12 @@ ALTER TABLE estimate_items ADD COLUMN IF NOT EXISTS retail_price numeric;
 ALTER TABLE estimate_items ADD COLUMN IF NOT EXISTS row_type text DEFAULT 'item';
 `
 
-export async function applyFullSchema(c: Client): Promise<void> {
+/** options.skip: 追加で除く migration（修正前の DB を作るとき用） */
+export async function applyFullSchema(c: Client, options: { skip?: string[] } = {}): Promise<void> {
   await c.query(BASE_SQL)
+  const skip = new Set([...SKIP, ...(options.skip ?? [])])
   const order: string[] = []
-  for (const f of readdirSync(MIGRATIONS).filter(f => f.endsWith('.sql') && !SKIP.has(f)).sort()) {
+  for (const f of readdirSync(MIGRATIONS).filter(f => f.endsWith('.sql') && !skip.has(f)).sort()) {
     if (f === TRGM) continue
     order.push(f)
     if (f === COST_LEDGER_ITEMS) order.push('__BASE_INVOICES__', TRGM)
