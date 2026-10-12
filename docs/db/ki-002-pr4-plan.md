@@ -1,6 +1,8 @@
 # KI-002 PR-4: 関連データ同士の「同じ会社・同じ案件」を DB で保証する（調査・計画）
 
-- 状態: **調査・計画のみ。migration は未作成。本番 DB には接続していない。**
+- 状態: **本番の事前調査（①〜⑨）は人間が実施済み。PR-4a を実装中（未適用）。PR-4b 以降は未着手。** Claude Code は本番 DB に接続していない。
+- 本番の事前調査の結果（2026-10-13・人間が実行）: PostgreSQL 17.6、履歴 3 件あり、PR-4 の制約名は未使用、
+  ⑤ R1〜R5 の blocking はすべて 0（R1 参照 172 件・R2 参照 0 件）、estimate_groups 26 件（project_id NULL 0・company_id NULL 0・論理削除 12）。
 - 前提: PR #35（20261013000002）・PR-3（20261014000001）が本番適用済み。
   これにより、対象テーブルの各行の `(project_id, company_id)` は `projects` と一致することが DB で保証されている。
 - 本番向けの読み取り専用調査 SQL: `docs/db/ki-002-pr4-precheck.sql`（①〜⑨）
@@ -10,7 +12,7 @@
 | 順 | PR | 内容 | DB 変更 |
 |---|---|---|---|
 | 0 | **PR-4.0（PR #41・作成済み）** | 請求・入金の集計と朝のブリーフィングの `projects!inner` 埋め込み 3 か所に外部キー名のヒントを付け、取得失敗を 0 件として扱わない（KI-003） | なし（アプリのみ） |
-| 1 | PR-4a | 工種の参照 R1・R2（`estimate_items.group_id`・`schedule_items.estimate_group_id`）を同じ案件に限る | 一意制約 1・外部キー 2 |
+| 1 | PR-4a（実装済み・未適用） | 工種の参照 R1・R2（`estimate_items.group_id`・`schedule_items.estimate_group_id`）を同じ案件に限る。手順: `ki-002-pr4a-group-project-match.md` | 一意制約 1・外部キー 2 |
 | 2 | PR-4b | 原価台帳 → 見積行 R3（`cost_ledger_items.estimate_item_id`）を同じ案件に限る | 一意制約 1・外部キー 1 |
 | 3 | PR-4c | LINE イベントの参照 R4・R5 を**同じ会社**に限る（案件は見ない） | 一意制約 1・外部キー 2 |
 | — | 見送り | R6 `schedule_draft_adoptions.draft_id` | 変更しない（理由は下） |
@@ -51,7 +53,7 @@ PR-4 で追加する外部キーも同じ 2 テーブル間の 2 本目になる
 | `estimate_items.project_id` / `company_id` | NOT NULL / NOT NULL | → projects（PR #35 で複合も） |
 | `estimate_groups.project_id` / `company_id` | **NULL 可** / NULL 可 | → projects（PR-3 で複合 + CHECK） |
 | `schedule_items.project_id` / `company_id` | NOT NULL / NOT NULL | → projects（PR-3） |
-| `cost_ledger_items.project_id` / `company_id` | NOT NULL / NULL 可 | → projects（PR-3 で複合 + CHECK） |
+| `cost_ledger_items.project_id` / `company_id` | NOT NULL / **本番は NOT NULL**（リポジトリの migration は NULL 可） | → projects（PR-3 で複合 + CHECK） |
 | `line_events.project_id` / `company_id` | **NULL 可（未振り分け）** / NULL 可 | → projects（PR #35 で複合 + CHECK） |
 | `line_event_notes.project_id` / `company_id` | NULL 可 / NOT NULL | → projects（PR-3） |
 
@@ -103,6 +105,10 @@ PR-4 で追加する外部キーも同じ 2 テーブル間の 2 本目になる
   - 未振り分け（`line_events.project_id = NULL`）のイベントは正当。
   - KI-001 修正前に追加された見積行は、イベントの `project_id` が NULL のまま残っている可能性がある。
   - precheck ⑤ の R4 行の `info_count`（イベントの案件が NULL か別）で件数を見るだけにする。
+- 本番の `line_events` には既に `UNIQUE (company_id, line_event_id)`（LINE の webhookEventId の重複防止）がある。
+  `line_event_id` は LINE 側の TEXT の ID で、`estimate_items.line_event_id`（uuid・`line_events.id` を指す）とは別物。
+  参照先には使えないので、PR-4c では別に `UNIQUE (id, company_id)` を足す。名前は既存の制約（既定名
+  `line_events_company_id_line_event_id_key` の可能性）と重ならないことを precheck で確かめる。
 - 制約案: `line_events` に `UNIQUE (id, company_id)` を足し、
   `FOREIGN KEY (line_event_id, company_id) REFERENCES line_events(id, company_id)`（ON DELETE は既存と同じ NO ACTION）。
 - 互換性リスク: 会社が NULL のイベントを指す行は拒否される（⑤ の R4 行の `blocking_target_null`）。
