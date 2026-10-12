@@ -255,9 +255,10 @@ PR をマージしたあと、本番の確認用案件で次を一通り操作�
 - 外部キーの確認には `projects` の (id, company_id) 一意インデックスを使う。子テーブル側の (project_id, company_id) インデックスは足していない。
   - 案件を物理削除するときの子行探索は、従来どおり既存のインデックスに頼る。
   - 足りなければ precheck ⑤ を見て別途検討する。
-- `estimate_items.group_id` → `estimate_groups` の会社一致は、まだ DB で保証していない。
-- `app/api/ai/chat/confirm-change/route.ts` の `estimate_items` の create / bulk_create は、他社の案件 ID だと 500 を返す（DB は拒否する）。
-- 上の 2 つは KNOWN_ISSUES.md の KI-002 に残している。
+- `estimate_items.group_id`・`schedule_items.estimate_group_id` → `estimate_groups` の会社・案件の一致は、まだ DB で保証していない
+  （API では PR #38 で確認済み）。KNOWN_ISSUES.md の KI-002 に残している。
+- AI チャットの確定（`confirm-change`）の `estimate_items` の create / bulk_create は、PR #37 で `isActiveProject()` による確認が入り、
+  他社の案件 ID は書き込む前に 404 になる（解決済み）。
 
 ## 対象外のテーブル
 
