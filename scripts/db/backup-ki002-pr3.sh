@@ -4,6 +4,9 @@
 #
 # - 本番 DB に書き込みはしない（pg_dump / SELECT / \copy TO のみ。psql セッションは read only）
 # - 対象: public スキーマ（定義＋データ）、supabase_migrations スキーマ、migration 履歴 CSV
+#   （Auth・Storage など他スキーマは含まない。完全バックアップではない）
+# - 事前確認 ①〜⑧（docs/db/ki-002-pr3-project-company-precheck.sql）を読み取り専用で実行し
+#   ki002pr3_precheck.txt に保存する。⑧ は適用直前に SQL Editor でもう一度実行すること
 # - 前提確認: 20261013000002 が適用済み・20261014000001 が未適用でなければ停止
 # - 接続情報は対話入力。パスワードは画面に出さず、ログ・ファイルにも書かない
 # - 既存のバックアップディレクトリは上書きしない（同名があれば停止）
@@ -19,6 +22,8 @@ APPLIED_REQUIRED="20261013000002"
 NOT_APPLIED_REQUIRED="20261014000001"
 OUT_PARENT="${BACKUP_PARENT_DIR:-$HOME/Desktop}"
 OUT_DIR="$OUT_PARENT/rugz-backup-$(date +%Y%m%d-%H%M%S)-pre-ki002-pr3"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PRECHECK_SQL="$SCRIPT_DIR/../../docs/db/ki-002-pr3-project-company-precheck.sql"
 
 die() { printf '\n[STOP] %s\n' "$*" >&2; exit 1; }
 info() { printf '[INFO] %s\n' "$*"; }
@@ -35,6 +40,15 @@ done
 PG_MAJOR="$(pg_dump --version | sed -E 's/[^0-9]*([0-9]+).*/\1/')"
 (( PG_MAJOR >= 17 )) || die "pg_dump $PG_MAJOR はサーバー（17.x）より古いため使えません"
 info "pg_dump: $(pg_dump --version)"
+[[ -s "$PRECHECK_SQL" ]] || die "事前確認 SQL が見つかりません: $PRECHECK_SQL（PR #39 のブランチで実行しているか確認）"
+for n in ① ② ③ ④ ⑤ ⑥ ⑦ ⑧; do
+  grep -q "^-- $n" "$PRECHECK_SQL" || die "事前確認 SQL に $n がありません"
+done
+# 事前確認 SQL に書き込み・DDL が無いこと（コメント行を除いて確認）
+if grep -v '^[[:space:]]*--' "$PRECHECK_SQL" | sed -E 's/[Oo][Nn] [Dd][Ee][Ll][Ee][Tt][Ee]//g' \
+   | grep -qiE '\b(insert|update|delete|truncate|create|alter|drop|grant|revoke|copy|vacuum|lock)\b'; then
+  die "事前確認 SQL に書き込み・DDL の可能性がある文があります。実行を中止します"
+fi
 
 # ---- 1. 出力先（上書き禁止） ----
 [[ -d "$OUT_PARENT" ]] || die "出力先の親ディレクトリがありません: $OUT_PARENT"
@@ -72,6 +86,19 @@ printf 'history_rows\t%s\n%s_rows\t%s\n%s_rows\t%s\n' "$total" "$APPLIED_REQUIRE
   | tee "$OUT_DIR/migration_history_counts.txt"
 [[ "$applied" == "1" ]] || die "$APPLIED_REQUIRED が適用されていません（PR-3 の前提を満たさない）"
 [[ "$pending" == "0" ]] || die "$NOT_APPLIED_REQUIRED が既に適用済みです（適用前バックアップになりません）"
+
+# ---- 4b. 事前確認 ①〜⑧（読み取り専用セッション。結果をファイルに保存） ----
+info "事前確認 ①〜⑧ を実行中（読み取り専用）…"
+cp "$PRECHECK_SQL" "$OUT_DIR/ki002pr3_precheck.sql"
+psql -X -a -v ON_ERROR_STOP=1 -P pager=off \
+  -c 'SET default_transaction_read_only = on' -f "$OUT_DIR/ki002pr3_precheck.sql" \
+  > "$OUT_DIR/ki002pr3_precheck.txt" 2>"$OUT_DIR/.psql.err" \
+  || { cat "$OUT_DIR/.psql.err" >&2; die "事前確認 ①〜⑧ の実行に失敗"; }
+[[ -s "$OUT_DIR/ki002pr3_precheck.txt" ]] || die "ki002pr3_precheck.txt が空です"
+for n in ① ② ③ ④ ⑤ ⑥ ⑦ ⑧; do
+  grep -q "^-- $n" "$OUT_DIR/ki002pr3_precheck.txt" || die "ki002pr3_precheck.txt に $n の結果がありません"
+done
+info "事前確認の結果: $OUT_DIR/ki002pr3_precheck.txt（②③④⑧ を手順書の期待値と照合すること）"
 
 # ---- 5. 取得前の行数 ----
 q "select table_name from information_schema.tables where table_schema='public' and table_type='BASE TABLE' order by 1" \
@@ -120,9 +147,10 @@ csv_rows=$(( $(pg_restore -a -f - "$OUT_DIR/supabase_migrations.dump" | awk '/^C
 
 # ---- 8. チェックサム ----
 rm -f "$OUT_DIR/.psql.err" "$OUT_DIR/.pg_dump.err"
-( cd "$OUT_DIR" && shasum -a 256 -- *.dump *.csv *.txt > SHA256SUMS && shasum -a 256 -c SHA256SUMS >/dev/null ) \
+( cd "$OUT_DIR" && shasum -a 256 -- *.dump *.csv *.txt *.sql > SHA256SUMS && shasum -a 256 -c SHA256SUMS >/dev/null ) \
   || die "チェックサムの作成・検証に失敗"
 chmod 600 "$OUT_DIR"/*
 
 printf '\n[OK] バックアップ完了: %s\n' "$OUT_DIR"
+printf '[NEXT] ki002pr3_precheck.txt の ②③④⑧ を確認し、適用直前に SQL Editor で ⑧ を再実行すること\n'
 ls -l "$OUT_DIR"

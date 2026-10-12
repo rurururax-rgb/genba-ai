@@ -171,11 +171,17 @@ ON DELETE が想定と違う（本番の定義がリポジトリと違う）場�
 これまでと同じ形式の読み取り専用バックアップを、ターミナル.app で `bash scripts/db/backup-ki002-pr3.sh` として実行する。
 public スキーマと migration 履歴のダンプを取り、事前確認として 20261013000002 = 1 件・20261014000001 = 0 件を確かめる。
 準備・出力ファイル・復元手順は `ki-002-pr3-backup-and-restore.md` を参照。
+スクリプトは ①〜⑧ も読み取り専用で実行し、結果を `ki002pr3_precheck.txt` に保存する（合否の判定は人間が行う）。
+このバックアップは public と migration 履歴だけで、Auth・Storage を含む完全バックアップではない。
 `[OK] バックアップ完了` と表示された場合だけ次へ進む。接続文字列・パスワードはコマンド履歴やチャットに貼らない。
 
 ### 1. 適用前の確認（読み取りのみ）
 
-`ki-002-pr3-project-company-precheck.sql` の ①〜⑧ を 1 つずつ実行する。必要なら ⓪ の `BEGIN READ ONLY;` で囲み、最後に `ROLLBACK;` する。
+バックアップで保存した `ki002pr3_precheck.txt` の ①〜⑧ を、下の表の期待値と照合する。
+バックアップを使わずに確かめるときは、SQL Editor で `ki-002-pr3-project-company-precheck.sql` の ①〜⑧ を 1 つずつ実行する
+（必要なら ⓪ の `BEGIN READ ONLY;` で囲み、最後に `ROLLBACK;` する）。
+
+**⑧ は手順 2 の適用の直前に、SQL Editor でもう一度実行する。** バックアップ時点の結果だけでは判断しない。
 
 | # | 期待値 | 違ったら |
 |---|---|---|
@@ -198,6 +204,8 @@ public スキーマと migration 履歴のダンプを取り、事前確認と�
 - `mismatched`・`orphan`・`null_company` がすべて 0
 
 ### 2. 適用
+
+**直前に** SQL Editor で precheck の ⑧ だけを実行し、0 行であることを確かめる（行があれば終わるまで待つ）。
 
 `ki-002-pr3-project-company-sql-editor-apply.sql` の全文を貼り付けて、1 回だけ実行する。
 
