@@ -4,7 +4,7 @@
 -- ・SELECT・カタログ参照・SHOW だけ。書き込み・DDL・関数の作成は一切しない。
 --   念のため ⓪ の BEGIN READ ONLY の中で実行してもよい（最後に ROLLBACK）。
 -- ・行の中身（名前・金額・メモ）は出さない。件数と ID・定義だけを出す。
--- ・①〜⑤ はリポジトリの migration にある列を前提にする。列が無くてエラーになったら、それ自体が調査結果
+-- ・①〜⑥ はリポジトリの migration にある列を前提にする。列が無くてエラーになったら、それ自体が調査結果
 --   （本番と migration の食い違い）なので、そのまま報告する。⑦ はカタログだけを見るので列を推測しない。
 -- ・本番への接続・実行は、人間が別途承認してから人間が行う。
 -- ・期待値と読み方は docs/db/ki-002-pr4-plan.md の「precheck の読み方」を参照。
@@ -60,62 +60,66 @@ WHERE c.connamespace = 'public'::regnamespace
   )
 ORDER BY 1, 2;
 
--- ⑤ データの食い違い（参照ごとに 1 行。0 でなければ制約を足すと VALIDATE で止まる / 正当な業務データの可能性）
---   blocking_* : 制約案で拒否される件数（0 であること）
---   info_*     : 制約案では拒否しないが、挙動を知るための件数
+-- ⑤ データの食い違い（参照ごとに 1 行。列の意味は行ごとに match_key / info_meaning で示す）
+--   match_key            : 制約案で一致を保証する列（R1〜R3 = project_id、R4・R5 = company_id）
+--   blocking_orphan      : 参照先の行が無い（既存の単独外部キーがあるので通常 0）
+--   blocking_target_null : 参照先の match_key が NULL（制約案では一致しないので拒否される）
+--   blocking_mismatch    : 参照先の match_key が参照元と違う（制約案で拒否される）
+--   → blocking_* がすべて 0 であること。論理削除済みの行も数える（外部キーは deleted_at を見ないため）
+--   info_count           : 制約案では拒否しないが、既存の挙動を知るための件数。意味は info_meaning
 WITH
-r1 AS (  -- estimate_items.group_id → estimate_groups
-  SELECT 'R1 estimate_items.group_id' AS ref,
+r1 AS (
+  SELECT 'R1 estimate_items.group_id → estimate_groups' AS ref, 'project_id' AS match_key,
     count(*) AS with_ref,
     count(*) FILTER (WHERE g.id IS NULL) AS blocking_orphan,
-    count(*) FILTER (WHERE g.id IS NOT NULL AND g.project_id IS NULL) AS blocking_target_project_null,
-    count(*) FILTER (WHERE g.project_id IS DISTINCT FROM x.project_id AND g.project_id IS NOT NULL) AS blocking_other_project,
-    count(*) FILTER (WHERE g.company_id IS DISTINCT FROM x.company_id AND g.id IS NOT NULL) AS blocking_other_company,
-    count(*) FILTER (WHERE x.deleted_at IS NULL AND g.deleted_at IS NOT NULL) AS info_live_row_to_deleted_target
+    count(*) FILTER (WHERE g.id IS NOT NULL AND g.project_id IS NULL) AS blocking_target_null,
+    count(*) FILTER (WHERE g.project_id <> x.project_id) AS blocking_mismatch,
+    count(*) FILTER (WHERE x.deleted_at IS NULL AND g.deleted_at IS NOT NULL) AS info_count,
+    '未削除の見積行が論理削除済みの工種を指す（拒否しない）' AS info_meaning
   FROM public.estimate_items x LEFT JOIN public.estimate_groups g ON g.id = x.group_id
   WHERE x.group_id IS NOT NULL
 ),
-r2 AS (  -- schedule_items.estimate_group_id → estimate_groups
-  SELECT 'R2 schedule_items.estimate_group_id',
+r2 AS (
+  SELECT 'R2 schedule_items.estimate_group_id → estimate_groups', 'project_id',
     count(*),
     count(*) FILTER (WHERE g.id IS NULL),
     count(*) FILTER (WHERE g.id IS NOT NULL AND g.project_id IS NULL),
-    count(*) FILTER (WHERE g.project_id IS DISTINCT FROM x.project_id AND g.project_id IS NOT NULL),
-    count(*) FILTER (WHERE g.company_id IS DISTINCT FROM x.company_id AND g.id IS NOT NULL),
-    count(*) FILTER (WHERE x.deleted_at IS NULL AND g.deleted_at IS NOT NULL)
+    count(*) FILTER (WHERE g.project_id <> x.project_id),
+    count(*) FILTER (WHERE x.deleted_at IS NULL AND g.deleted_at IS NOT NULL),
+    '未削除の工程が論理削除済みの工種を指す（工種の削除 API は工程を NULL にしないため正当。拒否しない）'
   FROM public.schedule_items x LEFT JOIN public.estimate_groups g ON g.id = x.estimate_group_id
   WHERE x.estimate_group_id IS NOT NULL
 ),
-r3 AS (  -- cost_ledger_items.estimate_item_id → estimate_items
-  SELECT 'R3 cost_ledger_items.estimate_item_id',
+r3 AS (
+  SELECT 'R3 cost_ledger_items.estimate_item_id → estimate_items', 'project_id',
     count(*),
     count(*) FILTER (WHERE e.id IS NULL),
-    0::bigint,  -- estimate_items.project_id は NOT NULL（③ で確認）
-    count(*) FILTER (WHERE e.project_id IS DISTINCT FROM x.project_id AND e.id IS NOT NULL),
-    count(*) FILTER (WHERE e.company_id IS DISTINCT FROM x.company_id AND e.id IS NOT NULL),
-    count(*) FILTER (WHERE x.deleted_at IS NULL AND e.deleted_at IS NOT NULL)
+    count(*) FILTER (WHERE e.id IS NOT NULL AND e.project_id IS NULL),
+    count(*) FILTER (WHERE e.project_id <> x.project_id),
+    count(*) FILTER (WHERE x.deleted_at IS NULL AND e.deleted_at IS NOT NULL),
+    '未削除の台帳行が論理削除済みの見積行を指す（見積の同期前の状態。拒否しない）'
   FROM public.cost_ledger_items x LEFT JOIN public.estimate_items e ON e.id = x.estimate_item_id
   WHERE x.estimate_item_id IS NOT NULL
 ),
-r4 AS (  -- estimate_items.line_event_id → line_events（会社だけを保証する案。案件は見ない）
-  SELECT 'R4 estimate_items.line_event_id',
-    count(*),
-    count(*) FILTER (WHERE l.id IS NULL),
-    count(*) FILTER (WHERE l.id IS NOT NULL AND l.company_id IS NULL),  -- 参照先の会社が NULL（会社一致の制約で拒否される）
-    0::bigint,                                                           -- 案件の一致は制約にしない（下の info を参照）
-    count(*) FILTER (WHERE l.company_id IS DISTINCT FROM x.company_id AND l.company_id IS NOT NULL),
-    count(*) FILTER (WHERE l.id IS NOT NULL AND (l.project_id IS NULL OR l.project_id <> x.project_id))
-  FROM public.estimate_items x LEFT JOIN public.line_events l ON l.id = x.line_event_id
-  WHERE x.line_event_id IS NOT NULL
-),
-r5 AS (  -- line_event_notes.anchor_event_id → line_events（会社だけを保証する案）
-  SELECT 'R5 line_event_notes.anchor_event_id',
+r4 AS (
+  SELECT 'R4 estimate_items.line_event_id → line_events', 'company_id',
     count(*),
     count(*) FILTER (WHERE l.id IS NULL),
     count(*) FILTER (WHERE l.id IS NOT NULL AND l.company_id IS NULL),
-    0::bigint,
-    count(*) FILTER (WHERE l.company_id IS DISTINCT FROM x.company_id AND l.company_id IS NOT NULL),
-    count(*) FILTER (WHERE l.id IS NOT NULL AND x.project_id IS DISTINCT FROM l.project_id)
+    count(*) FILTER (WHERE l.company_id <> x.company_id),
+    count(*) FILTER (WHERE l.id IS NOT NULL AND l.project_id IS DISTINCT FROM x.project_id),
+    'イベントの案件が NULL（未振り分け）か見積行と別（案件は制約にしない。拒否しない）'
+  FROM public.estimate_items x LEFT JOIN public.line_events l ON l.id = x.line_event_id
+  WHERE x.line_event_id IS NOT NULL
+),
+r5 AS (
+  SELECT 'R5 line_event_notes.anchor_event_id → line_events', 'company_id',
+    count(*),
+    count(*) FILTER (WHERE l.id IS NULL),
+    count(*) FILTER (WHERE l.id IS NOT NULL AND l.company_id IS NULL),
+    count(*) FILTER (WHERE l.company_id <> x.company_id),
+    count(*) FILTER (WHERE l.id IS NOT NULL AND x.project_id IS DISTINCT FROM l.project_id),
+    'メモとイベントの案件が違う（未振り分けのイベントへのメモを含む。案件は制約にしない。拒否しない）'
   FROM public.line_event_notes x LEFT JOIN public.line_events l ON l.id = x.anchor_event_id
 )
 SELECT * FROM r1 UNION ALL SELECT * FROM r2 UNION ALL SELECT * FROM r3
@@ -135,9 +139,14 @@ SELECT 'line_events', count(*),
 FROM public.line_events;
 
 -- ⑥ schedule_draft_adoptions（draft_id は会社・案件をまたいで一意な TEXT 主キー）
---   draft_id の形式（画面は 'draft-' + 英数字 8 文字以下で作る）・会社や案件の NULL・重複の可能性
+--   保存される draft_id は AI 工程案の「一括採用」ごとの ID（components/projects/ScheduleTab.tsx の newDraftId）:
+--     `ai-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
+--   ※ 工程案の各行の _draft_id（'draft-' + 乱数）は画面内の React 用の一時 ID で、DB には保存されない。
+--   API（app/api/schedule-items/batch）は draft_id の形式を検査しないので、想定外の形式も数える
 SELECT count(*) AS total,
-       count(*) FILTER (WHERE draft_id !~ '^draft-[0-9a-z]{1,8}$') AS unexpected_format,
+       count(*) FILTER (WHERE draft_id ~ '^ai-[0-9a-z]+-[0-9a-z]{1,6}$') AS expected_format,
+       count(*) FILTER (WHERE draft_id !~ '^ai-[0-9a-z]+-[0-9a-z]{1,6}$') AS unexpected_format,
+       count(*) FILTER (WHERE draft_id ~ '^draft-') AS item_key_format,   -- 行の一時 ID が保存されていれば画面と前提が違う
        count(*) FILTER (WHERE project_id IS NULL) AS project_null,
        count(*) FILTER (WHERE company_id IS NULL) AS company_null,
        count(DISTINCT company_id) AS companies,
@@ -145,8 +154,8 @@ SELECT count(*) AS total,
 FROM public.schedule_draft_adoptions;
 
 -- ⑦ PostgREST の埋め込みがあいまいになる組（同じ 2 テーブル間に外部キーが 2 本以上）
---   アプリは project_billing_milestones → projects を projects!inner で埋め込んでいる（lib/services/daily-briefing.ts）。
---   ここに出る組を埋め込むクエリは PGRST201 になる可能性がある。外部キー名はヒントの修正に使う
+--   ここに出る組をヒント無しで埋め込むと PGRST201 になる。アプリの埋め込みは 3 か所が該当し、PR #41（KI-003）で
+--   外部キー名のヒントを付けた（billing-status.ts ×2・daily-briefing.ts）。PR-4 の外部キーを足すときもここで確かめる
 SELECT c.conrelid::regclass::text AS tbl, c.confrelid::regclass::text AS ref_tbl,
        count(*) AS fkeys, string_agg(c.conname, ', ' ORDER BY c.conname) AS names
 FROM pg_constraint c
