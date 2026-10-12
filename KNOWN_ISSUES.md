@@ -47,11 +47,12 @@ PostgREST を直接叩く書き込みや、service_role（Webhook・cron・SQL�
 | 12 テーブル: `project_files`・`project_notes`・`ai_summaries`・`estimate_documents`・`schedule_items`・`share_links`・`cost_ledger_items`・`invoice_documents`・`project_billing_milestones`・`estimate_groups`・`line_event_notes`・`schedule_draft_adoptions` | **KI-002 PR-3（PR #39・`20261014000001`）で対処。本番適用・検証済み（2026-10-12 時点）。** 複合外部キー 12 + CHECK 5 = 17 制約がすべて有効、RLS ポリシーは適用前後で一致。手順・結果は `docs/db/ki-002-pr3-project-company-match.md` |
 | `estimate_revisions`・`cost_ledger_invoices` | **未対処（PR-5 以降）。** 本番で直接作られ、リポジトリに定義が無い。本番の定義は PR-4 precheck ⑧ で確認済み（2026-10-13）。それをもとに別 PR で扱う |
 | 工種の参照: `estimate_items.group_id`・`schedule_items.estimate_group_id` → `estimate_groups` | **KI-002 PR-4a（`20261015000001`）で対処予定。本番未適用。** 複合外部キー (工種, project_id) → `estimate_groups(id, project_id)`、ON DELETE SET NULL (工種の列)。手順は `docs/db/ki-002-pr4a-group-project-match.md` |
-| `cost_ledger_items.estimate_item_id` → `estimate_items`（PR-4b）、`estimate_items.line_event_id`・`line_event_notes.anchor_event_id` → `line_events`（PR-4c・会社のみ） | **未対処。** 本番の事前調査で blocking は 0。制約案は `docs/db/ki-002-pr4-plan.md` |
+| 原価台帳の見積行: `cost_ledger_items.estimate_item_id` → `estimate_items` | **KI-002 PR-4b（`20261016000001`）で対処予定。本番未適用。** 複合外部キー (estimate_item_id, project_id) → `estimate_items(id, project_id)`、ON DELETE SET NULL (estimate_item_id)。手順は `docs/db/ki-002-pr4b-ledger-estimate-item-match.md` |
+| `estimate_items.line_event_id`・`line_event_notes.anchor_event_id` → `line_events`（PR-4c・会社のみ） | **未対処。** 本番の事前調査で blocking は 0。制約案は `docs/db/ki-002-pr4-plan.md` |
 
 - 他のテーブルに複合外部キーを足すときも、company_id が NULL 許容なら同じ CHECK が必要。
 
-**対応タイミング:** PR-3 は本番適用済み。PR-4a は人間の承認後に本番へ適用する（適用直前にバックアップと precheck ①〜⑧）。残りは PR-4b 以降で扱う。
+**対応タイミング:** PR-3 は本番適用済み。PR-4a・PR-4b は人間の承認後に本番へ適用する（それぞれ適用直前にバックアップと precheck ①〜⑧）。残りは PR-4c 以降で扱う。
 PR-4 以降は、テーブルごとに食い違いの件数を読み取りで確かめてから migration を作る。
 調査結果・制約案・順序は `docs/db/ki-002-pr4-plan.md`、本番向けの読み取り専用調査は `docs/db/ki-002-pr4-precheck.sql`。
 
