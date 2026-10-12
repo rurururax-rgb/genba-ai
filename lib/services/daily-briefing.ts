@@ -26,7 +26,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js'
 import type { CompanyBillingStatus } from './billing-status'
-import { getCompanyBillingStatus, isOwnCompanyProjectRow } from './billing-status'
+import { assertBillingFetched, getCompanyBillingStatus, isOwnCompanyProjectRow } from './billing-status'
 
 // ── 型定義 ───────────────────────────────────────────────────────────
 
@@ -77,6 +77,7 @@ const RULE_CONFIG: Record<TodayActionType, {
 
 /**
  * 「今日やること」アイテム一覧を生成する。
+ * 請求・入金の取得に失敗したときは BillingFetchError を投げる（0 件として扱わない）。
  *
  * @param supabase   呼び出し元が用意した supabase クライアント（RLS有効 or admin）
  * @param billing    事前取得済みの CompanyBillingStatus（省略時は内部で取得）
@@ -98,9 +99,10 @@ export async function getDailyBriefingItems(
   let invDocQ = supabase.from('invoice_documents').select('project_id')
   if (companyId) invDocQ = invDocQ.eq('company_id', companyId)
 
+  // 案件の埋め込みには既存の単独外部キー名をヒントに付ける（複合外部キーと並ぶため。billing-status.ts と同じ・KI-003）
   let overdueMilQ = supabase
     .from('project_billing_milestones')
-    .select(`project_id, company_id, projects!inner ( id, name, status, company_id, deleted_at )`)
+    .select(`project_id, company_id, projects!project_billing_milestones_project_id_fkey!inner ( id, name, status, company_id, deleted_at )`)
     .not('invoice_date', 'is', null)
     .not('invoice_amount', 'is', null)
     .lte('invoice_date', today)
@@ -143,6 +145,10 @@ export async function getDailyBriefingItems(
     schedItemQ,
     inactiveQ,
   ])
+
+  // 請求漏れの判定に使う 2 つは、取得に失敗したら判定しない（請求書なし・期限超過なしと誤って扱わない）
+  assertBillingFetched('briefing_invoice_projects', invoiceDocProjectsRes)
+  assertBillingFetched('briefing_overdue_milestones', overdueMilestoneProjectsRes)
 
   const items: TodayActionItem[] = []
 

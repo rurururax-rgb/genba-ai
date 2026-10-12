@@ -4,6 +4,7 @@ import { ProjectListClient } from '@/components/projects/ProjectListClient'
 import { DashboardSummarySection } from '@/components/projects/DashboardSummarySection'
 import { getCompanyProjectSummary } from '@/lib/services/company-summary'
 import { getDailyBriefingItems } from '@/lib/services/daily-briefing'
+import { BillingFetchError } from '@/lib/services/billing-status'
 
 // ── ステータス定義 ──────────────────────────────────────────
 
@@ -17,6 +18,13 @@ export const STATUS_CONFIG: Record<string, { label: string; color: string; bg: s
 
 type BadgeInfo = { label: string; color: string; bg: string; border: string }
 
+// 請求・入金の取得失敗だけを null にする（案件一覧は表示を続け、「今日の確認」に取得失敗を出す）。
+// それ以外のエラーは従来どおり投げる
+function nullOnBillingError(err: unknown): null {
+  if (err instanceof BillingFetchError) return null
+  throw err
+}
+
 // ── ページ ─────────────────────────────────────────────────
 
 export default async function ProjectsPage() {
@@ -27,8 +35,8 @@ export default async function ProjectsPage() {
 
   // 会社全体サマリー・今日やること・案件一覧を並列取得
   const [summaryResult, actionItemsResult, projectsResult] = await Promise.all([
-    getCompanyProjectSummary(supabase),
-    getDailyBriefingItems(supabase),
+    getCompanyProjectSummary(supabase).catch(nullOnBillingError),
+    getDailyBriefingItems(supabase).catch(nullOnBillingError),
     supabase
       .from('projects')
       .select('id, name, customer_name, site_address, status, updated_at')
