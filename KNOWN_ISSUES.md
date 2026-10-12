@@ -44,13 +44,13 @@ PostgREST を直接叩く書き込みや、service_role（Webhook・cron・SQL�
 | 対象 | 状態 |
 |---|---|
 | `estimate_items`・`line_events` | 20261013000002（PR #35）で対処。複合外部キー (project_id, company_id)。`line_events` は company_id が NULL だと複合外部キーを素通りするため、CHECK (project_id IS NULL OR company_id IS NOT NULL) も追加 |
-| 12 テーブル: `project_files`・`project_notes`・`ai_summaries`・`estimate_documents`・`schedule_items`・`share_links`・`cost_ledger_items`・`invoice_documents`・`project_billing_milestones`・`estimate_groups`・`line_event_notes`・`schedule_draft_adoptions` | **KI-002 PR-3（PR #39・`20261014000001`）で対処予定。本番未適用。** 前提は 20261013000002 の本番適用。手順は `docs/db/ki-002-pr3-project-company-match.md` |
+| 12 テーブル: `project_files`・`project_notes`・`ai_summaries`・`estimate_documents`・`schedule_items`・`share_links`・`cost_ledger_items`・`invoice_documents`・`project_billing_milestones`・`estimate_groups`・`line_event_notes`・`schedule_draft_adoptions` | **KI-002 PR-3（PR #39・`20261014000001`）で対処。本番適用・検証済み（2026-10-12 時点）。** 複合外部キー 12 + CHECK 5 = 17 制約がすべて有効、RLS ポリシーは適用前後で一致。手順・結果は `docs/db/ki-002-pr3-project-company-match.md` |
 | `estimate_revisions`・`cost_ledger_invoices` | **未対処（PR-4 以降）。** 本番で直接作られ、リポジトリに定義が無い。precheck ⑥ で本番の定義を読み取りで確かめてから別 PR で扱う |
 | 工種の参照: `estimate_items.group_id`・`schedule_items.estimate_group_id` → `estimate_groups` | **未対処（PR-4 以降）。** API では PR #38 で確認済みだが、DB は工種の会社・案件の一致を保証していない（単独の外部キー・ON DELETE SET NULL のみ） |
 
 - 他のテーブルに複合外部キーを足すときも、company_id が NULL 許容なら同じ CHECK が必要。
 
-**対応タイミング:** PR-3 は人間の承認後に本番へ適用する（適用直前にバックアップと precheck ①〜⑧）。
+**対応タイミング:** PR-3 は本番適用済み。残りは PR-4 以降で扱う。
 PR-4 以降は、テーブルごとに食い違いの件数を読み取りで確かめてから migration を作る。
 
 ---

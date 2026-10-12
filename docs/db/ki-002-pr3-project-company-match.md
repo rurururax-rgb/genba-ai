@@ -1,8 +1,13 @@
-# KI-002 PR-3: 案件にぶら下がる 12 テーブルの「案件」と「会社」の一致を DB で保証する（未適用）
+# KI-002 PR-3: 案件にぶら下がる 12 テーブルの「案件」と「会社」の一致を DB で保証する（本番適用済み）
 
 - migration: `supabase/migrations/20261014000001_enforce_project_company_match_more_tables.sql`
 - 前提: `20261013000002_enforce_project_company_match.sql`（PR #35 の追加監査）が本番に適用済みであること
-- **本番 DB への適用は人間の承認待ち。** Claude Code は本番・Preview DB への接続・バックアップ・適用のどれも行わない。
+- **本番 DB に適用・検証済み（2026-10-12 時点、人間が SQL Editor で実行）。** Claude Code は本番・Preview DB への接続・バックアップ・適用のどれも行っていない。
+  - 適用前: `scripts/db/backup-ki002-pr3.sh` によるバックアップと precheck ①〜⑧
+  - 適用結果: `history_rows = 1`・`valid_constraints = 17`
+  - verify: 対象 12 テーブルすべて `ok = true`、`history_recorded = true`、`ki001_constraints = 4`（PR #35 の制約が残っている）
+  - RLS ポリシー: 適用前後の主要設定の MD5 が一致
+  - 以下の適用手順は記録として残す。**再実行しない**（ロールバックが必要な場合だけ「ロールバック」を参照）
 
 | ファイル | 内容 |
 |---|---|
