@@ -868,3 +868,19 @@ Vercel Preview : <preview-url>
 変更概要:
 - <変更点>
 ```
+
+---
+
+## Local Dev Server 運用ルール
+
+8GB の開発機で Next.js 開発サーバーが長期間残らないようにする。実体は `scripts/dev-server.sh`。
+
+- 作業開始時に `npm run dev:status` で 3000–3010 番ポート・Next.js プロセス・管理記録を確認する（本体 / worktree / 他プロジェクトを区別して表示）。
+- Claude が開発サーバーを起動するときは `npm run dev:start` を `run_in_background` で使う。素の `npm run dev` をバックグラウンド起動しない。出力された PID を控え、ブラウザ QA・テストはそのサーバーに対して行う。
+- QA・テスト中は `dev:stop` を呼ばない。停止は作業終了時のみ。
+- 作業終了時は、**このセッションで起動して控えた PID** を `npm run dev:stop -- --pid <PID>` に指定して停止し、結果を報告に含める。
+- Claude は引数なしの `dev:stop` や `dev:stop -- --all` を実行しない（started_by は claude / human の区別しかなく、別の Claude セッションが同じ worktree で起動したサーバーも対象になるため）。
+- 起動 PID が不明な場合は停止しない。`npm run dev:status` の結果を人間に報告して判断を仰ぐ。
+- `dev:stop` は「記録あり・PID・起動時刻・作業フォルダ・子プロセスの作業フォルダが一致・started_by が自分」のときだけ SIGTERM を送る。不一致・不完全なら停止せず報告する。強制終了（SIGKILL）はしない。
+- 管理記録のないプロセス（手動起動・他プロジェクト）は停止しない。`dev:status` に残存が出たら人間に報告する。
+- 記録は `.git/dev-servers/` にあり Git 管理外。異常終了で残った記録は `dev:stop` が整理する（プロセスには触れない）。Claude は自分の PID の記録に限り `--pid` で整理する。
