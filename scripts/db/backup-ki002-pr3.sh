@@ -63,7 +63,8 @@ read -rp  'DB user（例: postgres.<project-ref>）: ' PGUSER
 read -rsp 'DB password（表示されません）: ' PGPASSWORD; echo
 [[ -n "$PGHOST" && -n "$PGUSER" && -n "$PGPASSWORD" ]] || die "接続情報が未入力です"
 export PGHOST PGPORT PGUSER PGPASSWORD
-export PGDATABASE=postgres PGSSLMODE=require PGCONNECT_TIMEOUT=15 PGAPPNAME=ki002-pr3-backup
+# KI002_BACKUP_SSLMODE は隔離ローカル DB での回帰テスト専用（本番では指定しない）
+export PGDATABASE=postgres PGSSLMODE="${KI002_BACKUP_SSLMODE:-require}" PGCONNECT_TIMEOUT=15 PGAPPNAME=ki002-pr3-backup
 
 # 読み取り専用セッションで 1 クエリ実行（失敗したら停止）
 q() {
@@ -115,7 +116,7 @@ info "supabase_migrations スキーマを取得中…"
 pg_dump -Fc --no-password -n supabase_migrations -f "$OUT_DIR/supabase_migrations.dump" 2>"$OUT_DIR/.pg_dump.err" \
   || { cat "$OUT_DIR/.pg_dump.err" >&2; die "supabase_migrations の pg_dump に失敗"; }
 q "\\copy (select * from supabase_migrations.schema_migrations order by version) to '$OUT_DIR/schema_migrations.csv' with csv header" >/dev/null
-q "select tablename || chr(9) || policyname || chr(9) || cmd || chr(9) || coalesce(qual,'') || chr(9) || coalesce(with_check,'') from pg_policies where schemaname='public' order by 1,2" \
+q "select tablename || chr(9) || policyname || chr(9) || cmd || chr(9) || coalesce(qual,'') || chr(9) || coalesce(with_check,'') from pg_policies where schemaname='public' order by tablename, policyname" \
   > "$OUT_DIR/policies.txt"
 
 # ---- 7. ファイル検証（存在・容量・形式・内容） ----
