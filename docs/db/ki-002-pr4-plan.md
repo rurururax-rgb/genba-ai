@@ -9,7 +9,7 @@
 
 | 順 | PR | 内容 | DB 変更 |
 |---|---|---|---|
-| 0 | **PR-4.0（先に確認）** | 朝のブリーフィングの `projects!inner` 埋め込みが、PR-3 の外部キー追加で PGRST201（あいまい）になっていないか確認し、なっていれば外部キー名のヒントを付ける | なし（アプリ 1 行） |
+| 0 | **PR-4.0（PR #41・作成済み）** | 請求・入金の集計と朝のブリーフィングの `projects!inner` 埋め込み 3 か所に外部キー名のヒントを付け、取得失敗を 0 件として扱わない（KI-003） | なし（アプリのみ） |
 | 1 | PR-4a | 工種の参照 R1・R2（`estimate_items.group_id`・`schedule_items.estimate_group_id`）を同じ案件に限る | 一意制約 1・外部キー 2 |
 | 2 | PR-4b | 原価台帳 → 見積行 R3（`cost_ledger_items.estimate_item_id`）を同じ案件に限る | 一意制約 1・外部キー 1 |
 | 3 | PR-4c | LINE イベントの参照 R4・R5 を**同じ会社**に限る（案件は見ない） | 一意制約 1・外部キー 2 |
@@ -19,27 +19,28 @@
 各 PR は PR-3 と同じ作り（NOT VALID で追加 → VALIDATE、1 トランザクション、`lock_timeout`、ガード・verify・rollback・SQL Editor 用スクリプト、隔離 DB テスト）。
 どの PR も**既存の外部キーは消さず、追加だけ**にする。
 
-## PR-4.0: 朝のブリーフィングの埋め込み（PR-4 より先に確認）
+## PR-4.0: 案件の埋め込みがあいまいになる問題（KI-003・PR #41）
 
-`lib/services/daily-briefing.ts:101` は `project_billing_milestones` から `projects!inner ( ... )` を埋め込む。
-PR-3 で `project_billing_milestones` → `projects` の外部キーが 2 本
-（`project_billing_milestones_project_id_fkey` と `project_billing_milestones_project_company_fkey`）になった。
+PR-3 で `project_billing_milestones`・`invoice_documents` → `projects` の外部キーが 2 本
+（既存の `<テーブル>_project_id_fkey` と、PR-3 の `<テーブル>_project_company_fkey`）になった。
 PostgREST は 2 テーブル間に外部キーが複数あると、ヒントの無い埋め込みを PGRST201（あいまい）で拒否する。
 
-- 結果は `overdueMilestoneProjectsRes.data ?? []` で読まれ、**エラーは握りつぶされる**。
-  画面は壊れず、朝のブリーフィングから「入金予定日を過ぎた案件」だけが黙って消える。
-- 隔離 DB テスト（`__tests__/db/helpers/pg-supabase.ts`）は PostgREST の模擬なので、あいまいさを再現しない。PR-3 のテストでは気づけない。
-- 他の埋め込みは無い（`app`・`lib`・`components` を検索済み）。
+該当するアプリの埋め込みは **3 か所**（初回の調査では daily-briefing.ts の 1 か所しか挙げていなかった。複数行の select 文字列を検索で取りこぼしていた）:
 
-**確認方法（読み取りのみ・人間が行う）:** Vercel のログで daily-briefing の実行結果を見るか、
-本番の朝のブリーフィングに、入金予定日を過ぎた案件が出るはずの日に出ているかを確かめる。
-precheck ⑦ で外部キー名を確かめる。
+| ファイル | 埋め込み | 影響 |
+|---|---|---|
+| `lib/services/billing-status.ts` | `project_billing_milestones` → `projects!inner` | 入金予定・未入金額・期限超過（ダッシュボード・AI チャット・朝の通知） |
+| `lib/services/billing-status.ts` | `invoice_documents` → `projects!inner` | 下書き・発行済み請求書（同上） |
+| `lib/services/daily-briefing.ts` | `project_billing_milestones` → `projects!inner` | 請求漏れの判定 |
 
-**修正案:** `projects!project_billing_milestones_project_id_fkey!inner ( ... )` のように既存の単独外部キー名をヒントに付ける（1 行）。
-ヒントの外部キー名は本番の precheck ⑦ の結果で確かめてから使う。
+- どれも結果を `data ?? []` で読み、エラーを 0 件として扱っていた。画面は壊れず、請求・入金の表示と通知だけが黙って空になる。本番で起きているかは未確認。
+- 模擬 PostgREST（`__tests__/db/helpers/pg-supabase.ts`）はあいまいさを再現しなかったため、PR-3 のテストでは気づけなかった。
+- PR #41 で、既存の単独外部キー名（migration と PR-3 適用前の本番バックアップの定義で確認）をヒントに付け、
+  取得失敗は `BillingFetchError` にして 0 件として扱わないようにした。埋め込みの静的監査と、全 migration の DB で外部キーと照合するテストも追加した。
 
-PR-4 で追加する外部キーも同じく 2 本目になるが、`estimate_groups`・`estimate_items`・`line_events` を埋め込むクエリは無い。
-PR-4 の各 PR には「対象の組を埋め込むクエリが無い」ことを確かめる静的テストを足す。
+PR-4 で追加する外部キーも同じ 2 テーブル間の 2 本目になる。今は `estimate_groups`・`estimate_items`・`line_events` を
+埋め込むクエリは無いが、PR #41 のテスト（`__tests__/postgrest-embeds.test.ts`・`__tests__/db/postgrest-embeds.db.test.ts`）が
+各 PR の migration を含めて検出する。
 
 ## 参照ごとの調査結果
 
@@ -101,10 +102,10 @@ PR-4 の各 PR には「対象の組を埋め込むクエリが無い」こと�
 - **案件の一致は制約にしない。** 理由:
   - 未振り分け（`line_events.project_id = NULL`）のイベントは正当。
   - KI-001 修正前に追加された見積行は、イベントの `project_id` が NULL のまま残っている可能性がある。
-  - precheck ⑤ `info_live_row_to_deleted_target` 列（R4 では「イベントの案件が NULL か別」）で件数を見るだけにする。
+  - precheck ⑤ の R4 行の `info_count`（イベントの案件が NULL か別）で件数を見るだけにする。
 - 制約案: `line_events` に `UNIQUE (id, company_id)` を足し、
   `FOREIGN KEY (line_event_id, company_id) REFERENCES line_events(id, company_id)`（ON DELETE は既存と同じ NO ACTION）。
-- 互換性リスク: 会社が NULL のイベントを指す行は拒否される（⑤ `blocking_target_project_null` 列に会社 NULL の件数を出す）。
+- 互換性リスク: 会社が NULL のイベントを指す行は拒否される（⑤ の R4 行の `blocking_target_null`）。
   RPC は会社 NULL のイベントを受け付けないので、正当な経路では作られない。
 
 ### R5 `line_event_notes.anchor_event_id` → `line_events`
@@ -119,13 +120,20 @@ PR-4 の各 PR には「対象の組を埋め込むクエリが無い」こと�
 
 ### R6 `schedule_draft_adoptions.draft_id`（見送り）
 
-- `draft_id` は TEXT の主キーで、会社・案件をまたいで一意。画面（`components/projects/ScheduleTab.tsx:821`）が
-  `'draft-' + Math.random() の英数字 8 文字` で作り、`lib/services/schedule-batch.ts` が二重採用の防止に使う。
+- `draft_id` は TEXT の主キーで、会社・案件をまたいで一意。`lib/services/schedule-batch.ts` が AI 工程案の二重採用の防止に使う。
+- **保存される値:** AI 工程案を作るたびに画面（`components/projects/ScheduleTab.tsx:824`）が作る一括採用用の ID
+  `ai-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`（例: `ai-mv5eafkr-k3j9x2`）。
+  - 同じ画面の `_draft_id`（`'draft-' + 乱数 8 文字`・821 行目）は工程案の各行の React 用の一時 ID で、DB には保存されない。
+    初回の調査はこの 2 つを取り違えていた（precheck ⑥ の正規表現と衝突の評価を訂正した）。
+  - 形式は導入時（758ab7d）から変わっていない。API（`app/api/schedule-items/batch`）は形式を検査しないので、直接呼べば任意の文字列を保存できる。
 - 会社をまたぐ衝突: 他社が同じ `draft_id` を先に登録すると、自社の採用が「採用済み」で拒否される。
-  ただし `draft_id` は採用の直前に画面で作られ、他社からは見えない（RLS）。偶然の衝突は約 2.8 兆分の 1、狙って衝突させるには相手の画面の乱数を知る必要がある。
-- 主キーを `(company_id, draft_id)` などに変えるのは、PostgREST の upsert・二重採用防止の挙動を変える割に効果が小さい。
-  **DB は変えない。** 必要なら別 PR で、画面の生成を `crypto.randomUUID()` に変える（DB 変更なし・小さいアプリ修正）。
-- precheck ⑥ で形式・件数だけ確かめる。
+  - 偶然の衝突: 同じミリ秒に作られ、かつ乱数部（英数字最大 6 文字・約 22 億通り）が一致する必要がある。実用上起きない。
+    乱数部は `Math.random()` の文字列化なので、まれに 6 文字より短くなり、その分だけ候補が減る。
+  - 狙った衝突: 時刻部は推測できるが、乱数部は採用の直前まで画面の中にしかなく、他社からは見えない（RLS）。
+    先回りして登録するには 1 ミリ秒あたり約 22 億件の登録が要り、現実的でない。
+- 主キーを `(company_id, draft_id)` などに変えるのは、二重採用防止の挙動を変える割に効果が小さい。
+  **DB は変えない。** 必要なら別 PR で、画面の生成を `crypto.randomUUID()` に、API で形式・長さの検査を足す（DB 変更なし・小さいアプリ修正）。
+- precheck ⑥ で、形式（`expected_format` / `unexpected_format`）・行の一時 ID が保存されていないこと（`item_key_format = 0`）・件数を確かめる。
 
 ## PR に共通する設計
 
@@ -157,15 +165,19 @@ PR-4 の各 PR には「対象の組を埋め込むクエリが無い」こと�
 | ② | 履歴 | 3 件とも `recorded = true` |
 | ③ | 列の型・NULL | 上の「前提」の表と同じ。違えば報告 |
 | ④ | 既存の外部キー・一意制約 | 単独の外部キー 5 本と主キーだけ。`pr4_name_exists` はすべて false |
-| ⑤ | 参照ごとの食い違い | `blocking_*` がすべて 0。0 でない参照は、その PR を作る前に件数を報告して相談 |
+| ⑤ | 参照ごとの食い違い | `blocking_orphan`・`blocking_target_null`・`blocking_mismatch` がすべて 0。0 でない参照は、その PR を作る前に件数を報告して相談。比べる列は行の `match_key` |
 | ⑤-2 | 工種・イベントの内訳 | 情報（`line_events.project_null` は未振り分けの件数で正当） |
-| ⑥ | draft_id | `unexpected_format = 0` |
-| ⑦ | 外部キーが 2 本以上の組 | PR-3 の 12 テーブル + PR #35 の 2 テーブル → projects。**PR-4.0 の判断に使う** |
+| ⑥ | draft_id | `item_key_format = 0`。`unexpected_format` が 0 でなければ、API を直接呼んだ形跡として記録する（R6 の判断は変えない） |
+| ⑦ | 外部キーが 2 本以上の組 | PR-3 の 12 テーブル + PR #35 の 2 テーブル → projects。アプリが埋め込む組は PR #41 でヒント済み |
 | ⑧ | 本番だけの 2 テーブル | 結果を PR-5 の設計に使う（推測しない） |
 | ⑨ | RLS | 記録（各 PR の適用前後で比べる） |
 
-⑤ の `info_live_row_to_deleted_target` 列は参照ごとに意味が違う:
-R1〜R3 は「未削除の行が論理削除済みの参照先を指す件数」、R4 は「イベントの案件が NULL か別の案件」、R5 は「メモとイベントの案件が違う」。
+⑤ の `info_count` は参照ごとに意味が違い、その行の `info_meaning` に書いてある
+（R1〜R3: 未削除の行が論理削除済みの参照先を指す、R4: イベントの案件が NULL か別、R5: メモとイベントの案件が違う）。
 どれも制約では拒否しない（情報）。
+
+**訂正の記録:** 初回の ⑤ は R1 の列名（`blocking_target_project_null` など）を全行で使っていたため、R4・R5 の行では
+「会社が NULL」の件数が「案件が NULL」という名前で出ていた。列名を参照に依存しない名前にし、行ごとに `match_key` を出すようにした。
+初回の ⑥ は工程案の各行の一時 ID の形式（`draft-…`）で判定しており、保存される一括採用 ID（`ai-…`）をすべて想定外と数えていた。
 
 この SQL は隔離ローカル PostgreSQL（全 migration 適用済み）で読み取り専用セッションのまま最後まで実行できることを確かめた。

@@ -54,15 +54,15 @@ PostgREST を直接叩く書き込みや、service_role（Webhook・cron・SQL�
 PR-4 以降は、テーブルごとに食い違いの件数を読み取りで確かめてから migration を作る。
 調査結果・制約案・順序は `docs/db/ki-002-pr4-plan.md`、本番向けの読み取り専用調査は `docs/db/ki-002-pr4-precheck.sql`。
 
-### KI-003: 朝のブリーフィングの入金遅れ案件が出ない可能性（要確認・PR-3 の影響）
+### KI-003: 請求・入金の集計と朝のブリーフィングが黙って空になる可能性（PR-3 の影響・PR #41 で修正中）
 
-**発見:** 2026-10-12（KI-002 PR-4 の調査）
-**関連:** `lib/services/daily-briefing.ts`（`project_billing_milestones` → `projects!inner` の埋め込み）
+**発見:** 2026-10-12（KI-002 PR-4 の調査と独立監査）
+**関連:** `lib/services/billing-status.ts`（2 か所）・`lib/services/daily-briefing.ts`（1 か所）
 
-PR-3 で `project_billing_milestones` → `projects` の外部キーが 2 本になった。PostgREST はヒントの無い埋め込みを
-あいまい（PGRST201）として拒否することがあり、コードはそのエラーを無視して空として扱う。
-その場合、画面は壊れずに朝のブリーフィングから入金予定日を過ぎた案件だけが消える。
-本番で起きているかは未確認。確認方法と修正案（外部キー名のヒントを付ける 1 行）は `docs/db/ki-002-pr4-plan.md` の PR-4.0。
+PR-3 で `project_billing_milestones`・`invoice_documents` → `projects` の外部キーが 2 本になった。PostgREST はヒントの無い
+`projects!inner` の埋め込みをあいまい（PGRST201）として拒否し、コードはそのエラーを 0 件として扱っていた。
+画面は壊れずに、入金予定・未入金額・請求書・請求漏れの表示と朝の通知だけが消える。本番で起きているかは未確認。
+修正（外部キー名のヒント・取得失敗を 0 件にしない・回帰テスト）は PR #41。詳細は `docs/db/ki-002-pr4-plan.md` の PR-4.0。
 
 ---
 
