@@ -6,6 +6,7 @@
 
 | ファイル | 内容 |
 |---|---|
+| `scripts/db/backup-ki002-pr3.sh` | 適用前の読み取り専用バックアップ（手順は `ki-002-pr3-backup-and-restore.md`） |
 | `docs/db/ki-002-pr3-project-company-precheck.sql` | 適用前の確認（読み取りのみ・①〜⑧） |
 | `docs/db/ki-002-pr3-project-company-sql-editor-apply.sql` | ガード → migration 本体 → 検証 → 履歴登録 → `NOTIFY pgrst` を 1 トランザクションで実行 |
 | `docs/db/ki-002-pr3-project-company-verify.sql` | 適用後の確認（読み取りのみ） |
@@ -167,9 +168,10 @@ ON DELETE が想定と違う（本番の定義がリポジトリと違う）場�
 
 ### 0. バックアップ（適用直前・人間が実行する）
 
-これまでと同じ形式の読み取り専用バックアップを、ターミナル.app で実行する。
+これまでと同じ形式の読み取り専用バックアップを、ターミナル.app で `bash scripts/db/backup-ki002-pr3.sh` として実行する。
 public スキーマと migration 履歴のダンプを取り、事前確認として 20261013000002 = 1 件・20261014000001 = 0 件を確かめる。
-「バックアップ完了」と表示された場合だけ次へ進む。接続文字列・パスワードはコマンド履歴やチャットに貼らない。
+準備・出力ファイル・復元手順は `ki-002-pr3-backup-and-restore.md` を参照。
+`[OK] バックアップ完了` と表示された場合だけ次へ進む。接続文字列・パスワードはコマンド履歴やチャットに貼らない。
 
 ### 1. 適用前の確認（読み取りのみ）
 
