@@ -289,6 +289,8 @@ describe('CostLedgerTab の手動追加', () => {
 describe('読み取り API', () => {
   it('画像の SHA-256 はサーバーが元のバイト列から計算する', () => {
     expect(extractRoute).toContain("createHash('sha256').update(Buffer.from(arrayBuffer)).digest('hex')")
-    expect(extractRoute).toMatch(/\.\.\.parsed, invoice_number: num \|\| null, document_sha256 \}/)
+    // AI の出力は normalizeExtraction で決まった項目だけにし、ハッシュはサーバーの値で最後に付ける（AI の値は使わない）
+    expect(extractRoute).toContain('const extracted = normalizeExtraction(JSON.parse(jsonMatch[0]))')
+    expect(extractRoute).toMatch(/\{ \.\.\.extracted, document_sha256 \}/)
   })
 })

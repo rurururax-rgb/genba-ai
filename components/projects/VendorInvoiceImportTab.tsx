@@ -1,11 +1,13 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Input } from '@/components/ui/input'
 import {
   createRegisterAttempt, postInvoice,
   type ExistingDocument, type RegisterAttempt, type SimilarInvoiceSummary,
 } from '@/lib/cost-ledger/invoice-client'
+import { reviewInvoiceAmounts, toAmount, type TaxTreatment } from '@/lib/cost-ledger/ocr-amounts'
+import type { ExtractedVendorInvoice } from '@/lib/cost-ledger/ocr-extraction'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -17,18 +19,6 @@ type CostLedgerItem = {
   actual_cost: number | null
 }
 
-type ExtractedInvoice = {
-  vendor_name: string
-  invoice_number: string | null
-  total_amount: number | null
-  invoice_date: string | null
-  payment_due_date: string | null
-  items: Array<{ name: string; amount: number | null }>
-  raw_warning: string | null
-  /** サーバーが画像のバイト列から計算した SHA-256（AI の出力ではない） */
-  document_sha256: string
-}
-
 /** 登録できなかった・登録できたか分からないときの案内 */
 type Blocker =
   | { kind: 'duplicate'; existing: ExistingDocument | null }
@@ -36,7 +26,7 @@ type Blocker =
   | { kind: 'unknown'; message: string }
 
 /** 登録できたときの結果（画面は DB が返した値で表示する） */
-type SavedState = { actualCost: number | null; synced: boolean; replayed: boolean }
+type SavedState = { actualCost: number | null; synced: boolean; replayed: boolean; amount: number }
 // ── デザイントークン（EstimateImportTab と共通）──────────
 
 const G = {
@@ -54,36 +44,58 @@ const G = {
 
 const fmt = (n: number) => Math.round(n).toLocaleString('ja-JP')
 
+const TREATMENT_LABEL: Record<TaxTreatment, string> = {
+  exclusive:   '外税（税抜＋消費税）',
+  inclusive:   '内税（税込金額のみ）',
+  non_taxable: '非課税・不課税',
+  unknown:     '不明',
+}
+
+const ZOOMS = [1, 1.5, 2, 3] as const
+
 type Props = {
   projectId: string
   /** 登録できたとき（再送で保存済みだったときも）。親は台帳と内訳を DB から読み直す */
   onRegistered?: (itemId: string) => void
 }
 
-/** 金額欄の文字列を数値にする（カンマ可。数値以外が混ざっていれば null） */
+/** 金額欄の文字列を数値にする（カンマ・円記号可。数値以外が混ざっていれば null。0 は登録できないので null） */
 function parseAmount(v: string): number | null {
-  const t = v.replace(/[,，\s]/g, '')
+  const t = v.replace(/[,，\s¥￥円]/g, '')
   if (!t) return null
   const n = Number(t)
   return Number.isFinite(n) && n !== 0 ? n : null
 }
+
+/** 原本の金額欄（空欄 = 記載なし） */
+const amountText = (n: number | null) => (n != null ? String(n) : '')
 
 export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
 
   const [file, setFile]             = useState<File | null>(null)
   const [preview, setPreview]       = useState<string | null>(null)
+  const [zoom, setZoom]             = useState<number>(1)
   const [dragging, setDragging]     = useState(false)
   const [loading, setLoading]       = useState(false)
   const [error, setError]           = useState<string | null>(null)
 
-  const [extracted, setExtracted]   = useState<ExtractedInvoice | null>(null)
+  const [extracted, setExtracted]   = useState<ExtractedVendorInvoice | null>(null)
   const [vendorName, setVendorName] = useState('')
   const [invoiceNumber, setInvoiceNumber] = useState('')
-  const [amount, setAmount]         = useState('')
   const [invoiceDate, setInvoiceDate] = useState('')
+  // 支払日 = 実際に支払った日（原価台帳の「支払日」）。請求書の支払期日は入れない
   const [paymentDate, setPaymentDate] = useState('')
   const [note, setNote]             = useState('')
+
+  // 原本に印字された金額（人が直せる）。登録金額とは分けて持つ
+  const [printedEx, setPrintedEx]   = useState('')
+  const [printedTax, setPrintedTax] = useState('')
+  const [printedInc, setPrintedInc] = useState('')
+  const [treatment, setTreatment]   = useState<TaxTreatment>('unknown')
+  // 原価台帳に登録する金額（税抜）と、その金額を担当者が原本で確認したか
+  const [registerAmount, setRegisterAmount] = useState('')
+  const [confirmed, setConfirmed]   = useState(false)
 
   const [ledgerItems, setLedgerItems] = useState<CostLedgerItem[]>([])
   const [selectedItemId, setSelectedItemId] = useState<string>('')
@@ -123,10 +135,15 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
     setExtracted(null)
     setVendorName('')
     setInvoiceNumber('')
-    setAmount('')
     setInvoiceDate('')
     setPaymentDate('')
     setNote('')
+    setPrintedEx('')
+    setPrintedTax('')
+    setPrintedInc('')
+    setTreatment('unknown')
+    setRegisterAmount('')
+    setConfirmed(false)
     setSelectedItemId('')
     setSaved(null)
     setBlocker(null)
@@ -148,6 +165,8 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
     }
     clearDocument()
     setFile(f)
+    setPreview(null)
+    setZoom(1)
     const gen = genRef.current
     const reader = new FileReader()
     reader.onload = e => { if (genRef.current === gen) setPreview(e.target?.result as string) }
@@ -160,6 +179,8 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
     const dropped = e.dataTransfer.files[0]
     if (dropped) handleFile(dropped)
   }, [handleFile])
+
+  const pickFile = () => { if (!saving && !attempt.busy) inputRef.current?.click() }
 
   // AI抽出
   const extract = async () => {
@@ -177,16 +198,21 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
       // 読み取り中に画像が変わった。古い結果は使わない
       if (genRef.current !== gen) return
       if (!res.ok) throw new Error(data.error ?? 'AI抽出に失敗しました')
-      const result = data as ExtractedInvoice
-      if (typeof result.document_sha256 !== 'string') throw new Error('AI抽出に失敗しました')
+      const result = data as ExtractedVendorInvoice
+      if (typeof result.document_sha256 !== 'string' || !result.amounts || !result.review) throw new Error('AI抽出に失敗しました')
       // 新しい画像の読み取り結果 = 新しい登録操作
       attempt.reset()
       setExtracted(result)
       setVendorName(result.vendor_name ?? '')
       setInvoiceNumber(result.invoice_number ?? '')
-      setAmount(result.total_amount != null ? String(Math.round(result.total_amount)) : '')
       setInvoiceDate(result.invoice_date ?? '')
-      setPaymentDate(result.payment_due_date ?? '')
+      setPrintedEx(amountText(result.amounts.subtotal_excl_tax))
+      setPrintedTax(amountText(result.amounts.tax_amount))
+      setPrintedInc(amountText(result.amounts.total_incl_tax))
+      setTreatment(result.amounts.tax_treatment)
+      // 登録金額の初期値は、原本の印字から決まる税抜の候補だけ（なければ空欄。担当者が入力する）
+      setRegisterAmount(amountText(result.review.suggested_excl_tax))
+      setConfirmed(false)
 
       // 業者名でledger itemを自動選択
       if (result.vendor_name) {
@@ -212,12 +238,26 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
     setBlocker(b => (b?.kind === 'similar' ? null : b))
   }
 
+  // 原本の金額（人が直した値）で照合し直す。AI の判定をそのまま使わない
+  const review = useMemo(() => reviewInvoiceAmounts({
+    subtotal_excl_tax: toAmount(printedEx),
+    tax_amount:        toAmount(printedTax),
+    total_incl_tax:    toAmount(printedInc),
+    tax_treatment:     treatment,
+    tax_breakdown:     extracted?.amounts.tax_breakdown ?? [],
+  }), [printedEx, printedTax, printedInc, treatment, extracted])
+
+  const parsedRegister = parseAmount(registerAmount)
+  // 登録金額を変えたら、確認はやり直す（確認した金額と登録する金額を一致させる）
+  const changeRegisterAmount = (v: string) => { edited(setRegisterAmount)(v); setConfirmed(false) }
+
   // 台帳に登録。confirmSimilar = 「以前の請求書と似ています」を確認したうえで登録する
   const register = async (confirmSimilar = false) => {
     if (!extracted || attempt.busy) return
     if (!selectedItemId) { setError('登録先の台帳項目を選択してください'); return }
-    const parsedAmount = parseAmount(amount)
-    if (parsedAmount === null) { setError('金額を正しく入力してください'); return }
+    const parsedAmount = parseAmount(registerAmount)
+    if (parsedAmount === null) { setError('登録金額（税抜）を正しく入力してください'); return }
+    if (!confirmed) { setError('登録金額が税抜であることを原本で確認し、チェックを入れてください'); return }
     const gen = genRef.current
     const itemId = selectedItemId
     setSaving(true)
@@ -241,18 +281,9 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
           // この登録操作は終わり。次の登録は新しいキーで行う
           attempt.reset()
           setBlocker(null)
-          setSaved({ actualCost: result.newActualCost, synced: result.synced, replayed: result.replayed })
+          setSaved({ actualCost: result.newActualCost, synced: result.synced, replayed: result.replayed, amount: parsedAmount })
           loadLedgerItems()
           onRegistered?.(itemId)
-          // 再集計に失敗したときは案内を残す（自動で消さない）
-          if (result.synced) {
-            setTimeout(() => {
-              if (genRef.current !== gen) return
-              clearDocument()
-              setFile(null)
-              setPreview(null)
-            }, 2000)
-          }
           break
         case 'duplicate_document':
           setBlocker({ kind: 'duplicate', existing: result.existing })
@@ -275,13 +306,33 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
     }
   }
 
+  /** 登録が終わった画面を片付けて、次の請求書へ */
+  const startNext = () => {
+    clearDocument()
+    setFile(null)
+    setPreview(null)
+  }
+
   const selectedItem = ledgerItems.find(i => i.id === selectedItemId)
+  const canRegister = !!extracted && !!selectedItemId && parsedRegister !== null && confirmed && !saving
+  const reviewSuggestion = review.suggested_excl_tax
+  const showUseSuggestion = reviewSuggestion != null && parsedRegister !== reviewSuggestion
+
+  const fileInput = (
+    <input
+      ref={inputRef}
+      type="file"
+      accept="image/jpeg,image/png,image/webp"
+      style={{ display: 'none' }}
+      onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) handleFile(f) }}
+    />
+  )
 
   return (
-    <div style={{ padding: '24px 20px', maxWidth: 760, margin: '0 auto' }}>
+    <div style={{ padding: '24px 20px', maxWidth: 1240, margin: '0 auto' }}>
 
       {/* ─ ページタイトル ─ */}
-      <div style={{ marginBottom: 24 }}>
+      <div style={{ marginBottom: 20 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
           <div style={{
             width: 32, height: 32, borderRadius: 8,
@@ -295,351 +346,469 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
           </h2>
         </div>
         <p style={{ fontSize: 12, color: G.textTer, marginLeft: 42 }}>
-          業者からの請求書画像をアップロードして、原価台帳に実績を登録します
+          請求書の画像と読み取り結果を見比べて、税抜金額を確認してから原価台帳に登録します
         </p>
       </div>
 
-      {/* ─ ドロップゾーン ─ */}
-      <div
-        onClick={() => { if (!saving) inputRef.current?.click() }}
-        onDragOver={e => { e.preventDefault(); setDragging(true) }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={onDrop}
-        style={{
-          border: `2px dashed ${dragging ? G.med : G.border}`,
-          borderRadius: 14,
-          background: dragging ? G.hover : G.light,
-          padding: preview ? 0 : '36px 20px',
-          textAlign: 'center',
-          cursor: 'pointer',
-          transition: 'all 0.18s',
-          marginBottom: 20,
-          overflow: 'hidden',
-          minHeight: preview ? 0 : undefined,
-        }}
-      >
-        <input
-          ref={inputRef}
-          type="file"
-          accept="image/jpeg,image/png,image/webp"
-          style={{ display: 'none' }}
-          onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; if (f) handleFile(f) }}
-        />
-        {preview ? (
-          <div style={{ position: 'relative' }}>
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src={preview}
-              alt="請求書プレビュー"
-              style={{ width: '100%', maxHeight: 320, objectFit: 'contain', display: 'block', borderRadius: 12 }}
-            />
-            <div style={{
-              position: 'absolute', bottom: 8, right: 8,
-              background: 'rgba(0,0,0,0.55)',
-              color: '#fff', fontSize: 11, borderRadius: 6, padding: '3px 10px',
-            }}>
-              クリックして変更
-            </div>
-          </div>
-        ) : (
-          <>
-            <div style={{ marginBottom: 10, color: G.med }}>
-              <UploadIcon />
-            </div>
-            <p style={{ fontSize: 14, fontWeight: 600, color: G.textSec, marginBottom: 4 }}>
-              請求書画像をドラッグ＆ドロップ
-            </p>
-            <p style={{ fontSize: 12, color: G.textTer }}>
-              またはクリックしてファイルを選択（JPEG / PNG / WebP・最大8MB）
-            </p>
-          </>
-        )}
-      </div>
+      {fileInput}
 
-      {/* ─ AI抽出ボタン ─ */}
-      {file && !extracted && (
-        <div style={{ textAlign: 'center', marginBottom: 20 }}>
-          <button
-            onClick={extract}
-            disabled={loading}
-            style={{
-              background: loading ? G.border : G.dark,
-              color: '#fff',
-              border: 'none',
-              borderRadius: 8,
-              padding: '12px 36px',
-              fontSize: 14,
-              fontWeight: 700,
-              cursor: loading ? 'not-allowed' : 'pointer',
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 8,
-              boxShadow: loading ? 'none' : '0 4px 14px rgba(43,94,64,0.35)',
-              transition: 'all 0.18s',
-            }}
-          >
-            <SparkleIcon />
-            {loading ? 'AI が読み取り中...' : 'AI で情報を抽出'}
-          </button>
-          <p style={{ fontSize: 11, color: G.textTer, marginTop: 8 }}>
-            業者名・金額・日付を自動読み取りします
+      {/* ─ ドロップゾーン（画像の選択前） ─ */}
+      {!file && (
+        <div
+          onClick={pickFile}
+          onDragOver={e => { e.preventDefault(); setDragging(true) }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={onDrop}
+          style={{
+            border: `2px dashed ${dragging ? G.med : G.border}`,
+            borderRadius: 14,
+            background: dragging ? G.hover : G.light,
+            padding: '36px 20px',
+            textAlign: 'center',
+            cursor: 'pointer',
+            transition: 'all 0.18s',
+            marginBottom: 20,
+          }}
+        >
+          <div style={{ marginBottom: 10, color: G.med }}>
+            <UploadIcon />
+          </div>
+          <p style={{ fontSize: 14, fontWeight: 600, color: G.textSec, marginBottom: 4 }}>
+            請求書画像をドラッグ＆ドロップ
+          </p>
+          <p style={{ fontSize: 12, color: G.textTer }}>
+            またはクリックしてファイルを選択（JPEG / PNG / WebP・最大8MB）
           </p>
         </div>
       )}
 
-      {/* ─ エラー ─ */}
-      {error && (
-        <div style={{
-          background: '#FFF0F4', border: '1px solid #F5C2D0',
-          borderRadius: 10, padding: '10px 14px',
-          fontSize: 13, color: '#C0385A',
-          marginBottom: 16,
-        }}>
-          {error}
-        </div>
-      )}
+      {!file && error && <ErrorBox message={error} />}
 
-      {/* ─ 抽出結果フォーム ─ */}
-      {extracted && (
-        <div style={{
-          background: G.cardBg,
-          border: `1.5px solid ${G.borderLight}`,
-          borderRadius: 14,
-          padding: 20,
-          marginBottom: 20,
-          boxShadow: '0 2px 12px rgba(43,94,64,0.07)',
-        }}>
-          {/* ヘッダー */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 18 }}>
-            <div style={{
-              width: 5, height: 18, borderRadius: 3,
-              background: `linear-gradient(180deg, ${G.dark} 0%, ${G.med} 100%)`,
-            }} />
-            <span style={{ fontSize: 14, fontWeight: 700, color: G.textPri }}>
-              AI 抽出結果の確認・編集
-            </span>
-          </div>
+      {/* ─ 原本（左）と読み取り結果（右）。スマートフォンでは上下 ─ */}
+      {file && (
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-2 lg:items-start">
 
-          {extracted.raw_warning && (
+          {/* ── 左: 請求書の原本 ── */}
+          <section
+            aria-label="請求書の原本"
+            className="lg:sticky lg:top-4"
+            onDragOver={e => { e.preventDefault(); setDragging(true) }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={onDrop}
+            style={{ ...CARD, padding: 0, overflow: 'hidden', outline: dragging ? `2px dashed ${G.med}` : 'none' }}
+          >
             <div style={{
-              background: '#FFFBEB', border: '1px solid #FDE68A',
-              borderRadius: 8, padding: '8px 12px',
-              fontSize: 12, color: '#92400E',
-              marginBottom: 16,
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap',
+              padding: '10px 12px', borderBottom: `1px solid ${G.borderLight}`, background: '#FAFDFB',
             }}>
-              ⚠ {extracted.raw_warning}
-            </div>
-          )}
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-            <Field label="業者名">
-              <Input
-                inputSize="compact"
-                value={vendorName}
-                onChange={e => edited(setVendorName)(e.target.value)}
-                placeholder="例: ○○建材株式会社"
-              />
-            </Field>
-
-            <Field label="請求書番号">
-              <Input
-                inputSize="compact"
-                value={invoiceNumber}
-                onChange={e => edited(setInvoiceNumber)(e.target.value)}
-                placeholder="例: INV-2026-0123"
-              />
-            </Field>
-
-            <Field label="請求金額（税込）">
-              <Input
-                inputSize="compact"
-                value={amount}
-                onChange={e => edited(setAmount)(e.target.value)}
-                placeholder="例: 125000"
-                inputMode="numeric"
-              />
-            </Field>
-
-            <Field label="請求日">
-              <Input
-                type="date"
-                inputSize="compact"
-                value={invoiceDate}
-                onChange={e => edited(setInvoiceDate)(e.target.value)}
-              />
-            </Field>
-
-            <Field label="支払期日">
-              <Input
-                type="date"
-                inputSize="compact"
-                value={paymentDate}
-                onChange={e => edited(setPaymentDate)(e.target.value)}
-              />
-            </Field>
-          </div>
-
-          <div style={{ marginTop: 14 }}>
-            <Field label="メモ（任意）">
-              <Input
-                inputSize="compact"
-                value={note}
-                onChange={e => setNote(e.target.value)}
-                placeholder="例: 7月分材料費"
-              />
-            </Field>
-          </div>
-
-          {/* 明細プレビュー */}
-          {extracted.items.length > 0 && (
-            <div style={{ marginTop: 16 }}>
-              <p style={{ fontSize: 11, color: G.textTer, marginBottom: 6, fontWeight: 600, letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-                抽出された明細（参考）
-              </p>
-              <div style={{
-                border: `1px solid ${G.borderLight}`,
-                borderRadius: 8, overflow: 'hidden',
-              }}>
-                {extracted.items.slice(0, 8).map((item, i) => (
-                  <div key={i} style={{
-                    display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                    padding: '7px 12px',
-                    borderBottom: i < Math.min(extracted.items.length, 8) - 1 ? `1px solid ${G.borderLight}` : 'none',
-                    background: i % 2 === 0 ? '#FAFDFB' : '#FFFFFF',
-                    fontSize: 12,
-                  }}>
-                    <span style={{ color: G.textSec }}>{item.name}</span>
-                    <span style={{ color: G.textPri, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
-                      {item.amount != null ? `¥${fmt(item.amount)}` : '—'}
-                    </span>
-                  </div>
-                ))}
-                {extracted.items.length > 8 && (
-                  <div style={{ padding: '6px 12px', fontSize: 11, color: G.textTer, textAlign: 'center', background: '#FAFDFB' }}>
-                    他 {extracted.items.length - 8} 件
-                  </div>
-                )}
+              <span style={{ fontSize: 13, fontWeight: 700, color: G.textPri }}>請求書の原本</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <ToolButton label="縮小" disabled={zoom <= ZOOMS[0]} onClick={() => setZoom(z => ZOOMS[Math.max(0, ZOOMS.indexOf(z as typeof ZOOMS[number]) - 1)])}>−</ToolButton>
+                <span style={{ fontSize: 12, color: G.textSec, minWidth: 44, textAlign: 'center', fontVariantNumeric: 'tabular-nums' }}>
+                  {zoom === 1 ? '全体' : `${Math.round(zoom * 100)}%`}
+                </span>
+                <ToolButton label="拡大" disabled={zoom >= ZOOMS[ZOOMS.length - 1]} onClick={() => setZoom(z => ZOOMS[Math.min(ZOOMS.length - 1, ZOOMS.indexOf(z as typeof ZOOMS[number]) + 1)])}>＋</ToolButton>
+                <button type="button" onClick={pickFile} disabled={saving} style={SUB_BUTTON}>
+                  画像を変更
+                </button>
               </div>
             </div>
-          )}
-        </div>
-      )}
-
-      {/* ─ 登録先の台帳項目を選択 ─ */}
-      {extracted && (
-        <div style={{
-          background: G.cardBg,
-          border: `1.5px solid ${G.borderLight}`,
-          borderRadius: 14,
-          padding: 20,
-          marginBottom: 20,
-          boxShadow: '0 2px 12px rgba(43,94,64,0.07)',
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
-            <div style={{
-              width: 5, height: 18, borderRadius: 3,
-              background: `linear-gradient(180deg, ${G.dark} 0%, ${G.med} 100%)`,
-            }} />
-            <span style={{ fontSize: 14, fontWeight: 700, color: G.textPri }}>
-              登録先の台帳項目
-            </span>
-          </div>
-
-          {ledgerItems.length === 0 ? (
-            <p style={{ fontSize: 13, color: G.textTer }}>
-              原価台帳がまだ作成されていません。先に「原価台帳」タブで台帳を初期化してください。
-            </p>
-          ) : (
-            <>
-              <select
-                value={selectedItemId}
-                onChange={e => edited(setSelectedItemId)(e.target.value)}
-                className="h-9 w-full rounded-[8px] border border-[#D5DED8] bg-white px-[10px] text-sm text-[#1A2E24] outline-none hover:border-[#AFC4B5] focus:border-[#2B5E40] focus:shadow-[0_0_0_3px_rgba(43,94,64,0.14)] cursor-pointer"
-              >
-                <option value="">-- 台帳項目を選択 --</option>
-                {ledgerItems.map(item => (
-                  <option key={item.id} value={item.id}>
-                    {item.name}
-                    {item.vendor_name ? ` （${item.vendor_name}）` : ''}
-                    {item.estimate_cost != null ? ` ／ 予算 ¥${fmt(item.estimate_cost)}` : ''}
-                  </option>
-                ))}
-              </select>
-
-              {selectedItem && (
-                <div style={{
-                  marginTop: 10, padding: '10px 14px',
-                  background: G.light, borderRadius: 8,
-                  fontSize: 12, color: G.textSec,
-                  display: 'flex', gap: 16,
-                }}>
-                  <span><strong>予算:</strong> {selectedItem.estimate_cost != null ? `¥${fmt(selectedItem.estimate_cost)}` : '—'}</span>
-                  <span><strong>実績累計:</strong> {selectedItem.actual_cost != null ? `¥${fmt(selectedItem.actual_cost)}` : '—'}</span>
-                  {/* 登録後の予測は出さない（初期の actual_cost は見積原価のことがあり、登録 API は内訳合計で置き換えるため）。
-                      登録後は API が返した DB の値を表示する */}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
-
-      {/* ─ 登録できなかった・登録できたか分からないときの案内 ─ */}
-      {extracted && blocker && !saved && <BlockerCard
-        blocker={blocker}
-        saving={saving}
-        onConfirmSimilar={() => register(true)}
-        onCancel={() => setBlocker(null)}
-      />}
-
-      {/* ─ 登録ボタン ─ */}
-      {extracted && (
-        <div style={{ textAlign: 'right' }}>
-          {saved ? (
-            <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8 }}>
-              <div style={{
-                display: 'inline-flex', alignItems: 'center', gap: 6,
-                background: G.light, color: G.dark,
-                borderRadius: 10, padding: '12px 24px',
-                fontSize: 14, fontWeight: 700,
-              }}>
-                <CheckIcon />
-                {saved.replayed ? 'この請求書は前回の送信で登録済みでした' : '原価台帳に登録しました'}
-                {saved.synced && saved.actualCost != null && (
-                  <span style={{ fontWeight: 500, fontSize: 12 }}>（実績累計 ¥{fmt(saved.actualCost)}）</span>
-                )}
-              </div>
-              {!saved.synced && (
-                <div style={NOTICE_WARN}>
-                  請求は保存済みです（もう一度登録する必要はありません）。
-                  ただし実績原価の合計が請求内訳と一致していることを確認できませんでした。
-                  原価台帳で実績原価と請求内訳の合計を確認してください。
-                </div>
-              )}
-            </div>
-          ) : blocker?.kind === 'duplicate' || blocker?.kind === 'similar' ? null : (
-            <button
-              onClick={() => register()}
-              disabled={saving || !selectedItemId}
-              style={{
-                background: (!selectedItemId || saving) ? G.border : G.dark,
-                color: '#fff',
-                border: 'none',
-                borderRadius: 8,
-                padding: '12px 32px',
-                fontSize: 14,
-                fontWeight: 700,
-                cursor: (!selectedItemId || saving) ? 'not-allowed' : 'pointer',
-                boxShadow: (!selectedItemId || saving) ? 'none' : '0 4px 14px rgba(43,94,64,0.35)',
-                transition: 'all 0.18s',
-              }}
+            <div
+              className="h-[55vh] lg:h-[calc(100vh-180px)]"
+              style={{ overflow: 'auto', background: '#F3F5F4', minHeight: 280 }}
             >
-              {saving ? '登録中...' : '原価台帳に登録'}
-            </button>
-          )}
+              {preview ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={preview}
+                  alt="請求書の原本"
+                  style={{ width: `${zoom * 100}%`, maxWidth: 'none', display: 'block', margin: zoom === 1 ? '0 auto' : 0 }}
+                />
+              ) : (
+                <p style={{ fontSize: 12, color: G.textTer, padding: 20 }}>画像を読み込んでいます…</p>
+              )}
+            </div>
+          </section>
+
+          {/* ── 右: 読み取り結果と登録 ── */}
+          <section aria-label="読み取り結果と登録" style={{ minWidth: 0 }}>
+            {error && <ErrorBox message={error} />}
+
+            {!extracted && (
+              <div style={{ ...CARD, textAlign: 'center' }}>
+                <button
+                  onClick={extract}
+                  disabled={loading}
+                  style={{
+                    background: loading ? G.border : G.dark,
+                    color: '#fff', border: 'none', borderRadius: 8,
+                    padding: '12px 36px', minHeight: 44,
+                    fontSize: 14, fontWeight: 700,
+                    cursor: loading ? 'not-allowed' : 'pointer',
+                    display: 'inline-flex', alignItems: 'center', gap: 8,
+                  }}
+                >
+                  <SparkleIcon />
+                  {loading ? '読み取り中...' : '請求書を読み取る'}
+                </button>
+                <p style={{ fontSize: 11, color: G.textTer, marginTop: 8 }}>
+                  業者名・金額・日付を読み取ります。登録前に原本と見比べて確認してください
+                </p>
+              </div>
+            )}
+
+            {extracted && (
+              <>
+                {/* 請求書の情報 */}
+                <div style={CARD}>
+                  <CardTitle>請求書の情報</CardTitle>
+                  {extracted.warnings.length > 0 && (
+                    <div style={{ ...NOTICE_ALERT, marginBottom: 12 }}>
+                      {extracted.warnings.map((w, i) => <div key={i}>⚠ {w}</div>)}
+                    </div>
+                  )}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12 }}>
+                    <Field label="業者名">
+                      <Input inputSize="compact" value={vendorName} onChange={e => edited(setVendorName)(e.target.value)} placeholder="例: ○○建材株式会社" />
+                    </Field>
+                    <Field label="請求書番号">
+                      <Input inputSize="compact" value={invoiceNumber} onChange={e => edited(setInvoiceNumber)(e.target.value)} placeholder="例: INV-2026-0123" />
+                    </Field>
+                    <Field label="請求日">
+                      <Input type="date" inputSize="compact" value={invoiceDate} onChange={e => edited(setInvoiceDate)(e.target.value)} />
+                    </Field>
+                    <Field label="支払期日（参考）">
+                      <div style={{ fontSize: 13, color: G.textSec, minHeight: 36, display: 'flex', alignItems: 'center' }}>
+                        {extracted.payment_due_date ?? '記載なし'}
+                      </div>
+                    </Field>
+                  </div>
+                  <p style={{ fontSize: 11, color: G.textTer, marginTop: 6 }}>
+                    支払期日は原価台帳には登録しません（台帳の「支払日」は実際に支払った日です）
+                  </p>
+                </div>
+
+                {/* 原本の金額 */}
+                <div style={CARD}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 12 }}>
+                    <CardTitle noMargin>原本の金額</CardTitle>
+                    <StatusChip ok={review.status === 'ok'} />
+                  </div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 }}>
+                    <AmountField label="税抜金額" value={printedEx} onChange={edited(setPrintedEx)} />
+                    <AmountField label="消費税額" value={printedTax} onChange={edited(setPrintedTax)} />
+                    <AmountField label="税込合計" value={printedInc} onChange={edited(setPrintedInc)} />
+                    <Field label="税区分">
+                      <select
+                        value={treatment}
+                        onChange={e => edited(setTreatment)(e.target.value as TaxTreatment)}
+                        className="h-9 w-full rounded-[8px] border border-[#D5DED8] bg-white px-[10px] text-sm text-[#1A2E24] outline-none hover:border-[#AFC4B5] focus:border-[#2B5E40] focus:shadow-[0_0_0_3px_rgba(43,94,64,0.14)] cursor-pointer"
+                      >
+                        {(Object.keys(TREATMENT_LABEL) as TaxTreatment[]).map(t => <option key={t} value={t}>{TREATMENT_LABEL[t]}</option>)}
+                      </select>
+                    </Field>
+                  </div>
+                  <p style={{ fontSize: 11, color: G.textTer, marginTop: 6 }}>
+                    原本に記載がない金額は空欄のままにしてください。読み取りが違えば原本どおりに直してください
+                  </p>
+                  {extracted.amounts.tax_breakdown.length > 0 && (
+                    <div style={{ marginTop: 10, fontSize: 12, color: G.textSec }}>
+                      税率ごとの内訳：
+                      {extracted.amounts.tax_breakdown.map((b, i) => (
+                        <span key={i} style={{ marginLeft: 8 }}>
+                          {b.rate != null ? `${b.rate}%` : '税率不明'} 対象 {b.taxable_amount != null ? `¥${fmt(b.taxable_amount)}` : '—'} ／ 税 {b.tax_amount != null ? `¥${fmt(b.tax_amount)}` : '—'}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {review.messages.length > 0 && (
+                    <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                      {review.messages.map((m, i) => (
+                        <div key={i} style={m.level === 'warn' ? NOTICE_ALERT : NOTICE_INFO}>{m.level === 'warn' ? '⚠ ' : ''}{m.text}</div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* 原価台帳に登録する内容 */}
+                <div style={CARD}>
+                  <CardTitle>原価台帳に登録する内容</CardTitle>
+
+                  <Field label="登録先の台帳項目">
+                    {ledgerItems.length === 0 ? (
+                      <p style={{ fontSize: 13, color: G.textTer }}>
+                        原価台帳がまだ作成されていません。先に原価台帳を初期化してください。
+                      </p>
+                    ) : (
+                      <select
+                        value={selectedItemId}
+                        onChange={e => edited(setSelectedItemId)(e.target.value)}
+                        className="h-11 w-full rounded-[8px] border border-[#D5DED8] bg-white px-[10px] text-sm text-[#1A2E24] outline-none hover:border-[#AFC4B5] focus:border-[#2B5E40] focus:shadow-[0_0_0_3px_rgba(43,94,64,0.14)] cursor-pointer"
+                      >
+                        <option value="">-- 台帳項目を選択 --</option>
+                        {ledgerItems.map(item => (
+                          <option key={item.id} value={item.id}>
+                            {item.name}
+                            {item.vendor_name ? ` （${item.vendor_name}）` : ''}
+                            {item.estimate_cost != null ? ` ／ 予算 ¥${fmt(item.estimate_cost)}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </Field>
+                  {selectedItem && (
+                    <div style={{
+                      marginTop: 8, padding: '8px 12px',
+                      background: G.light, borderRadius: 8,
+                      fontSize: 12, color: G.textSec,
+                      display: 'flex', gap: 16, flexWrap: 'wrap',
+                    }}>
+                      <span><strong>予算:</strong> {selectedItem.estimate_cost != null ? `¥${fmt(selectedItem.estimate_cost)}` : '—'}</span>
+                      <span><strong>実績累計:</strong> {selectedItem.actual_cost != null ? `¥${fmt(selectedItem.actual_cost)}` : '—'}</span>
+                      {/* 登録後の予測は出さない（初期の actual_cost は見積原価のことがあり、登録 API は内訳合計で置き換えるため）。
+                          登録後は API が返した DB の値を表示する */}
+                    </div>
+                  )}
+
+                  <div style={{ marginTop: 14 }}>
+                    <Field label="登録金額（税抜）">
+                      <Input
+                        inputSize="default"
+                        value={registerAmount}
+                        onChange={e => changeRegisterAmount(e.target.value)}
+                        placeholder="原本の税抜金額を入力"
+                        inputMode="numeric"
+                        aria-describedby="register-amount-help"
+                        style={{ fontSize: 16, fontWeight: 700, fontVariantNumeric: 'tabular-nums' }}
+                      />
+                    </Field>
+                    <div id="register-amount-help" style={{ fontSize: 12, color: G.textSec, marginTop: 6, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                      {parsedRegister !== null
+                        ? <span>¥{fmt(parsedRegister)}（税抜）を実績原価に加えます</span>
+                        : <span style={{ color: '#92400E' }}>税抜金額を入力してください（原価台帳は税抜で集計します）</span>}
+                      {showUseSuggestion && (
+                        <button type="button" onClick={() => changeRegisterAmount(String(reviewSuggestion))} style={SUB_BUTTON}>
+                          原本の税抜 ¥{fmt(reviewSuggestion)} を使う
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <label style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 10, marginTop: 14,
+                    padding: '10px 12px', borderRadius: 8, minHeight: 44,
+                    border: `1px solid ${confirmed ? G.border : '#FDE68A'}`,
+                    background: confirmed ? G.light : '#FFFBEB',
+                    cursor: parsedRegister === null ? 'not-allowed' : 'pointer',
+                    fontSize: 13, color: G.textPri,
+                  }}>
+                    <input
+                      type="checkbox"
+                      checked={confirmed}
+                      disabled={parsedRegister === null || !!saved}
+                      onChange={e => setConfirmed(e.target.checked)}
+                      style={{ width: 18, height: 18, marginTop: 1, accentColor: G.dark }}
+                    />
+                    <span>
+                      {parsedRegister !== null
+                        ? <>登録金額 <strong>¥{fmt(parsedRegister)}</strong> が税抜金額であることを、原本で確認しました</>
+                        : '登録金額を入力すると確認できます'}
+                    </span>
+                  </label>
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginTop: 14 }}>
+                    <Field label="支払日（支払済みの場合のみ）">
+                      <Input type="date" inputSize="compact" value={paymentDate} onChange={e => edited(setPaymentDate)(e.target.value)} />
+                    </Field>
+                    <Field label="メモ（任意）">
+                      <Input inputSize="compact" value={note} onChange={e => setNote(e.target.value)} placeholder="例: 7月分材料費" />
+                    </Field>
+                  </div>
+                </div>
+
+                {/* 明細プレビュー */}
+                {extracted.items.length > 0 && (
+                  <details style={{ ...CARD, padding: '12px 16px' }}>
+                    <summary style={{ fontSize: 12, color: G.textSec, cursor: 'pointer', fontWeight: 600 }}>
+                      読み取った明細（参考・{extracted.items.length} 件）
+                    </summary>
+                    <div style={{ border: `1px solid ${G.borderLight}`, borderRadius: 8, overflow: 'hidden', marginTop: 8 }}>
+                      {extracted.items.slice(0, 20).map((item, i) => (
+                        <div key={i} style={{
+                          display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8,
+                          padding: '7px 12px',
+                          borderBottom: i < Math.min(extracted.items.length, 20) - 1 ? `1px solid ${G.borderLight}` : 'none',
+                          background: i % 2 === 0 ? '#FAFDFB' : '#FFFFFF',
+                          fontSize: 12,
+                        }}>
+                          <span style={{ color: G.textSec }}>{item.name}</span>
+                          <span style={{ color: G.textPri, fontWeight: 600, fontVariantNumeric: 'tabular-nums' }}>
+                            {item.amount != null ? `¥${fmt(item.amount)}` : '—'}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+
+                {/* ─ 登録できなかった・登録できたか分からないときの案内 ─ */}
+                {blocker && !saved && <BlockerCard
+                  blocker={blocker}
+                  saving={saving}
+                  onConfirmSimilar={() => register(true)}
+                  onCancel={() => setBlocker(null)}
+                />}
+
+                {/* ─ 登録ボタン・結果 ─ */}
+                <div style={{ textAlign: 'right', marginTop: 4 }}>
+                  {saved ? (
+                    <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8 }}>
+                      <div role="status" style={{
+                        display: 'inline-flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', justifyContent: 'flex-end',
+                        background: G.light, color: G.dark,
+                        borderRadius: 10, padding: '12px 20px',
+                        fontSize: 14, fontWeight: 700,
+                      }}>
+                        <CheckIcon />
+                        {saved.replayed ? 'この請求書は前回の送信で登録済みでした' : `¥${fmt(saved.amount)}（税抜）を原価台帳に登録しました`}
+                        {saved.synced && saved.actualCost != null && (
+                          <span style={{ fontWeight: 500, fontSize: 12 }}>（実績累計 ¥{fmt(saved.actualCost)}）</span>
+                        )}
+                      </div>
+                      {!saved.synced && (
+                        <div style={NOTICE_WARN}>
+                          請求は保存済みです（もう一度登録する必要はありません）。
+                          ただし実績原価の合計が請求内訳と一致していることを確認できませんでした。
+                          原価台帳で実績原価と請求内訳の合計を確認してください。
+                        </div>
+                      )}
+                      <button type="button" onClick={startNext} style={{ ...SUB_BUTTON, minHeight: 44, padding: '0 18px' }}>
+                        次の請求書を取り込む
+                      </button>
+                    </div>
+                  ) : blocker?.kind === 'duplicate' || blocker?.kind === 'similar' ? null : (
+                    <>
+                      <button
+                        onClick={() => register()}
+                        disabled={!canRegister}
+                        style={{
+                          background: canRegister ? G.dark : G.border,
+                          color: '#fff', border: 'none', borderRadius: 8,
+                          padding: '12px 32px', minHeight: 44,
+                          fontSize: 14, fontWeight: 700,
+                          cursor: canRegister ? 'pointer' : 'not-allowed',
+                          transition: 'all 0.18s',
+                        }}
+                      >
+                        {saving ? '登録中...' : '原価台帳に登録'}
+                      </button>
+                      {!canRegister && !saving && (
+                        <p style={{ fontSize: 11, color: G.textTer, marginTop: 6 }}>
+                          {!selectedItemId ? '登録先の台帳項目を選んでください'
+                            : parsedRegister === null ? '登録金額（税抜）を入力してください'
+                            : '登録金額を原本で確認し、チェックを入れてください'}
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
+              </>
+            )}
+          </section>
         </div>
       )}
     </div>
+  )
+}
+
+const CARD: React.CSSProperties = {
+  background: G.cardBg,
+  border: `1.5px solid ${G.borderLight}`,
+  borderRadius: 14,
+  padding: 18,
+  marginBottom: 16,
+}
+
+const SUB_BUTTON: React.CSSProperties = {
+  minHeight: 32, padding: '0 12px', borderRadius: 8,
+  border: `1px solid ${G.border}`, background: '#fff', color: G.textSec,
+  fontSize: 12, fontWeight: 600, cursor: 'pointer',
+}
+
+const NOTICE_ALERT: React.CSSProperties = {
+  background: '#FFFBEB', border: '1px solid #FDE68A',
+  borderRadius: 8, padding: '8px 12px',
+  fontSize: 12, color: '#92400E',
+}
+
+const NOTICE_INFO: React.CSSProperties = {
+  background: '#F6FAF7', border: `1px solid ${G.borderLight}`,
+  borderRadius: 8, padding: '8px 12px',
+  fontSize: 12, color: G.textSec,
+}
+
+function ErrorBox({ message }: { message: string }) {
+  return (
+    <div role="alert" style={{
+      background: '#FFF0F4', border: '1px solid #F5C2D0',
+      borderRadius: 10, padding: '10px 14px',
+      fontSize: 13, color: '#C0385A',
+      marginBottom: 16,
+    }}>
+      {message}
+    </div>
+  )
+}
+
+function CardTitle({ children, noMargin }: { children: React.ReactNode; noMargin?: boolean }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: noMargin ? 0 : 12 }}>
+      <div style={{ width: 4, height: 16, borderRadius: 2, background: G.dark }} />
+      <span style={{ fontSize: 14, fontWeight: 700, color: G.textPri }}>{children}</span>
+    </div>
+  )
+}
+
+/** 原本の金額の照合結果（AI の判定ではなく、画面の値で照合した結果） */
+function StatusChip({ ok }: { ok: boolean }) {
+  return (
+    <span style={{
+      fontSize: 11, fontWeight: 700, borderRadius: 4, padding: '3px 8px',
+      background: ok ? G.light : '#FFFBEB', color: ok ? G.dark : '#92400E',
+      border: `1px solid ${ok ? G.border : '#FDE68A'}`,
+    }}>
+      {ok ? '金額の整合OK' : '要確認'}
+    </span>
+  )
+}
+
+function AmountField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  const n = toAmount(value)
+  return (
+    <Field label={label}>
+      <Input
+        inputSize="compact"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder="記載なし"
+        inputMode="numeric"
+        style={{ fontVariantNumeric: 'tabular-nums' }}
+      />
+      <div style={{ fontSize: 11, color: G.textTer, marginTop: 3, minHeight: 15, fontVariantNumeric: 'tabular-nums' }}>
+        {value.trim() === '' ? '' : n != null ? `¥${fmt(n)}` : '数字で入力してください'}
+      </div>
+    </Field>
+  )
+}
+
+function ToolButton({ label, disabled, onClick, children }: { label: string; disabled: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button" aria-label={label} title={label} disabled={disabled} onClick={onClick}
+      style={{ ...SUB_BUTTON, width: 32, padding: 0, fontSize: 15, cursor: disabled ? 'not-allowed' : 'pointer', opacity: disabled ? 0.5 : 1 }}
+    >
+      {children}
+    </button>
   )
 }
 
