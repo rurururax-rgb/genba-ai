@@ -45,13 +45,26 @@ PostgREST を直接叩く書き込みや、service_role（Webhook・cron・SQL�
 |---|---|
 | `estimate_items`・`line_events` | 20261013000002（PR #35）で対処。複合外部キー (project_id, company_id)。`line_events` は company_id が NULL だと複合外部キーを素通りするため、CHECK (project_id IS NULL OR company_id IS NOT NULL) も追加 |
 | 12 テーブル: `project_files`・`project_notes`・`ai_summaries`・`estimate_documents`・`schedule_items`・`share_links`・`cost_ledger_items`・`invoice_documents`・`project_billing_milestones`・`estimate_groups`・`line_event_notes`・`schedule_draft_adoptions` | **KI-002 PR-3（PR #39・`20261014000001`）で対処。本番適用・検証済み（2026-10-12 時点）。** 複合外部キー 12 + CHECK 5 = 17 制約がすべて有効、RLS ポリシーは適用前後で一致。手順・結果は `docs/db/ki-002-pr3-project-company-match.md` |
-| `estimate_revisions`・`cost_ledger_invoices` | **未対処（PR-4 以降）。** 本番で直接作られ、リポジトリに定義が無い。precheck ⑥ で本番の定義を読み取りで確かめてから別 PR で扱う |
-| 工種の参照: `estimate_items.group_id`・`schedule_items.estimate_group_id` → `estimate_groups` | **未対処（PR-4 以降）。** API では PR #38 で確認済みだが、DB は工種の会社・案件の一致を保証していない（単独の外部キー・ON DELETE SET NULL のみ） |
+| `estimate_revisions`・`cost_ledger_invoices` | **未対処（PR-5 以降）。** 本番で直接作られ、リポジトリに定義が無い。本番の定義は PR-4 precheck ⑧ で確認済み（2026-10-13）。それをもとに別 PR で扱う |
+| 工種の参照: `estimate_items.group_id`・`schedule_items.estimate_group_id` → `estimate_groups` | **KI-002 PR-4a（`20261015000001`）で対処予定。本番未適用。** 複合外部キー (工種, project_id) → `estimate_groups(id, project_id)`、ON DELETE SET NULL (工種の列)。手順は `docs/db/ki-002-pr4a-group-project-match.md` |
+| `cost_ledger_items.estimate_item_id` → `estimate_items`（PR-4b）、`estimate_items.line_event_id`・`line_event_notes.anchor_event_id` → `line_events`（PR-4c・会社のみ） | **未対処。** 本番の事前調査で blocking は 0。制約案は `docs/db/ki-002-pr4-plan.md` |
 
 - 他のテーブルに複合外部キーを足すときも、company_id が NULL 許容なら同じ CHECK が必要。
 
-**対応タイミング:** PR-3 は本番適用済み。残りは PR-4 以降で扱う。
+**対応タイミング:** PR-3 は本番適用済み。PR-4a は人間の承認後に本番へ適用する（適用直前にバックアップと precheck ①〜⑧）。残りは PR-4b 以降で扱う。
 PR-4 以降は、テーブルごとに食い違いの件数を読み取りで確かめてから migration を作る。
+調査結果・制約案・順序は `docs/db/ki-002-pr4-plan.md`、本番向けの読み取り専用調査は `docs/db/ki-002-pr4-precheck.sql`。
+
+### KI-003: 請求・入金の集計と朝のブリーフィングが黙って空になる可能性（PR-3 の影響・PR #41 で修正済み・本番の動作確認待ち）
+
+**発見:** 2026-10-12（KI-002 PR-4 の調査と独立監査）
+**関連:** `lib/services/billing-status.ts`（2 か所）・`lib/services/daily-briefing.ts`（1 か所）
+
+PR-3 で `project_billing_milestones`・`invoice_documents` → `projects` の外部キーが 2 本になった。PostgREST はヒントの無い
+`projects!inner` の埋め込みをあいまい（PGRST201）として拒否し、コードはそのエラーを 0 件として扱っていた。
+画面は壊れずに、入金予定・未入金額・請求書・請求漏れの表示と朝の通知だけが消える。本番で起きているかは未確認。
+修正（外部キー名のヒント・取得失敗を 0 件にしない・回帰テスト）は PR #41（main にマージ済み）。詳細は `docs/db/ki-002-pr4-plan.md` の PR-4.0。
+本番で請求・入金の表示と朝のブリーフィングが出ていることを確かめたら、解決済みに移す。
 
 ---
 
