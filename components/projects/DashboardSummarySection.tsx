@@ -22,8 +22,9 @@ import { CompanyChat } from './CompanyChat'
 import { CHAT_ENTRY_ENABLED } from '@/lib/trial-features'
 
 type Props = {
-  summary:     CompanySummary
-  actionItems: TodayActionItem[]
+  /** null = 請求・入金の情報を取得できなかった（0 件として表示しない） */
+  summary:     CompanySummary | null
+  actionItems: TodayActionItem[] | null
 }
 
 // ── 優先度ごとの配色 ────────────────────────────────────────────────
@@ -217,11 +218,15 @@ function PriorityGroup({
 
 // ── メインコンポーネント ─────────────────────────────────────────────
 
-export function DashboardSummarySection({ summary, actionItems }: Props) {
+export function DashboardSummarySection(props: Props) {
   const [chatMessage, setChatMessage] = useState<string | null>(null)
 
   const handleOpenChat = (msg: string) => setChatMessage(msg)
   const handleCloseChat = () => setChatMessage(null)
+
+  const loadFailed  = props.summary === null || props.actionItems === null
+  const summary     = props.summary
+  const actionItems = props.actionItems ?? []
 
   const highItems   = actionItems.filter(i => i.priority <= 1)
   const medHiItems  = actionItems.filter(i => i.priority === 2)
@@ -288,8 +293,19 @@ export function DashboardSummarySection({ summary, actionItems }: Props) {
           </button>}
         </div>
 
-        {/* 要対応なし */}
-        {!hasActions ? (
+        {/* 取得失敗（「要対応なし」と表示しない） */}
+        {loadFailed ? (
+          <div role="alert" style={{
+            padding:     '14px 16px',
+            borderRadius: 10,
+            background:  '#FFFBEB',
+            border:      '1px solid #FDE68A',
+            fontSize:    13,
+            color:       '#92400E',
+          }}>
+            請求・入金の情報を取得できなかったため、今日の確認を表示できません。時間をおいて再読み込みしてください。
+          </div>
+        ) : !hasActions ? (
           <div style={{
             padding:     '14px 16px',
             borderRadius: 10,
@@ -304,7 +320,7 @@ export function DashboardSummarySection({ summary, actionItems }: Props) {
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#22C55E" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
               <polyline points="20 6 9 17 4 12"/>
             </svg>
-            現在、要対応の項目はありません。進行中 {summary.active_projects}件
+            現在、要対応の項目はありません。進行中 {summary?.active_projects}件
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -317,9 +333,9 @@ export function DashboardSummarySection({ summary, actionItems }: Props) {
         )}
 
         {/* 進行中件数フッター */}
-        {hasActions && (
+        {hasActions && !loadFailed && (
           <p style={{ fontSize: 12, color: '#9CA3AF', marginTop: 12, margin: '12px 0 0' }}>
-            進行中 {summary.active_projects}件
+            進行中 {summary?.active_projects}件
           </p>
         )}
       </div>

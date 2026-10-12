@@ -54,7 +54,7 @@ import {
   getProjectSummaryDetail,
   listCompanyProjects,
 } from '@/lib/services/company-summary'
-import { getCompanyBillingStatus } from '@/lib/services/billing-status'
+import { BillingFetchError, getCompanyBillingStatus } from '@/lib/services/billing-status'
 import { executeGetEstimateTotal } from './estimate-total'
 
 // ─────────────────────────────────────────────────────────
@@ -1132,7 +1132,19 @@ async function executeGetUnpaidMilestones(
   args: { overdue_only?: boolean },
   ctx: ExecutorContext,
 ): Promise<DispatchResult> {
-  const billing = await getCompanyBillingStatus(ctx.supabase)
+  let billing
+  try {
+    billing = await getCompanyBillingStatus(ctx.supabase)
+  } catch (err) {
+    // 取得失敗を 0 件として答えさせない（「未入金はありません」と誤って伝えない）
+    if (!(err instanceof BillingFetchError)) throw err
+    return {
+      serialized: JSON.stringify({
+        status: 'error',
+        hint:   '請求・入金の情報を取得できませんでした。件数や金額を推測せず、時間をおいて再度確認するよう伝えてください。',
+      }),
+    }
+  }
 
   const milestones = args.overdue_only
     ? billing.overdue_milestones

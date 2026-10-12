@@ -4,9 +4,11 @@
  * - user を渡すと、各クエリを `SET LOCAL ROLE authenticated` + request.jwt.claim.sub の中で実行する（RLS 有効）。
  *   user を省くと superuser のまま実行する（service_role / admin クライアント相当。RLS を通らない）。
  * - 対応するのはテスト対象のルート・サービスが使う範囲だけ：
- *     select（列・`*`・`projects!inner ( ... )` の埋め込み・count/head）、insert / update / delete、
+ *     select（列・`*`・`projects!<外部キー名>!inner ( ... )` の埋め込み・count/head）、insert / update / delete、
  *     eq / neq / is / in / not(col,'is',null) / lt / lte / gt / gte（埋め込み列 `projects.xxx` も可）、
  *     order / limit / single / maybeSingle、auth.getUser()
+ * - 埋め込みは PostgREST と同じく外部キーで解決する。2 テーブル間に外部キーが複数あってヒントが無いと
+ *   PGRST201（あいまい）、ヒントの外部キーが無いと PGRST200 を返す（KI-003 を再現できるように）。
  * - 本番・Preview の DB には接続しない（渡された pg Client = テストが起動したローカル DB のみ）。
  */
 
@@ -34,12 +36,18 @@ function ident(name: string): string {
   return `"${name}"`
 }
 
-/** select 文字列を「行の列」と「埋め込み（多対一・projects のみ）」に分ける */
+type Embed = { rel: string; hint: string | null; cols: string[] }
+
+/** select 文字列を「行の列」と「埋め込み（多対一・projects のみ・!inner 必須）」に分ける */
 function parseSelect(table: string, select: string) {
-  const embedRe = /(\w+)!inner\s*\(([^)]*)\)/g
-  const embeds: Array<{ rel: string; cols: string[] }> = []
-  const rest = select.replace(embedRe, (_m, rel: string, cols: string) => {
-    embeds.push({ rel, cols: cols.split(',').map(c => c.trim()).filter(Boolean) })
+  const embedRe = /(\w+)((?:!\w+)*)\s*\(([^)]*)\)/g
+  const embeds: Embed[] = []
+  const rest = select.replace(embedRe, (_m, rel: string, mods: string, cols: string) => {
+    const m = mods.split('!').filter(Boolean)
+    if (!m.includes('inner')) throw new Error(`unsupported embed without !inner: ${rel} on ${table}`)
+    const hints = m.filter(x => x !== 'inner')
+    if (hints.length > 1) throw new Error(`unsupported embed modifiers: ${mods} on ${table}`)
+    embeds.push({ rel, hint: hints[0] ?? null, cols: cols.split(',').map(c => c.trim()).filter(Boolean) })
     return ''
   })
   const cols = rest.split(',').map(c => c.trim()).filter(Boolean)
@@ -49,14 +57,36 @@ function parseSelect(table: string, select: string) {
   return { cols, embeds }
 }
 
-function selectList(table: string, select: string): { list: string; join: string } {
+/** 埋め込みに使う外部キーの列（table → rel）。PostgREST と同じく、あいまい・存在しないならエラー */
+type EmbedFk = { ok: true; column: string } | { ok: false; code: 'PGRST200' | 'PGRST201'; message: string }
+async function resolveEmbedFk(
+  run: (sql: string, params: unknown[]) => Promise<{ rows: Record<string, unknown>[] }>,
+  table: string, e: Embed,
+): Promise<EmbedFk> {
+  const { rows } = await run(
+    `SELECT c.conname, a.attname AS col
+       FROM pg_constraint c
+       JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1]
+      WHERE c.contype = 'f' AND c.conrelid = to_regclass('public.' || $1) AND c.confrelid = to_regclass('public.' || $2)`,
+    [table, e.rel])
+  const fks = e.hint ? rows.filter(r => r.conname === e.hint) : rows
+  if (fks.length === 0) {
+    return { ok: false, code: 'PGRST200', message: `Could not find a relationship between '${table}' and '${e.rel}'` }
+  }
+  if (fks.length > 1) {
+    return { ok: false, code: 'PGRST201', message: `Could not embed because more than one relationship was found for '${table}' and '${e.rel}'` }
+  }
+  return { ok: true, column: String(fks[0].col) }
+}
+
+function selectList(table: string, select: string, fkColumns: string[] = []): { list: string; join: string } {
   const { cols, embeds } = parseSelect(table, select)
   const parts = cols.map(c => (c === '*' ? 't.*' : `t.${ident(c)}`))
   let join = ''
-  for (const e of embeds) {
-    join = ` JOIN projects e_projects ON e_projects.id = t.project_id`
+  embeds.forEach((e, i) => {
+    join = ` JOIN projects e_projects ON e_projects.id = t.${ident(fkColumns[i] ?? 'project_id')}`
     parts.push(`jsonb_build_object(${e.cols.map(c => `'${c}', e_projects.${ident(c)}`).join(', ')}) AS projects`)
-  }
+  })
   return { list: parts.join(', ') || 't.*', join }
 }
 
@@ -129,7 +159,13 @@ class Query implements PromiseLike<Result> {
     let sql: string
     const sel = this.selectCols ?? '*'
     if (this.action === 'select') {
-      const { list, join } = selectList(this.table, sel)
+      const fkColumns: string[] = []
+      for (const e of parseSelect(this.table, sel).embeds) {
+        const fk = await resolveEmbedFk(this.run, this.table, e)
+        if (!fk.ok) return { data: null, error: { message: fk.message, code: fk.code }, count: null }
+        fkColumns.push(fk.column)
+      }
+      const { list, join } = selectList(this.table, sel, fkColumns)
       sql = `SELECT ${this.countMode && this.head ? 'count(*)::int AS n' : list} FROM ${ident(this.table)} t${join}${this.where(params)}`
       if (!(this.countMode && this.head)) {
         if (this.orders.length) sql += ' ORDER BY ' + this.orders.map(o => `${this.colRef(o.col)} ${o.asc ? 'ASC' : 'DESC'}`).join(', ')

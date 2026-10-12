@@ -28,6 +28,8 @@
  * milestone_unpaid_count = 0 であっても issued invoice があれば未回収リスクがある。
  *
  * DashboardとAI Toolは同じ getCompanyBillingStatus() を使うことで整合を保証する。
+ *
+ * 取得に失敗したときは集計を返さず BillingFetchError を投げる（呼び出し側で「取得できなかった」と示す）。
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js'
@@ -137,6 +139,35 @@ type RawInvoice = {
 
 type EmbeddedProject = { id: string; name: string; company_id: string | null; deleted_at: string | null }
 
+// ── 取得失敗の扱い ───────────────────────────────────────────────────
+
+/**
+ * 請求・入金の情報を DB から取得できなかったことを表す。
+ *
+ * 取得エラーを `data ?? []` で 0 件として扱うと、「未入金なし」「請求書なし」と誤って表示・通知してしまう
+ * （KI-003: 外部キーが増えて PostgREST の埋め込みがあいまいになったときなど）。集計を返さずにこれを投げる。
+ * message には取得元とエラーコードだけを入れる（顧客データ・接続情報を含めない）。
+ */
+export class BillingFetchError extends Error {
+  constructor(readonly source: string, readonly code: string) {
+    super(`billing fetch failed: ${source} (${code})`)
+    this.name = 'BillingFetchError'
+  }
+}
+
+/** エラーコードは英数字の短いものだけを残す（PostgREST の PGRST201、PostgreSQL の SQLSTATE など） */
+function safeErrorCode(code: unknown): string {
+  return typeof code === 'string' && /^[A-Z0-9]{1,16}$/.test(code) ? code : 'unknown'
+}
+
+/** 取得結果にエラーがあれば、安全なコードだけをログに出して BillingFetchError を投げる */
+export function assertBillingFetched(source: string, res: { error: { code?: string } | null }): void {
+  if (!res.error) return
+  const code = safeErrorCode(res.error.code)
+  console.error('[billing] fetch failed', { source, code })
+  throw new BillingFetchError(source, code)
+}
+
 /**
  * 行に埋め込んだ案件が、行と同じ会社（companyId 指定時はその会社）のものか。
  *
@@ -175,13 +206,15 @@ export async function getCompanyBillingStatus(
     .neq('status', 'done')
   if (companyId) activeQuery = activeQuery.eq('company_id', companyId)
 
+  // 案件の埋め込みには既存の単独外部キー名をヒントに付ける。PR-3（20261014000001）で同じ 2 テーブル間に
+  // 複合外部キーが増え、ヒントが無いと PostgREST があいまい（PGRST201）として拒否するため（KI-003）
   let milestonesQuery = supabase
     .from('project_billing_milestones')
     .select(`
       id, project_id, company_id, type,
       invoice_date, invoice_amount,
       payment_date,
-      projects!inner ( id, name, company_id, deleted_at )
+      projects!project_billing_milestones_project_id_fkey!inner ( id, name, company_id, deleted_at )
     `)
     .is('projects.deleted_at', null)
   // 行だけでなく埋め込む案件も対象会社に絞る（取得後も isOwnCompanyProjectRow で確かめる）
@@ -193,7 +226,7 @@ export async function getCompanyBillingStatus(
       id, project_id, company_id,
       invoice_number, customer_name,
       status, issued_at, payment_due_at,
-      projects!inner ( id, name, company_id, deleted_at )
+      projects!invoice_documents_project_id_fkey!inner ( id, name, company_id, deleted_at )
     `)
     .in('status', ['draft', 'issued', 'paid'])
     .is('projects.deleted_at', null)
@@ -204,6 +237,11 @@ export async function getCompanyBillingStatus(
     milestonesQuery,
     invoicesQuery,
   ])
+
+  // 取得に失敗したら 0 件として集計しない（未入金なし・請求書なしと誤って伝えない）
+  assertBillingFetched('active_projects', activeRes)
+  assertBillingFetched('milestones', milestonesRes)
+  assertBillingFetched('invoices', invoicesRes)
 
   const active_projects = activeRes.count ?? 0
 

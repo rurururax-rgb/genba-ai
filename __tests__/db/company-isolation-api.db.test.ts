@@ -257,9 +257,18 @@ describe('朝のブリーフィング: 他社の案件を指す行があって�
     const sb = pgSupabase(admin)
     const { data } = await sb
       .from('project_billing_milestones')
-      .select('project_id, projects!inner ( id, name )')
+      .select('project_id, projects!project_billing_milestones_project_id_fkey!inner ( id, name )')
       .eq('company_id', COMPANY_A)
     expect(JSON.stringify(data)).toContain(SECRET_B)
+  })
+
+  it('KI-003 の再現: PR-3 後の DB では、ヒントの無い projects の埋め込みは PGRST201（あいまい）で取得できない', async () => {
+    const sb = pgSupabase(admin)
+    for (const table of ['project_billing_milestones', 'invoice_documents']) {
+      const { data, error } = await sb.from(table).select('project_id, projects!inner ( id, name )').eq('company_id', COMPANY_A)
+      expect(data).toBeNull()
+      expect(error?.code).toBe('PGRST201')
+    }
   })
 
   it('getDailyBriefingItems（cron と同じ admin + companyId）と LINE 本文に B社の案件が出ない', async () => {
