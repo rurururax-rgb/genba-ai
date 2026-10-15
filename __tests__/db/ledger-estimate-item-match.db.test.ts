@@ -40,6 +40,7 @@ let admin: Client
 const COMPANY_A = randomUUID()
 const COMPANY_B = randomUUID()
 const USER_A = randomUUID()
+const USER_B = randomUUID()
 let PROJECT_A: string
 let PROJECT_A2: string
 let PROJECT_B: string
@@ -50,9 +51,9 @@ let ITEM_A2: string         // 同じ会社の別案件 PROJECT_A2 の見積行
 let ITEM_B: string          // 他社 PROJECT_B の見積行
 
 async function seed(c: Client) {
-  await c.query('INSERT INTO auth.users (id) VALUES ($1)', [USER_A])
+  await c.query('INSERT INTO auth.users (id) VALUES ($1), ($2)', [USER_A, USER_B])
   await c.query('INSERT INTO companies (id, name) VALUES ($1, $2), ($3, $4)', [COMPANY_A, 'A社', COMPANY_B, 'B社'])
-  await c.query('INSERT INTO company_members (company_id, user_id) VALUES ($1, $2)', [COMPANY_A, USER_A])
+  await c.query('INSERT INTO company_members (company_id, user_id) VALUES ($1, $2), ($3, $4)', [COMPANY_A, USER_A, COMPANY_B, USER_B])
 }
 
 async function newProject(c: Client, companyId: string): Promise<string> {
@@ -466,6 +467,133 @@ describe('修正後: 原価台帳の既存の操作は変わらない', () => {
     await newLedger(admin, COMPANY_A, p, await newItem(admin, COMPANY_A, p))
     await admin.query('DELETE FROM projects WHERE id = $1', [p])
     expect(await ledgerOf(admin, led)).toMatchObject({ project_id: PROJECT_A2, estimate_item_id: ITEM_A2 })
+  })
+})
+
+// ── 4-2. 修正後: 業者請求書の RPC（P1-2 / P1-4。OCR の登録もこの経路）と組み合わせても変わらない ──────────
+
+type InvoiceRpcResult = { invoice: { id: string; amount: number; note: string | null }; item_id: string; actual_cost: number | null; invoice_count: number }
+
+/** source = 'ocr' は OCR 画面と同じく原本の SHA-256・idempotency_key 付きで登録する */
+const rpcInsert = async (c: Client, itemId: string, amount: number, source: 'manual' | 'ocr' = 'manual'): Promise<InvoiceRpcResult> =>
+  (await c.query(
+    `SELECT public.cost_ledger_invoice_insert(p_item_id => $1, p_amount => $2::numeric, p_source => $3,
+       p_document_sha256 => $4, p_idempotency_key => $5::uuid) AS r`,
+    [itemId, String(amount), source,
+     source === 'ocr' ? randomUUID().replace(/-/g, '').repeat(2) : null, source === 'ocr' ? randomUUID() : null])).rows[0].r
+const rpcUpdate = async (c: Client, invoiceId: string, patch: Record<string, unknown>): Promise<InvoiceRpcResult> =>
+  (await c.query('SELECT public.cost_ledger_invoice_update($1, $2::jsonb) AS r', [invoiceId, JSON.stringify(patch)])).rows[0].r
+const rpcDelete = async (c: Client, invoiceId: string): Promise<{ deleted_id: string; actual_cost: number | null; invoice_count: number }> =>
+  (await c.query('SELECT public.cost_ledger_invoice_delete($1) AS r', [invoiceId])).rows[0].r
+
+/** 台帳行の実績原価と請求書の合計・件数（請求書の project_id はすべて台帳行と同じであること） */
+async function invoiceTotals(c: Client, ledgerId: string) {
+  const { rows } = await c.query(`
+    SELECT l.actual_cost::text AS actual_cost, sum(v.amount)::text AS total, count(v.id)::int AS n,
+           bool_and(v.project_id = l.project_id) AS same_project
+    FROM cost_ledger_items l LEFT JOIN cost_ledger_invoices v ON v.cost_ledger_item_id = l.id
+    WHERE l.id = $1 GROUP BY l.id, l.actual_cost`, [ledgerId])
+  return rows[0] as { actual_cost: string | null; total: string | null; n: number; same_project: boolean | null }
+}
+
+describe('修正後: 見積行を指す台帳行への業者請求書の登録・編集・削除（RPC）は従来どおり', () => {
+  it('登録 → 金額・日付・備考の編集 → 削除で actual_cost が常に請求書の合計と一致し、見積行の参照・案件は変わらない', async () => {
+    const item = await newItem(admin, COMPANY_A, PROJECT_A)
+    const led = await newLedger(admin, COMPANY_A, PROJECT_A, item)
+
+    const r1 = await asUser(admin, USER_A, () => rpcInsert(admin, led, 1000, 'ocr'))
+    const r2 = await asUser(admin, USER_A, () => rpcInsert(admin, led, 250))
+    expect([r1.invoice_count, r2.invoice_count, Number(r2.actual_cost)]).toEqual([1, 2, 1250])
+    expect(await invoiceTotals(admin, led)).toEqual({ actual_cost: '1250', total: '1250', n: 2, same_project: true })
+
+    const u = await asUser(admin, USER_A, () => rpcUpdate(admin, r1.invoice.id,
+      { amount: 800, invoice_date: '2026-10-01', payment_date: '2026-10-31', note: '税抜で訂正' }))
+    expect([Number(u.invoice.amount), u.invoice.note, Number(u.actual_cost)]).toEqual([800, '税抜で訂正', 1050])
+    const { rows } = await admin.query('SELECT invoice_date::text, payment_date::text FROM cost_ledger_invoices WHERE id = $1', [r1.invoice.id])
+    expect(rows[0]).toEqual({ invoice_date: '2026-10-01', payment_date: '2026-10-31' })
+    expect(await invoiceTotals(admin, led)).toEqual({ actual_cost: '1050', total: '1050', n: 2, same_project: true })
+
+    const d1 = await asUser(admin, USER_A, () => rpcDelete(admin, r2.invoice.id))
+    expect([d1.invoice_count, Number(d1.actual_cost)]).toEqual([1, 800])
+    const d2 = await asUser(admin, USER_A, () => rpcDelete(admin, r1.invoice.id))
+    expect([d2.invoice_count, d2.actual_cost]).toEqual([0, null])
+    expect(await ledgerOf(admin, led)).toEqual({ project_id: PROJECT_A, estimate_item_id: item, actual_cost: null, deleted: false })
+  })
+
+  it('P1-3: 請求書がある台帳行の actual_cost の直接変更は CL423。請求書をすべて消せば直接入力できる', async () => {
+    const led = await newLedger(admin, COMPANY_A, PROJECT_A, await newItem(admin, COMPANY_A, PROJECT_A))
+    const r = await asUser(admin, USER_A, () => rpcInsert(admin, led, 300))
+    const e = await pgError(asUser(admin, USER_A, () => admin.query('UPDATE cost_ledger_items SET actual_cost = 1 WHERE id = $1', [led])))
+    expect(e).toMatchObject({ code: 'CL423', message: 'actual_cost_locked' })
+    expect(await invoiceTotals(admin, led)).toMatchObject({ actual_cost: '300', total: '300' })
+    await asUser(admin, USER_A, () => rpcDelete(admin, r.invoice.id))
+    await asUser(admin, USER_A, () => admin.query('UPDATE cost_ledger_items SET actual_cost = 1 WHERE id = $1', [led]))
+    expect((await ledgerOf(admin, led))?.actual_cost).toBe('1')
+  })
+
+  it('論理削除済みの見積行を指す台帳行・物理削除で見積行の参照が NULL になった台帳行にも、登録・編集・削除できる', async () => {
+    const ledToDeleted = await newLedger(admin, COMPANY_A, PROJECT_A, ITEM_A_DELETED)
+    const item = await newItem(admin, COMPANY_A, PROJECT_A)
+    const ledNulled = await newLedger(admin, COMPANY_A, PROJECT_A, item)
+    const before = await asUser(admin, USER_A, () => rpcInsert(admin, ledNulled, 100))
+    await admin.query('DELETE FROM estimate_items WHERE id = $1', [item]) // SET NULL (estimate_item_id)
+    expect(await ledgerOf(admin, ledNulled)).toMatchObject({ estimate_item_id: null, actual_cost: '100' })
+    for (const led of [ledToDeleted, ledNulled]) {
+      const r = await asUser(admin, USER_A, () => rpcInsert(admin, led, 40))
+      await asUser(admin, USER_A, () => rpcUpdate(admin, r.invoice.id, { amount: 60 }))
+    }
+    await asUser(admin, USER_A, () => rpcDelete(admin, before.invoice.id))
+    expect(await invoiceTotals(admin, ledToDeleted)).toEqual({ actual_cost: '60', total: '60', n: 1, same_project: true })
+    expect(await invoiceTotals(admin, ledNulled)).toEqual({ actual_cost: '60', total: '60', n: 1, same_project: true })
+    expect((await ledgerOf(admin, ledToDeleted))?.estimate_item_id).toBe(ITEM_A_DELETED)
+  })
+
+  it('RPC が台帳行をロックしている間の見積行の物理削除は待ち合わせ、デッドロックせずに両方とも反映される', async () => {
+    const item = await newItem(admin, COMPANY_A, PROJECT_A)
+    const led = await newLedger(admin, COMPANY_A, PROJECT_A, item)
+    const other = await server.connect('lip1')
+    await other.query('BEGIN')
+    await other.query('SET LOCAL ROLE authenticated')
+    await other.query("SELECT set_config('request.jwt.claim.sub', $1, true)", [USER_A])
+    await rpcInsert(other, led, 500) // コミット前: 台帳行の行ロックを持ったまま
+    const pid = (await other.query('SELECT pg_backend_pid() AS pid')).rows[0].pid
+    const deleting = admin.query('DELETE FROM estimate_items WHERE id = $1', [item]) // SET NULL が台帳行のロックを待つ
+    const monitor = await server.connect('lip1')
+    let waited = false
+    for (let i = 0; i < 100 && !waited; i++) {
+      const { rows } = await monitor.query(
+        "SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND pid <> $1 AND query LIKE 'DELETE FROM estimate_items%'", [pid])
+      waited = rows.length > 0
+      if (!waited) await new Promise(r => setTimeout(r, 20))
+    }
+    expect(waited).toBe(true)
+    await other.query('COMMIT')
+    await deleting
+    expect(await ledgerOf(admin, led)).toEqual({ project_id: PROJECT_A, estimate_item_id: null, actual_cost: '500', deleted: false })
+    expect(await invoiceTotals(admin, led)).toEqual({ actual_cost: '500', total: '500', n: 1, same_project: true })
+    await Promise.all([other.end(), monitor.end()])
+  }, 30_000)
+
+  it('他社・別案件の分離: 他社の台帳行・請求書への登録・編集・削除は CL404 で、どちらのデータも変わらない', async () => {
+    const ledA = await newLedger(admin, COMPANY_A, PROJECT_A, await newItem(admin, COMPANY_A, PROJECT_A))
+    const ledB = await newLedger(admin, COMPANY_B, PROJECT_B, ITEM_B)
+    const invA = (await asUser(admin, USER_A, () => rpcInsert(admin, ledA, 10))).invoice.id
+    const invB = (await asUser(admin, USER_B, () => rpcInsert(admin, ledB, 20))).invoice.id
+    for (const [user, led, inv] of [[USER_A, ledB, invB], [USER_B, ledA, invA]] as const) {
+      const calls: Array<() => Promise<unknown>> = [() => rpcInsert(admin, led, 1), () => rpcUpdate(admin, inv, { amount: 1 }), () => rpcDelete(admin, inv)]
+      for (const call of calls) {
+        expect(await pgError(asUser(admin, user, call))).toMatchObject({ code: 'CL404' })
+      }
+    }
+    expect(await invoiceTotals(admin, ledA)).toEqual({ actual_cost: '10', total: '10', n: 1, same_project: true })
+    expect(await invoiceTotals(admin, ledB)).toEqual({ actual_cost: '20', total: '20', n: 1, same_project: true })
+    // 台帳行の見積行を他社・別案件の見積行へ付け替えることは、請求書があっても 23503（請求書・実績は変わらない）
+    for (const target of [ITEM_A2, ITEM_B]) {
+      const e = await pgError(asUser(admin, USER_A, () =>
+        admin.query('UPDATE cost_ledger_items SET estimate_item_id = $1 WHERE id = $2', [target, ledA])))
+      expect(e).toMatchObject({ code: '23503', constraint: FK })
+    }
+    expect(await invoiceTotals(admin, ledA)).toEqual({ actual_cost: '10', total: '10', n: 1, same_project: true })
   })
 })
 

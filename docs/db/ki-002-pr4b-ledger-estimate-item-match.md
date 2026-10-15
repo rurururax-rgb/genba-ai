@@ -1,10 +1,10 @@
-# KI-002 PR-4b: 原価台帳の行が指す見積行を「同じ案件の見積行」に DB で限る（未適用）
+# KI-002 PR-4b: 原価台帳の行が指す見積行を「同じ案件の見積行」に DB で限る（本番未適用）
 
 - migration: `supabase/migrations/20261016000001_enforce_ledger_estimate_item_project_match.sql`
 - 前提: `20261014000001`（PR-3）が本番に適用済みであること（2026-10-12 適用・検証済み）
 - PR-4a（`20261015000001`）とは独立している。どちらを先に適用しても、片方だけでも動く（隔離 DB で両方の順序を確認）。
-  履歴の並びをそろえるため、**PR-4a → PR-4b の順を推奨**する。
-- **本番 DB への適用は人間の承認待ち。** Claude Code は本番・Preview DB への接続・バックアップ・適用のどれも行わない。
+  履歴の並びをそろえるため、**PR-4a → PR-4b の順を推奨**する（PR-4a は本番適用済み。PR #42）。
+- **状態: 実装・レビュー済み（PR #44）。本番未適用・未マージ。本番 DB への適用は人間の承認待ち。** Claude Code は本番・Preview DB への接続・バックアップ・適用のどれも行わない。
 - 調査・計画: `docs/db/ki-002-pr4-plan.md`（R3）。本番の事前調査（2026-10-13・人間が実行）では R3 の参照 115 件、
   `blocking_orphan`・`blocking_target_null`・`blocking_mismatch` はすべて 0。**調査時点の値なので、適用前に precheck ⑤ で再確認する。**
 
@@ -77,7 +77,7 @@ RLS は行の `company_id` しか見ず、外部キーの確認は RLS を通ら
 
 ## 検証（隔離 DB・`npm run test:db`）
 
-`__tests__/db/ledger-estimate-item-match.db.test.ts`（32 件）:
+`__tests__/db/ledger-estimate-item-match.db.test.ts`（37 件）:
 
 - 修正前の再現: PostgREST と同じ権限で、同じ会社の別案件の見積行・他社の見積行を指す台帳行を INSERT / UPDATE できる。
 - 適用が止まる条件: 食い違い（論理削除済みの台帳行を含む）・孤児行・見積行の project_id が NULL・定義の違い
@@ -88,6 +88,11 @@ RLS は行の `company_id` しか見ず、外部キーの確認は RLS を通ら
   台帳の編集・請求書がある行の actual_cost ロック（P1-3・CL423）・見積行の物理削除（estimate_item_id だけ NULL、実績・請求書は残る）・
   案件の物理削除（カスケード）・他の案件への影響なし。
 - 既存の制約（単独の外部キー・PR #35・PR-3・PR-4a）・RLS ポリシー・テーブル権限・トリガーが適用前後で同じ。再適用しても増えない。
+- 業者請求書の RPC（P1-2 / P1-4。OCR の登録もこの経路）: 見積行を指す台帳行への登録（手動・OCR）・金額 / 日付 / 備考の編集・削除で
+  actual_cost が常に請求書の合計と一致し、見積行の参照・案件は変わらない。P1-3 の CL423 は従来どおり。
+  論理削除済みの見積行を指す行・物理削除で参照が NULL になった行にも登録・編集・削除できる。
+  RPC が台帳行をロックしている間の見積行の物理削除は待ち合わせ、デッドロックせずに両方反映される。
+  他社の台帳行・請求書への操作は CL404、請求書がある台帳行でも他案件・他社の見積行への付け替えは 23503。
 - PR-4a の有無・順序: PR-4a 未適用の DB でも適用でき、PR-4a → PR-4b / PR-4b → PR-4a のどちらの順でも適用できる。
 - SQL Editor 用スクリプト: 本体と migration の一致、成功・ガード（二度目・履歴なしの制約・前提未記録）・食い違いで何も残らない、
   precheck・verify が読み取り専用、ロールバックで 2 制約と履歴だけが消え再適用できる、PR-4a のロールバックと独立していること。
@@ -100,7 +105,7 @@ API を通る原価台帳の操作（`cost-ledger`・`init`・`sync` の他社�
 
 `supabase db push` は使わない。
 
-1. 20261014000001（PR-3）が適用済みであること。PR-4a を先に適用する場合は、その確認まで終えておく。
+1. 20261014000001（PR-3）が適用済みであること（PR-4a も適用済み）。
 2. この PR の migration を適用する。
 3. PR をマージする。
 
@@ -130,7 +135,7 @@ bash scripts/db/backup-ki002-pr4b.sh
 | # | 期待値 | 違ったら |
 |---|---|---|
 | ① | 17.x | 報告して相談 |
-| ② | 20261013000002・20261014000001 が `recorded = true`、20261016000001 が `false`（20261015000001 はどちらでもよい） | **中止** |
+| ② | 20261013000002・20261014000001・20261015000001（PR-4a・適用済みの記録あり）が `recorded = true`、20261016000001 が `false` | 20261016000001 が true なら**中止**。20261015000001 だけ false なら PR-4b は適用できるが、記録と食い違うので報告 |
 | ③ | `cost_ledger_items.project_id`・`estimate_items.project_id` が `nullable = false`、型はすべて uuid | **中止**（`project_id` が NULL 可なら報告して相談） |
 | ④ | `cost_ledger_items_estimate_item_id_fkey`（ON DELETE SET NULL）と `estimate_items_pkey` の 2 行だけ | **中止**（PR-4b の名前が既にある・単独の外部キーが無い・想定外の一意制約がある） |
 | ⑤ | `blocking_orphan`・`blocking_target_null`・`blocking_mismatch` が 0（事前調査では `with_ref` 115） | **中止**。補正 SQL は実行せず、件数を報告して相談 |

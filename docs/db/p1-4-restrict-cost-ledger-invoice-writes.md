@@ -1,8 +1,21 @@
-# P1-4: 業者請求書テーブルへの直接書き込みを禁止する（未適用）
+# P1-4: 業者請求書テーブルへの直接書き込みを禁止する（本番適用済み）
 
 migration: `supabase/migrations/20261012000001_restrict_cost_ledger_invoice_writes.sql`
 
-**状態: 本番未適用。適用は人間の承認後に行う。** 前提: P1-2（20261010000002）・P1-3（20261011000001）が適用済み。
+**状態: 本番適用済み（再適用は不要）。** 前提: P1-2（20261010000002）・P1-3（20261011000001）が適用済み。
+
+**本番の確認（2026-10-15・人間が Supabase SQL Editor で読み取り専用の SELECT を実行）:** 次がすべて期待値どおりだった。
+
+| 項目 | 結果 |
+|---|---|
+| migration 履歴 20261012000001 | 1 件 |
+| SECURITY DEFINER の RPC（`cost_ledger_invoice_insert / update / delete`） | 3 |
+| P1-3 のトリガー `cost_ledger_items_lock_actual_cost`（有効） | 1 |
+| `cost_ledger_invoices` の INSERT / UPDATE / DELETE / TRUNCATE 権限 | anon・authenticated ともすべて false |
+| RPC 3 つの EXECUTE 権限 | anon すべて false・authenticated すべて true・service_role すべて false |
+
+この確認に含めていない項目（列単位の権限、RPC の `search_path` / `lock_timeout` の設定、RPC 所有者の権限）は、
+下の「3. 適用後の確認」の SQL で確かめられる。以下の手順・ロールバックは適用時の記録として残す。
 アプリのコード変更は無い（アプリは既に請求書の書き込みをすべて RPC で行っている）。
 
 ## 抜け道と原因
