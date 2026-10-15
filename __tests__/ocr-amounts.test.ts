@@ -136,3 +136,49 @@ describe('toAmount / toPrintedAmounts（AI の出力の形は信用しない）'
     expect(toPrintedAmounts(null).tax_treatment).toBe('unknown')
   })
 })
+
+describe('税率ごとの内訳は金額の判定に影響しない（合計欄しかない原本では内訳は空配列）', () => {
+  // 原本に合計欄しかない請求書（A 外税・E 値引き後・B 内税）。
+  // 以前の AI は合計欄から「10% 対象 100,000 / 税 10,000」の1行を組み立てていた。その行の有無で判定が変わらないこと
+  const cases: Array<[string, Partial<PrintedAmounts>, PrintedAmounts['tax_breakdown'], { suggested: number; from: string }]> = [
+    ['A 外税', { subtotal_excl_tax: 100000, tax_amount: 10000, total_incl_tax: 110000, tax_treatment: 'exclusive' },
+      [{ rate: 10, taxable_amount: 100000, tax_amount: 10000 }], { suggested: 100000, from: 'printed_subtotal' }],
+    ['B 内税（うち消費税 10%）', { tax_amount: 10000, total_incl_tax: 110000, tax_treatment: 'inclusive' },
+      [{ rate: 10, taxable_amount: null, tax_amount: 10000 }], { suggested: 100000, from: 'printed_total_minus_tax' }],
+  ]
+  for (const [name, amounts, synthesized, expected] of cases) {
+    it(`${name}：内訳なし（空配列）でも、合計欄から作った1行があっても、候補・判定・メッセージは同じ`, () => {
+      const empty = reviewInvoiceAmounts(printed({ ...amounts, tax_breakdown: [] }))
+      const withRow = reviewInvoiceAmounts(printed({ ...amounts, tax_breakdown: synthesized }))
+      expect(empty).toMatchObject({ suggested_excl_tax: expected.suggested, suggested_from: expected.from, status: 'ok' })
+      expect(withRow).toEqual(empty)
+    })
+  }
+
+  it('印字された単一税率（8%）の1行の内訳は正規化で消えず、判定も変わらない', () => {
+    const p = toPrintedAmounts({
+      subtotal_excl_tax: 100000, tax_amount: 8000, total_incl_tax: 108000, tax_treatment: 'exclusive',
+      tax_breakdown: [{ rate: 8, taxable_amount: 100000, tax_amount: 8000 }],
+    })
+    expect(p.tax_breakdown).toEqual([{ rate: 8, taxable_amount: 100000, tax_amount: 8000 }])
+    expect(reviewInvoiceAmounts(p)).toMatchObject({ suggested_excl_tax: 100000, status: 'ok' })
+  })
+
+  it('印字された 8%・10% 混在の内訳は2行とも残り、混在を知らせる（内訳が空なら混在の案内は出ない）', () => {
+    const mixed = toPrintedAmounts({
+      subtotal_excl_tax: 100000, tax_amount: 9000, total_incl_tax: 109000, tax_treatment: 'exclusive',
+      tax_breakdown: [{ rate: 10, taxable_amount: 50000, tax_amount: 5000 }, { rate: 8, taxable_amount: 50000, tax_amount: 4000 }],
+    })
+    expect(mixed.tax_breakdown).toHaveLength(2)
+    const r = reviewInvoiceAmounts(mixed)
+    expect(r).toMatchObject({ suggested_excl_tax: 100000, status: 'ok' })
+    expect(r.messages.some(m => m.text.includes('税率が混在'))).toBe(true)
+    expect(reviewInvoiceAmounts({ ...mixed, tax_breakdown: [] }).messages.some(m => m.text.includes('税率が混在'))).toBe(false)
+  })
+
+  it('F 端数差（税抜 98,765＋税 9,877 ≠ 税込 108,641）は内訳が空でも差 ¥1 で要確認のまま', () => {
+    const r = reviewInvoiceAmounts(printed({ subtotal_excl_tax: 98765, tax_amount: 9877, total_incl_tax: 108641, tax_treatment: 'exclusive' }))
+    expect(r).toMatchObject({ suggested_excl_tax: 98765, status: 'needs_review' })
+    expect(warns(r)[0]).toContain('差 ¥1')
+  })
+})

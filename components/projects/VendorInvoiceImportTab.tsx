@@ -516,7 +516,7 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
                   </p>
                   {extracted.amounts.tax_breakdown.length > 0 && (
                     <div style={{ marginTop: 10, fontSize: 12, color: G.textSec }}>
-                      税率ごとの内訳：
+                      税率ごとの内訳（AIの読み取り・原本で確認）：
                       {extracted.amounts.tax_breakdown.map((b, i) => (
                         <span key={i} style={{ marginLeft: 8 }}>
                           {b.rate != null ? `${b.rate}%` : '税率不明'} 対象 {b.taxable_amount != null ? `¥${fmt(b.taxable_amount)}` : '—'} ／ 税 {b.tax_amount != null ? `¥${fmt(b.tax_amount)}` : '—'}

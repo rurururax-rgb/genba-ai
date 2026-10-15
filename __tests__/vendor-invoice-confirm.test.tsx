@@ -13,14 +13,19 @@ import { VendorInvoiceImportTab } from '@/components/projects/VendorInvoiceImpor
 
 const ITEM_ID = 'item-1'
 
-/** 架空の請求書の読み取り結果（外税：税抜 100,000 / 税 10,000 / 税込 110,000） */
+const EXCLUSIVE = { subtotal_excl_tax: 100000, tax_amount: 10000, total_incl_tax: 110000, tax_treatment: 'exclusive', tax_breakdown: [] as unknown[] }
+/** 次の読み取りで返す原本の金額（既定は外税：税抜 100,000 / 税 10,000 / 税込 110,000・内訳なし） */
+let nextAmounts: Record<string, unknown> = EXCLUSIVE
+
+/** 架空の請求書の読み取り結果 */
 function extraction(sha: string) {
   return {
     vendor_name: '架空設備テスト',
     invoice_number: 'TEST-0001',
     invoice_date: '2026-09-30',
     payment_due_date: '2026-10-31',
-    amounts: { subtotal_excl_tax: 100000, tax_amount: 10000, total_incl_tax: 110000, tax_treatment: 'exclusive', tax_breakdown: [] },
+    amounts: nextAmounts,
+    // 画面は原本の金額から照合し直すので、ここは形だけ
     review: { suggested_excl_tax: 100000, suggested_from: 'printed_subtotal', status: 'ok', messages: [] },
     items: [],
     warnings: [],
@@ -37,6 +42,7 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 
 beforeEach(() => {
+  nextAmounts = EXCLUSIVE
   posted = []
   extractCount = 0
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
@@ -187,5 +193,53 @@ describe('VendorInvoiceImportTab：原本の金額を直したら確認をやり
     expect(extractCount).toBe(2)
     expect(checkbox().checked).toBe(false)
     expect(registerButton().disabled).toBe(true)
+  })
+})
+
+describe('VendorInvoiceImportTab：税率ごとの内訳の表示', () => {
+  const HEADING = '税率ごとの内訳（AIの読み取り・原本で確認）'
+  const text = () => container.textContent ?? ''
+
+  async function mountAndRead(amounts: Record<string, unknown>) {
+    nextAmounts = amounts
+    await act(async () => { root.render(<VendorInvoiceImportTab projectId="p1" />) })
+    await flush()
+    await loadInvoice()
+  }
+
+  it('A 外税：合計欄しかなく内訳が空 → 内訳欄は出さない。税抜 100,000 が登録金額、整合OK', async () => {
+    await mountAndRead(EXCLUSIVE)
+    expect(text()).not.toContain('税率ごとの内訳')
+    expect(field<HTMLInputElement>('登録金額（税抜）').value).toBe('100000')
+    expect(text()).toContain('金額の整合OK')
+  })
+
+  it('B 内税：内訳が空 → 内訳欄は出さない。税額 10,000・内税のまま、登録金額は 110,000 − 10,000 = 100,000', async () => {
+    await mountAndRead({ subtotal_excl_tax: null, tax_amount: 10000, total_incl_tax: 110000, tax_treatment: 'inclusive', tax_breakdown: [] })
+    expect(text()).not.toContain('税率ごとの内訳')
+    expect(field<HTMLInputElement>('消費税額').value).toBe('10000')
+    expect(field<HTMLSelectElement>('税区分', 'select').value).toBe('inclusive')
+    // 登録金額の初期値はサーバーの候補（模擬）。画面の照合も同じ候補を出し、「原本の税抜を使う」は出ない
+    expect(field<HTMLInputElement>('登録金額（税抜）').value).toBe('100000')
+    expect([...container.querySelectorAll('button')].some(b => b.textContent?.includes('原本の税抜'))).toBe(false)
+    expect(text()).toContain('税込合計 ¥110,000 − 消費税額 ¥10,000')
+  })
+
+  it('C 混在：印字された2行を、AIの読み取りで原本確認が必要だと分かる見出しで表示し、混在を知らせる', async () => {
+    await mountAndRead({ subtotal_excl_tax: 100000, tax_amount: 9000, total_incl_tax: 109000, tax_treatment: 'exclusive',
+      tax_breakdown: [{ rate: 10, taxable_amount: 50000, tax_amount: 5000 }, { rate: 8, taxable_amount: 50000, tax_amount: 4000 }] })
+    expect(text()).toContain(HEADING)
+    expect(text()).toContain('10% 対象 ¥50,000 ／ 税 ¥5,000')
+    expect(text()).toContain('8% 対象 ¥50,000 ／ 税 ¥4,000')
+    expect(text()).toContain('税率が混在しています（10%・8%）')
+    expect(text()).toContain('金額の整合OK')
+  })
+
+  it('H 単一税率 8%：印字された1行の内訳を表示する（対象額のない行は — と表示し、補わない）', async () => {
+    await mountAndRead({ subtotal_excl_tax: 100000, tax_amount: 8000, total_incl_tax: 108000, tax_treatment: 'exclusive',
+      tax_breakdown: [{ rate: 8, taxable_amount: null, tax_amount: 8000 }] })
+    expect(text()).toContain(HEADING)
+    expect(text()).toContain('8% 対象 — ／ 税 ¥8,000')
+    expect(field<HTMLInputElement>('登録金額（税抜）').value).toBe('100000')
   })
 })
