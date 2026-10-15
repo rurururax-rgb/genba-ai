@@ -247,9 +247,12 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
     tax_breakdown:     extracted?.amounts.tax_breakdown ?? [],
   }), [printedEx, printedTax, printedInc, treatment, extracted])
 
+  // 原本の金額・税区分や登録金額を変えたら、確認はやり直す（確認したときの内容と登録する内容を一致させる）。
+  // 登録金額は書き換えない（原本の税抜を使うかは担当者が選ぶ）
+  const editedAmount = <T,>(set: (v: T) => void) => (v: T) => { edited(set)(v); setConfirmed(false) }
+
   const parsedRegister = parseAmount(registerAmount)
-  // 登録金額を変えたら、確認はやり直す（確認した金額と登録する金額を一致させる）
-  const changeRegisterAmount = (v: string) => { edited(setRegisterAmount)(v); setConfirmed(false) }
+  const changeRegisterAmount = editedAmount(setRegisterAmount)
 
   // 台帳に登録。confirmSimilar = 「以前の請求書と似ています」を確認したうえで登録する
   const register = async (confirmSimilar = false) => {
@@ -495,13 +498,13 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
                     <StatusChip ok={review.status === 'ok'} />
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 }}>
-                    <AmountField label="税抜金額" value={printedEx} onChange={edited(setPrintedEx)} />
-                    <AmountField label="消費税額" value={printedTax} onChange={edited(setPrintedTax)} />
-                    <AmountField label="税込合計" value={printedInc} onChange={edited(setPrintedInc)} />
+                    <AmountField label="税抜金額" value={printedEx} onChange={editedAmount(setPrintedEx)} />
+                    <AmountField label="消費税額" value={printedTax} onChange={editedAmount(setPrintedTax)} />
+                    <AmountField label="税込合計" value={printedInc} onChange={editedAmount(setPrintedInc)} />
                     <Field label="税区分">
                       <select
                         value={treatment}
-                        onChange={e => edited(setTreatment)(e.target.value as TaxTreatment)}
+                        onChange={e => editedAmount(setTreatment)(e.target.value as TaxTreatment)}
                         className="h-9 w-full rounded-[8px] border border-[#D5DED8] bg-white px-[10px] text-sm text-[#1A2E24] outline-none hover:border-[#AFC4B5] focus:border-[#2B5E40] focus:shadow-[0_0_0_3px_rgba(43,94,64,0.14)] cursor-pointer"
                       >
                         {(Object.keys(TREATMENT_LABEL) as TaxTreatment[]).map(t => <option key={t} value={t}>{TREATMENT_LABEL[t]}</option>)}
