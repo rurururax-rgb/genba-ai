@@ -2,45 +2,54 @@ import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { createHash } from 'crypto'
 import { getServerClient } from '@/lib/supabase/server'
+import { normalizeExtraction, type ExtractedVendorInvoice } from '@/lib/cost-ledger/ocr-extraction'
 
 export const maxDuration = 60
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
-const SYSTEM_PROMPT = `あなたはリフォーム会社が業者（仕入れ先）から受け取った請求書画像から情報を抽出する専門アシスタントです。
+const SYSTEM_PROMPT = `あなたはリフォーム会社が業者（仕入れ先）から受け取った請求書画像から、印字されている情報を書き写すアシスタントです。
+
+## 最重要ルール
+- 金額は**画像に印字されている数字だけ**を書き写す。計算・推測で作らない（税込を 1.1 で割る、合計を足し算する、などは禁止）。
+- 印字が無い・読めない・どの欄か判断できない金額は null にする。
+- 不確かな点は warnings に短く書く（例:「税抜・税込の区別が書かれていない」「金額の一部がかすれている」）。
 
 ## 抽出対象
-- vendor_name: 請求書を発行した業者名（社名・屋号）
-- invoice_number: 請求書番号・請求No（印字どおり）。読み取れなければnull
-- total_amount: 請求合計金額（税込）。税込合計が明記されていればそれ。なければ税抜合計。数値のみ（カンマなし）
-- invoice_date: 請求書の発行日・請求日（YYYY-MM-DD形式）。読み取れなければnull
-- payment_due_date: 支払期日・支払期限（YYYY-MM-DD形式）。読み取れなければnull
-- items: 明細行。品名と金額のみ。なければ空配列
-- raw_warning: 読み取りで不確かな点があれば記載、なければnull
+- vendor_name: 請求書を発行した業者名（社名・屋号）。読めなければ空文字
+- invoice_number: 請求書番号・請求No（印字どおり）。読めなければ null
+- invoice_date: 請求日・発行日（YYYY-MM-DD）。読めなければ null
+- payment_due_date: 支払期日・支払期限・お支払い予定日（YYYY-MM-DD）。読めなければ null
+- subtotal_excl_tax: 税抜の合計（「小計」「税抜合計」「課税対象額の合計」など）。値引き・端数値引きが印字されていれば**値引き後**の税抜合計。なければ null
+- tax_amount: 消費税額の合計（「消費税」「うち消費税」「内消費税」など）。なければ null
+- total_incl_tax: 税込の合計（「合計」「ご請求金額」「税込合計」など）。なければ null
+- tax_treatment: 次のどれか
+  - "exclusive": 税抜金額と消費税が別に書かれている（外税）
+  - "inclusive": 税込金額だけが書かれ、消費税は内数として書かれている（内税・「うち消費税」）
+  - "non_taxable": 非課税・不課税・免税と明記されている
+  - "unknown": 判断できない
+- tax_breakdown: 税率ごとの対象額・税額が、合計欄とは別の行・表（例:「10%対象 ¥50,000 消費税 ¥5,000」「8%対象 …」）として印字されている場合だけ、その行を書き写す [{ "rate": 10, "taxable_amount": 対象額, "tax_amount": 消費税 }]。
+  - 合計欄（「小計」「消費税（10%）」「うち消費税 10%」「合計」など）から内訳を組み立てない。合計欄しかなければ空配列
+  - 税率別の行に対象額が印字されていなければ taxable_amount は null（小計などから補わない）
+  - 税率が1つでも、税率別の行・表として印字されていればその1行を書き写す
+- items: 明細行。品名と金額（印字どおり）のみ。なければ空配列
+- warnings: 不確かな点の配列。なければ空配列
 
-## 必ずJSON形式のみで返してください。説明文は不要です。
+## 必ず JSON のみを返す（説明文は不要）
 
 {
-  "vendor_name": "業者名（読み取れなければ空文字）",
-  "invoice_number": "請求書番号"またはnull,
-  "total_amount": 数値またはnull,
-  "invoice_date": "YYYY-MM-DD"またはnull,
-  "payment_due_date": "YYYY-MM-DD"またはnull,
-  "items": [
-    { "name": "品名", "amount": 数値またはnull }
-  ],
-  "raw_warning": nullまたは"不確かな点"
+  "vendor_name": "",
+  "invoice_number": null,
+  "invoice_date": null,
+  "payment_due_date": null,
+  "subtotal_excl_tax": null,
+  "tax_amount": null,
+  "total_incl_tax": null,
+  "tax_treatment": "unknown",
+  "tax_breakdown": [],
+  "items": [{ "name": "品名", "amount": null }],
+  "warnings": []
 }`
-
-type ExtractedInvoice = {
-  vendor_name: string
-  invoice_number: string | null
-  total_amount: number | null
-  invoice_date: string | null
-  payment_due_date: string | null
-  items: Array<{ name: string; amount: number | null }>
-  raw_warning: string | null
-}
 
 const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp']
 
@@ -94,15 +103,15 @@ export async function POST(request: NextRequest) {
     const jsonMatch = rawText.match(/\{[\s\S]*\}/)
     if (!jsonMatch) throw new Error('No JSON in AI response')
 
-    const parsed = JSON.parse(jsonMatch[0]) as ExtractedInvoice
-    const num = typeof parsed.invoice_number === 'string' ? parsed.invoice_number.trim().slice(0, 100) : ''
+    const extracted = normalizeExtraction(JSON.parse(jsonMatch[0]))
 
     // 画像の SHA-256 はサーバーが元のバイト列から計算する（AI には作らせない）。
     // 登録時に同じ案件への同じ画像の二重登録を DB の一意制約で止めるために使う。
     // クライアント経由で戻ってくる値なので、改ざんされない保証はない（誤操作・再送の防止が目的）
     const document_sha256 = createHash('sha256').update(Buffer.from(arrayBuffer)).digest('hex')
 
-    return NextResponse.json({ ...parsed, invoice_number: num || null, document_sha256 })
+    const body: ExtractedVendorInvoice = { ...extracted, document_sha256 }
+    return NextResponse.json(body)
   } catch (err) {
     console.error('[extract-vendor-invoice]', err)
     return NextResponse.json({ error: 'AI extraction failed' }, { status: 500 })

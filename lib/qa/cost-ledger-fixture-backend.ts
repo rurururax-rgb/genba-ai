@@ -6,7 +6,7 @@
  * sessionStorage 上のデータで応答する。許可していない /api/* は 403 でブロックし、実サーバーへ送らない。
  *
  * 業者請求書（内訳）の登録・AI 読み取りも Fixture で応答する（実際の AI・DB には送らない）。
- *   - AI 読み取りは固定の結果を返し、画像の SHA-256 はブラウザで元のバイト列から計算する
+ *   - AI 読み取りは QA バーで選んだシナリオ（架空の請求書）の結果を返し、画像の SHA-256 はブラウザで元のバイト列から計算する
  *   - 登録の検証・似ている請求書の判定は本番 API と同じ lib/cost-ledger/invoice-dedupe を使う
  *   - 一意制約（同じ案件の同じ画像・idempotency_key）は Fixture 内で再現する
  * これは画面の動作確認用で、RLS や DB 制約そのものの検証ではない。
@@ -16,6 +16,7 @@ import {
   actualCostMatchesInvoices, findSimilarInvoices, parseInvoiceRequest, sameInvoiceContent, type ExistingInvoice,
 } from '@/lib/cost-ledger/invoice-dedupe'
 import { ACTUAL_COST_LOCKED_MESSAGE } from '@/lib/cost-ledger/rpc-errors'
+import { normalizeExtraction } from '@/lib/cost-ledger/ocr-extraction'
 
 export const COST_FIXTURE_PROJECT_ID = '00000000-0000-4000-8000-000000000c01'
 const STORAGE_KEY = 'ragz-qa-cost-ledger-fixture-v3'
@@ -76,12 +77,44 @@ function takeFault(s: State, fault: CostFixtureFault) {
   s.faults.splice(i, 1); return true
 }
 
-/** Fixture の AI 読み取り結果（実際の AI には送らない） */
-export const FIXTURE_EXTRACT = {
-  vendor_name: 'QA設備', invoice_number: 'QA-INV-001', total_amount: 33000,
-  invoice_date: '2026-10-01', payment_due_date: '2026-10-31',
-  items: [{ name: 'QA 給湯器部材', amount: 30000 }, { name: '消費税', amount: 3000 }],
-  raw_warning: null,
+/**
+ * Fixture の AI 読み取り結果（実際の AI には送らない）。架空の請求書の印字を想定した AI の出力で、
+ * 本番 API と同じ normalizeExtraction（金額の照合・税抜の候補）を通して返す。
+ * QA バーで選んだシナリオを、次の読み取りから使う。
+ */
+const BASE_EXTRACT = {
+  vendor_name: 'QA設備', invoice_number: 'QA-INV-001', invoice_date: '2026-10-01', payment_due_date: '2026-10-31',
+  tax_breakdown: [], warnings: [],
+}
+export const FIXTURE_SCENARIOS = {
+  standard:       { label: '税抜10万・税1万・税込11万', raw: { ...BASE_EXTRACT, subtotal_excl_tax: 100000, tax_amount: 10000, total_incl_tax: 110000, tax_treatment: 'exclusive', items: [{ name: 'QA 給湯器部材', amount: 100000 }] } },
+  incl_only:      { label: '税込11万のみ', raw: { ...BASE_EXTRACT, invoice_number: 'QA-INV-002', subtotal_excl_tax: null, tax_amount: null, total_incl_tax: 110000, tax_treatment: 'unknown', items: [], warnings: ['税抜・税込の区別が書かれていません'] } },
+  inclusive:      { label: '内税（税込11万・うち税1万）', raw: { ...BASE_EXTRACT, invoice_number: 'QA-INV-003', subtotal_excl_tax: null, tax_amount: 10000, total_incl_tax: 110000, tax_treatment: 'inclusive', items: [] } },
+  rate8:          { label: '税率8%', raw: { ...BASE_EXTRACT, invoice_number: 'QA-INV-004', subtotal_excl_tax: 100000, tax_amount: 8000, total_incl_tax: 108000, tax_treatment: 'exclusive', tax_breakdown: [{ rate: 8, taxable_amount: 100000, tax_amount: 8000 }], items: [] } },
+  mixed:          { label: '8%・10%混在', raw: { ...BASE_EXTRACT, invoice_number: 'QA-INV-005', subtotal_excl_tax: 100000, tax_amount: 9000, total_incl_tax: 109000, tax_treatment: 'exclusive', tax_breakdown: [{ rate: 10, taxable_amount: 50000, tax_amount: 5000 }, { rate: 8, taxable_amount: 50000, tax_amount: 4000 }], items: [] } },
+  no_tax:         { label: '消費税の記載なし', raw: { ...BASE_EXTRACT, invoice_number: 'QA-INV-006', subtotal_excl_tax: 100000, tax_amount: null, total_incl_tax: null, tax_treatment: 'unknown', items: [] } },
+  non_taxable:    { label: '非課税', raw: { ...BASE_EXTRACT, invoice_number: 'QA-INV-007', subtotal_excl_tax: null, tax_amount: null, total_incl_tax: 50000, tax_treatment: 'non_taxable', items: [] } },
+  rounding:       { label: '値引き・端数で合計が合わない', raw: { ...BASE_EXTRACT, invoice_number: 'QA-INV-008', subtotal_excl_tax: 100000, tax_amount: 10000, total_incl_tax: 110003, tax_treatment: 'exclusive', items: [{ name: '部材', amount: 100003 }, { name: '端数値引き', amount: 3 }] } },
+  read_fail:      { label: '金額の読み取り失敗', raw: { ...BASE_EXTRACT, vendor_name: '', invoice_number: null, invoice_date: null, payment_due_date: null, subtotal_excl_tax: null, tax_amount: null, total_incl_tax: null, tax_treatment: 'unknown', items: [], warnings: ['画像が不鮮明で金額を読み取れません'] } },
+} as const
+export type FixtureScenario = keyof typeof FIXTURE_SCENARIOS
+const SCENARIO_KEY = 'ragz-qa-cost-ledger-ocr-scenario'
+const scenarioListeners = new Set<() => void>()
+export function setFixtureScenario(s: FixtureScenario) {
+  try { sessionStorage.setItem(SCENARIO_KEY, s) } catch { /* ignore */ }
+  scenarioListeners.forEach(l => l())
+}
+/** useSyncExternalStore 用 */
+export function subscribeFixtureScenario(l: () => void) {
+  scenarioListeners.add(l)
+  return () => { scenarioListeners.delete(l) }
+}
+export function getFixtureScenario(): FixtureScenario {
+  try {
+    const v = sessionStorage.getItem(SCENARIO_KEY)
+    if (v && v in FIXTURE_SCENARIOS) return v as FixtureScenario
+  } catch { /* ignore */ }
+  return 'standard'
 }
 
 async function sha256Hex(file: File) {
@@ -237,7 +270,8 @@ async function handleExtract(init: RequestInit | undefined): Promise<Response> {
   if (!(file instanceof File)) return json({ error: 'No file provided' }, 400)
   // 実際の API と同じく、読み取りには少し時間がかかる（読み取り中の画像変更の QA 用）
   await new Promise(r => setTimeout(r, 800))
-  return json({ ...FIXTURE_EXTRACT, document_sha256: await sha256Hex(file) })
+  const extracted = normalizeExtraction(FIXTURE_SCENARIOS[getFixtureScenario()].raw)
+  return json({ ...extracted, document_sha256: await sha256Hex(file) })
 }
 
 let installed = false

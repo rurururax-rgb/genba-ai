@@ -273,7 +273,7 @@ function InvoicePanel({
       {invoices.length > 0 && (
         <div style={ps.list}>
           <div style={ps.row}>
-            <span style={{ ...ps.cell, flex: 1.2, fontWeight: 700, color: C.textMuted, fontSize: 10, letterSpacing: '0.04em' }}>金額</span>
+            <span style={{ ...ps.cell, flex: 1.2, fontWeight: 700, color: C.textMuted, fontSize: 10, letterSpacing: '0.04em' }}>金額（税抜）</span>
             <span style={{ ...ps.cell, flex: 1.2, fontWeight: 700, color: C.textMuted, fontSize: 10, letterSpacing: '0.04em' }}>請求日</span>
             <span style={{ ...ps.cell, flex: 1.2, fontWeight: 700, color: C.textMuted, fontSize: 10, letterSpacing: '0.04em' }}>支払日</span>
             <span style={{ ...ps.cell, flex: 2, fontWeight: 700, color: C.textMuted, fontSize: 10, letterSpacing: '0.04em' }}>メモ</span>
@@ -323,7 +323,8 @@ function InvoicePanel({
           <input
             ref={amountRef}
             type="number"
-            placeholder="金額"
+            placeholder="金額（税抜）"
+            aria-label="金額（税抜）"
             value={draft.amount}
             onChange={e => setDraft(v => ({ ...v, amount: e.target.value }))}
             onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) handleAdd(); if (e.key === 'Escape') closeAddForm() }}
@@ -2313,7 +2314,8 @@ const st: Record<string, React.CSSProperties> = {
   tableCard: {
     margin: '16px 16px 0', background: C.bg, borderRadius: 10,
     border: `1px solid ${C.border}`,
-    boxShadow: '0 1px 3px rgba(0,0,0,0.04)', overflow: 'hidden',
+    // clip は hidden と同じく角丸で切り抜くが、スクロール領域を作らない（取り込みパネルの原本を sticky で追従させるため）
+    boxShadow: '0 1px 3px rgba(0,0,0,0.04)', overflow: 'clip',
   },
   toolbar: {
     display: 'flex', alignItems: 'center', justifyContent: 'space-between',
