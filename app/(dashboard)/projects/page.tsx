@@ -1,5 +1,6 @@
 import { getServerClient } from '@/lib/supabase/server'
 import { redirect } from 'next/navigation'
+import Link from 'next/link'
 import { ProjectListClient } from '@/components/projects/ProjectListClient'
 import { DashboardSummarySection } from '@/components/projects/DashboardSummarySection'
 import { getCompanyProjectSummary } from '@/lib/services/company-summary'
@@ -145,7 +146,10 @@ export default async function ProjectsPage() {
             <p style={page.eyebrow}>DASHBOARD</p>
             <h1 style={page.title}>案件一覧</h1>
           </div>
-          <LogoutForm />
+          <div style={page.accountLinks}>
+            <Link href="/settings/password" style={page.accountLink}>パスワード変更</Link>
+            <LogoutForm />
+          </div>
         </div>
 
         {/* ── 今日の確認（決定論的判定。AIに生成させない） ── */}
@@ -204,6 +208,13 @@ const page = {
     color: '#192C1F',
     letterSpacing: '-0.6px',
     margin: 0,
+  },
+  accountLinks: { display: 'flex', alignItems: 'center', gap: 16 },
+  accountLink: {
+    fontSize: 13,
+    color: '#8AA491',
+    textDecoration: 'none',
+    padding: '4px 0',
   },
   logoutBtn: {
     fontSize: 13,
