@@ -366,6 +366,14 @@ export function Sidebar({ legacyRugsDocuments = false }: {
           </>
         )}
 
+        {/* 設定（案件一覧・案件詳細の両方で下部に出す） */}
+        <IconBtn
+          icon={Icons.settings}
+          label="設定"
+          active={pathname.startsWith('/settings')}
+          href="/settings"
+        />
+
       </nav>
 
       {/* ── ステータスドット ── */}

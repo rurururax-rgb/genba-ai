@@ -12,8 +12,8 @@ export default async function PasswordSettingsPage() {
 
   return (
     <main style={{ padding: '24px 20px', maxWidth: 480, margin: '0 auto' }}>
-      <Link href="/projects" style={{ fontSize: 13, color: '#4E7A5B', textDecoration: 'none' }}>
-        ← 案件一覧に戻る
+      <Link href="/settings" style={{ fontSize: 13, color: '#4E7A5B', textDecoration: 'none' }}>
+        ← 設定に戻る
       </Link>
       <h1 style={{ fontSize: 22, fontWeight: 700, color: '#1E3A5F', margin: '16px 0 0', letterSpacing: '-0.02em' }}>
         パスワード変更
