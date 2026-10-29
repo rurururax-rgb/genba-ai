@@ -15,7 +15,7 @@ vi.mock('@anthropic-ai/sdk', () => ({
     messages = {
       create: async (params: { system: string }) => {
         sent.push(params)
-        return { content: [{ type: 'text', text: aiText }] }
+        return { content: [{ type: 'text', text: aiText }], stop_reason: 'end_turn' }
       },
     }
   },

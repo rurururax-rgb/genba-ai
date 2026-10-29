@@ -5,6 +5,9 @@
 
 import { reviewInvoiceAmounts, toAmount, toPrintedAmounts } from './ocr-amounts'
 
+/** 画面に返す明細の行数（AI にも最初の 20 行だけを書かせる。登録金額には使わない参考表示） */
+export const MAX_ITEMS = 20
+
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 const str = (v: unknown, max: number) => (typeof v === 'string' ? v.trim().slice(0, max) : '')
 const dateOrNull = (v: unknown) => {
@@ -19,6 +22,11 @@ const dateOrNull = (v: unknown) => {
 export function normalizeExtraction(raw: unknown) {
   const r = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>
   const amounts = toPrintedAmounts(r)
+  const items = (Array.isArray(r.items) ? r.items : []).slice(0, MAX_ITEMS).map(i => {
+    const it = (i && typeof i === 'object' ? i : {}) as Record<string, unknown>
+    return { name: str(it.name, 200), amount: toAmount(it.amount) }
+  }).filter(i => i.name || i.amount != null)
+  const itemsTotal = typeof r.items_total === 'number' && Number.isInteger(r.items_total) && r.items_total <= 10000 ? r.items_total : null
   return {
     vendor_name:      str(r.vendor_name, 200),
     invoice_number:   str(r.invoice_number, 100) || null,
@@ -26,10 +34,9 @@ export function normalizeExtraction(raw: unknown) {
     payment_due_date: dateOrNull(r.payment_due_date),
     amounts,
     review: reviewInvoiceAmounts(amounts),
-    items: (Array.isArray(r.items) ? r.items : []).slice(0, 50).map(i => {
-      const it = (i && typeof i === 'object' ? i : {}) as Record<string, unknown>
-      return { name: str(it.name, 200), amount: toAmount(it.amount) }
-    }).filter(i => i.name || i.amount != null),
+    items,
+    // 原本の明細行の数。AI には最初の 20 行だけを書かせるので、画面で「ほかに N 行」と示す
+    items_total: itemsTotal != null && itemsTotal >= items.length ? itemsTotal : items.length,
     warnings: (Array.isArray(r.warnings) ? r.warnings : []).map(w => str(w, 300)).filter(Boolean).slice(0, 10),
   }
 }

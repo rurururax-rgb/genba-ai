@@ -22,6 +22,16 @@ export type TaxBreakdownRow = {
   tax_amount: number | null
 }
 
+/**
+ * 小計と合計のあいだに印字された増減（値引き・源泉徴収など）。金額は印字の絶対値（マイナス記号は付けない）。
+ * あると税抜金額がどの段階の金額か曖昧になるため、照合は必ず「要確認」にする
+ */
+export type AdjustmentKind = 'discount' | 'withholding' | 'other'
+export type AdjustmentRow = {
+  kind: AdjustmentKind
+  amount: number | null
+}
+
 /** 原本に印字された金額（読めないものは null） */
 export type PrintedAmounts = {
   subtotal_excl_tax: number | null
@@ -29,6 +39,8 @@ export type PrintedAmounts = {
   total_incl_tax: number | null
   tax_treatment: TaxTreatment
   tax_breakdown: TaxBreakdownRow[]
+  /** 値引き・源泉徴収などの印字（なければ空配列。省略時も空とみなす） */
+  adjustments?: AdjustmentRow[]
 }
 
 export type AmountMessage = { level: 'info' | 'warn'; text: string }
@@ -56,6 +68,14 @@ export function toAmount(v: unknown): number | null {
 }
 
 const TREATMENTS: readonly TaxTreatment[] = ['exclusive', 'inclusive', 'non_taxable', 'unknown']
+const ADJUSTMENT_KINDS: readonly AdjustmentKind[] = ['discount', 'withholding', 'other']
+
+/** AI の出力の数値を、印字の絶対値として受け取る（「-1,000」「▲1,000」「△1,000」も 1,000） */
+function toAbsAmount(v: unknown): number | null {
+  if (typeof v === 'number') return toAmount(Math.abs(v))
+  if (typeof v === 'string') return toAmount(v.replace(/^[\s]*[-−‐ー▲△]/, ''))
+  return null
+}
 
 /** AI の出力（形は信用しない）を PrintedAmounts に揃える */
 export function toPrintedAmounts(raw: unknown): PrintedAmounts {
@@ -75,7 +95,22 @@ export function toPrintedAmounts(raw: unknown): PrintedAmounts {
         tax_amount: toAmount(row.tax_amount),
       }
     }),
+    adjustments: (Array.isArray(r.adjustments) ? r.adjustments : []).slice(0, 10).map(a => {
+      const row = (a && typeof a === 'object' ? a : {}) as Record<string, unknown>
+      return {
+        kind: ADJUSTMENT_KINDS.includes(row.kind as AdjustmentKind) ? row.kind as AdjustmentKind : 'other',
+        amount: toAbsAmount(row.amount),
+      }
+    }),
   }
+}
+
+/** 税抜金額 × 税率 の消費税として、端数処理（切り捨て・四捨五入・切り上げ）のどれかで説明できるか */
+function plausibleTax(excl: number, tax: number): boolean {
+  return [10, 8].some(rate => {
+    const t = (excl * rate) / 100
+    return [Math.floor(t), Math.round(t), Math.ceil(t)].includes(tax)
+  })
 }
 
 /**
@@ -96,6 +131,13 @@ export function reviewInvoiceAmounts(a: PrintedAmounts): AmountReview {
   const rates = [...new Set(a.tax_breakdown.map(b => b.rate).filter((r): r is number => r != null))].sort((x, y) => y - x)
   if (rates.length > 1) info(`税率が混在しています（${rates.map(r => `${r}%`).join('・')}）。合計の税抜金額を登録します`)
   const rows = a.tax_breakdown.filter(b => b.taxable_amount != null || b.tax_amount != null)
+  if (rates.length > 1) {
+    const complete = rows.length > 0 && a.tax_breakdown.every(b => b.rate != null && b.taxable_amount != null && b.tax_amount != null)
+    if (!complete || ex == null) {
+      warn('税率が混在していますが、税率ごとの対象額・税額または税抜金額を読み取りきれませんでした。原本で確認してください')
+      needsReview = true
+    }
+  }
   if (rows.length > 0) {
     const sumTaxable = rows.every(b => b.taxable_amount != null) ? rows.reduce((s, b) => s + (b.taxable_amount ?? 0), 0) : null
     const sumTax = rows.every(b => b.tax_amount != null) ? rows.reduce((s, b) => s + (b.tax_amount ?? 0), 0) : null
@@ -135,7 +177,11 @@ export function reviewInvoiceAmounts(a: PrintedAmounts): AmountReview {
       needsReview = true
     } else if (tax == null && inc != null) {
       if (inc < ex) { warn('税込合計が税抜金額より小さくなっています'); needsReview = true }
-      else info('消費税額の記載はありません（税込合計 − 税抜金額 で確認できます）')
+      else if (!plausibleTax(ex, inc - ex)) {
+        // 差額が 10%・8% の消費税として説明できない（値引き・別の費用・読み違いの可能性）
+        warn(`税込合計 ${yen(inc)} − 税抜金額 ${yen(ex)} = ${yen(inc - ex)} が消費税（10%・8%）と合いません。原本で確認してください`)
+        needsReview = true
+      } else info('消費税額の記載はありません（税込合計 − 税抜金額 で確認できます）')
     }
   } else if (inc != null && tax != null) {
     if (tax > inc) {
@@ -151,6 +197,37 @@ export function reviewInvoiceAmounts(a: PrintedAmounts): AmountReview {
     needsReview = true
   } else {
     warn('金額を読み取れませんでした。原本を見て税抜金額を入力してください')
+    needsReview = true
+  }
+
+  // 値引き・源泉徴収などがある請求書は、税抜金額がどの段階の金額か印字だけでは決めきれないため、必ず要確認にする
+  const adjustments = a.adjustments ?? []
+  const hasDiscount = adjustments.some(x => x.kind === 'discount')
+  const hasWithholding = adjustments.some(x => x.kind === 'withholding')
+  const hasOther = adjustments.some(x => x.kind === 'other')
+  const consistent = ex != null && tax != null && inc != null && ex + tax === inc
+  if (hasWithholding) {
+    // 源泉徴収後の「差引請求額」を税込合計として読んでいる可能性がある。税込 − 消費税 は候補にしない。
+    // 原価台帳には源泉徴収前の税抜金額を登録する（源泉所得税は支払時に差し引く税で、原価は減らない）
+    warn('源泉徴収の記載があります。登録金額は源泉徴収前の税抜金額です。原本で確認してください')
+    needsReview = true
+    if (from === 'printed_total_minus_tax' || (from === 'printed_subtotal' && !consistent)) {
+      suggested = null
+      from = null
+    }
+  }
+  if (hasDiscount) {
+    warn('値引きの記載があります。税抜金額が値引き後の金額か原本で確認してください')
+    needsReview = true
+    // 印字された税抜金額が税込合計と合わない（値引き前の小計の可能性）。源泉徴収がなければ、印字された 税込合計 − 消費税額 を候補にする
+    if (!hasWithholding && from === 'printed_subtotal' && !consistent && inc != null && tax != null && tax <= inc) {
+      suggested = inc - tax
+      from = 'printed_total_minus_tax'
+      info(`印字された税抜金額は値引き前の可能性があるため、税込合計 ${yen(inc)} − 消費税額 ${yen(tax)} を税抜金額の候補にしました`)
+    }
+  }
+  if (hasOther) {
+    warn('小計と合計のあいだに値引き・源泉徴収以外の増減（調整・相殺など）があります。原本で確認してください')
     needsReview = true
   }
 

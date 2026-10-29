@@ -16,6 +16,10 @@ const ITEM_ID = 'item-1'
 const EXCLUSIVE = { subtotal_excl_tax: 100000, tax_amount: 10000, total_incl_tax: 110000, tax_treatment: 'exclusive', tax_breakdown: [] as unknown[] }
 /** 次の読み取りで返す原本の金額（既定は外税：税抜 100,000 / 税 10,000 / 税込 110,000・内訳なし） */
 let nextAmounts: Record<string, unknown> = EXCLUSIVE
+/** 次の読み取りでサーバーが返す登録金額の候補（模擬） */
+let nextSuggested: number | null = 100000
+/** 次の読み取りの応答を差し替える（失敗・途中終了など）。null なら正常な読み取り結果 */
+let nextExtractResponse: (() => Response) | null = null
 
 /** 架空の請求書の読み取り結果 */
 function extraction(sha: string) {
@@ -26,8 +30,9 @@ function extraction(sha: string) {
     payment_due_date: '2026-10-31',
     amounts: nextAmounts,
     // 画面は原本の金額から照合し直すので、ここは形だけ
-    review: { suggested_excl_tax: 100000, suggested_from: 'printed_subtotal', status: 'ok', messages: [] },
+    review: { suggested_excl_tax: nextSuggested, suggested_from: nextSuggested == null ? null : 'printed_subtotal', status: 'ok', messages: [] },
     items: [],
+    items_total: 0,
     warnings: [],
     document_sha256: sha,
   }
@@ -43,6 +48,8 @@ const json = (body: unknown, status = 200) =>
 
 beforeEach(() => {
   nextAmounts = EXCLUSIVE
+  nextSuggested = 100000
+  nextExtractResponse = null
   posted = []
   extractCount = 0
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
@@ -51,7 +58,7 @@ beforeEach(() => {
     }
     if (url === '/api/ai/extract-vendor-invoice') {
       extractCount += 1
-      return json(extraction(`sha-${extractCount}`))
+      return nextExtractResponse ? nextExtractResponse() : json(extraction(`sha-${extractCount}`))
     }
     if (url === `/api/cost-ledger/${ITEM_ID}/invoices`) {
       posted.push(JSON.parse(String(init?.body)))
@@ -241,5 +248,105 @@ describe('VendorInvoiceImportTab：税率ごとの内訳の表示', () => {
     expect(text()).toContain(HEADING)
     expect(text()).toContain('8% 対象 — ／ 税 ¥8,000')
     expect(field<HTMLInputElement>('登録金額（税抜）').value).toBe('100000')
+  })
+})
+
+describe('VendorInvoiceImportTab：トライアル前の修正（金額不明・値引き・画像・AI の途中終了）', () => {
+  const text = () => container.textContent ?? ''
+
+  async function mount() {
+    await act(async () => { root.render(<VendorInvoiceImportTab projectId="p1" />) })
+    await flush()
+  }
+
+  /** ファイルを選ぶ（読み取りボタンは押さない） */
+  async function pick(file: File) {
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!
+    Object.defineProperty(input, 'files', { value: [file], configurable: true })
+    await act(async () => { input.dispatchEvent(new Event('change', { bubbles: true })) })
+    await flush()
+  }
+
+  it('金額不明（すべて読み取れない）→ 登録金額は空欄。チェックも登録もできず、押しても送信しない。入力すればチェックできる', async () => {
+    nextAmounts = { subtotal_excl_tax: null, tax_amount: null, total_incl_tax: null, tax_treatment: 'unknown', tax_breakdown: [] }
+    nextSuggested = null
+    await mount()
+    await loadInvoice()
+    expect(field<HTMLInputElement>('登録金額（税抜）').value).toBe('')
+    expect(text()).toContain('要確認')
+    expect(checkbox().disabled).toBe(true)
+    expect(registerButton().disabled).toBe(true)
+    await click(registerButton())
+    expect(posted).toHaveLength(0)
+
+    await type(field<HTMLInputElement>('登録金額（税抜）'), '50000')
+    expect(checkbox().disabled).toBe(false)
+    expect(registerButton().disabled).toBe(true)
+    await click(checkbox())
+    expect(registerButton().disabled).toBe(false)
+  })
+
+  it('税込しかない → 登録金額は空欄・要確認で、税込の金額は入れない', async () => {
+    nextAmounts = { subtotal_excl_tax: null, tax_amount: null, total_incl_tax: 110000, tax_treatment: 'inclusive', tax_breakdown: [] }
+    nextSuggested = null
+    await mount()
+    await loadInvoice()
+    expect(field<HTMLInputElement>('登録金額（税抜）').value).toBe('')
+    expect(registerButton().disabled).toBe(true)
+  })
+
+  it('値引きの記載がある → 印字どうしが合っていても「要確認」。値引きの行を表示する', async () => {
+    nextAmounts = { ...EXCLUSIVE, subtotal_excl_tax: 99000, tax_amount: 9900, total_incl_tax: 108900, adjustments: [{ kind: 'discount', amount: 1000 }] }
+    await mount()
+    await loadInvoice()
+    expect(text()).toContain('要確認')
+    expect(text()).not.toContain('金額の整合OK')
+    expect(text()).toContain('値引き ¥1,000')
+    expect(text()).toContain('値引きの記載があります')
+  })
+
+  it('HEIC を選ぶ → 理由と対処を案内し、読み取らない', async () => {
+    await mount()
+    await pick(new File([new Uint8Array(10)], 'IMG_0001.HEIC', { type: 'image/heic' }))
+    expect(text()).toContain('HEIC 形式の写真には対応していません')
+    expect(text()).not.toContain('請求書を読み取る')
+    expect(extractCount).toBe(0)
+  })
+
+  it('大容量の画像を縮小できない（このブラウザで画像を読み込めない）→ 案内し、AI に送らない', async () => {
+    await mount()
+    await pick(new File([new Uint8Array(4 * 1024 * 1024)], 'big.jpg', { type: 'image/jpeg' }))
+    await click(button('請求書を読み取る'))
+    expect(text()).toContain('画像を読み込めませんでした')
+    expect(extractCount).toBe(0)
+  })
+
+  it('サーバーに届く前に容量で断られた（JSON でない 413）→ 撮り直しを案内する', async () => {
+    nextExtractResponse = () => new Response('Request Entity Too Large', { status: 413 })
+    await mount()
+    await loadInvoice()
+    expect(text()).toContain('画像が大きすぎて送れませんでした')
+    expect(text()).not.toContain('原本の金額')
+  })
+
+  it('AI 応答が途中で終わった（502 ai_truncated）→ サーバーの案内を出し、読み取り結果は表示しない', async () => {
+    nextExtractResponse = () => json({ error: '請求書の内容が多く、読み取りが途中で終わりました。', code: 'ai_truncated' }, 502)
+    await mount()
+    await loadInvoice()
+    expect(text()).toContain('読み取りが途中で終わりました')
+    expect(text()).not.toContain('原本の金額')
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull()
+  })
+
+  it('明細が 20 行を超える → 表示した行数と原本の行数を示す', async () => {
+    nextExtractResponse = () => json({
+      ...extraction('sha-many'),
+      items: Array.from({ length: 20 }, (_, i) => ({ name: `部材${i + 1}`, amount: 1000 })),
+      items_total: 45,
+    })
+    await mount()
+    await loadInvoice()
+    expect(text()).toContain('20 件')
+    expect(text()).toContain('原本は 45 行')
   })
 })
