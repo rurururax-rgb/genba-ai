@@ -451,3 +451,149 @@ describe('VendorInvoiceImportTab：使えないファイルを選んだら、前
     expect(posted[0].document_sha256).toBe('sha-2')
   })
 })
+
+// ── 実機 QA で見つかった誤登録の防止（OBS-1・OBS-2・OBS-3・メモ）────────────
+
+const QA_B = { subtotal_excl_tax: null, tax_amount: 10000, total_incl_tax: 110000, tax_treatment: 'inclusive', tax_breakdown: [] as unknown[], printed_tax_rates: [10] }
+const deviationBox = () => container.querySelector<HTMLInputElement>('input[aria-label="原本の税抜と異なる登録金額の確認"]')
+const alertText = () => [...container.querySelectorAll('[role="alert"]')].map(e => e.textContent).join(' ')
+const chip = () => [...container.querySelectorAll('span')].map(s => s.textContent).find(t => t === '金額の整合OK' || t === '税抜は計算値' || t === '要確認')
+
+describe('VendorInvoiceImportTab：登録金額が原本の税抜と違うときは追加の確認が必要（OBS-1）', () => {
+  beforeEach(() => { nextAmounts = QA_B; nextSuggested = 100000 })
+
+  it('QA-B：税込 110,000 を登録金額に入れる → 税込と同じ旨の警告。確認チェックだけでは登録できない', async () => {
+    await mountAndConfirm()
+    expect(deviationBox()).toBeNull()
+    await type(field<HTMLInputElement>('登録金額（税抜）'), '110000')
+    expect(alertText()).toContain('登録金額 ¥110,000 は税込合計と同じです。原価台帳は税抜で集計します（原本の税抜は ¥100,000）')
+    await click(checkbox())
+    expect(checkbox().checked).toBe(true)
+    expect(registerButton().disabled).toBe(true)
+    expect(container.textContent).toContain('原本の税抜と異なる金額の確認にチェックを入れてください')
+    await click(registerButton())
+    expect(posted).toHaveLength(0)
+  })
+
+  it('正当な例外：追加の確認にもチェックを入れれば、その金額で登録できる', async () => {
+    await mountAndConfirm()
+    await type(field<HTMLInputElement>('登録金額（税抜）'), '95000')
+    expect(alertText()).toContain('登録金額 ¥95,000 は原本の税抜 ¥100,000 と異なります')
+    await click(checkbox())
+    await click(deviationBox()!)
+    expect(registerButton().disabled).toBe(false)
+    await click(registerButton())
+    expect(posted).toHaveLength(1)
+    expect(posted[0].amount).toBe(95000)
+  })
+
+  it('「原本の税抜を使う」で候補に戻すと、警告と追加の確認は消える', async () => {
+    await mountAndConfirm()
+    await type(field<HTMLInputElement>('登録金額（税抜）'), '110000')
+    await click(button('原本の税抜 ¥100,000 を使う'))
+    expect(deviationBox()).toBeNull()
+    expect(alertText()).not.toContain('税込合計と同じ')
+    await click(checkbox())
+    expect(registerButton().disabled).toBe(false)
+  })
+
+  it('追加の確認のあとで原本の金額を直す → 2 つのチェックとも外れる', async () => {
+    await mountAndConfirm()
+    await type(field<HTMLInputElement>('登録金額（税抜）'), '95000')
+    await click(checkbox())
+    await click(deviationBox()!)
+    await type(field<HTMLInputElement>('消費税額'), '9000')
+    expect(checkbox().checked).toBe(false)
+    expect(deviationBox()!.checked).toBe(false)
+    expect(registerButton().disabled).toBe(true)
+  })
+
+  it('再描画（親の再レンダリング）しても、警告とチェックの状態は保たれる', async () => {
+    await mountAndConfirm()
+    await type(field<HTMLInputElement>('登録金額（税抜）'), '110000')
+    await click(checkbox())
+    await click(deviationBox()!)
+    await act(async () => { root.render(<VendorInvoiceImportTab projectId="p1" onRegistered={() => {}} />) })
+    await flush()
+    expect(alertText()).toContain('税込合計と同じです')
+    expect(checkbox().checked).toBe(true)
+    expect(deviationBox()!.checked).toBe(true)
+    expect(registerButton().disabled).toBe(false)
+  })
+
+  it('新しい請求書を読み取ると、追加の確認も未確認に戻る', async () => {
+    await mountAndConfirm()
+    await type(field<HTMLInputElement>('登録金額（税抜）'), '110000')
+    await click(checkbox())
+    await click(deviationBox()!)
+    await loadInvoice('invoice-2.png')
+    expect(deviationBox()).toBeNull()
+    expect(field<HTMLInputElement>('登録金額（税抜）').value).toBe('100000')
+    expect(checkbox().checked).toBe(false)
+  })
+})
+
+describe('VendorInvoiceImportTab：税区分・税率と金額の照合表示（OBS-2・OBS-3）', () => {
+  it('QA-A（外税・10%）・QA-B（内税・うち消費税 10%）→ 金額の整合OK', async () => {
+    nextAmounts = { ...EXCLUSIVE, printed_tax_rates: [10] }
+    await mountAndConfirm()
+    expect(chip()).toBe('金額の整合OK')
+    nextAmounts = QA_B
+    await loadInvoice('qa-b.png')
+    expect(chip()).toBe('金額の整合OK')
+  })
+
+  it('QA-B を外税に切り替える → 整合OK ではなく要確認。理由を表示し、確認はやり直し', async () => {
+    nextAmounts = QA_B
+    await mountAndConfirm()
+    await choose(field<HTMLSelectElement>('税区分', 'select'), 'exclusive')
+    expect(chip()).toBe('要確認')
+    expect(container.textContent).toContain('外税になっていますが、原本に税抜金額の記載がありません')
+    expect(checkbox().checked).toBe(false)
+    // 内税に戻せば整合OK に戻る
+    await choose(field<HTMLSelectElement>('税区分', 'select'), 'inclusive')
+    expect(chip()).toBe('金額の整合OK')
+  })
+
+  it('QA-B の税額を 9,000 に直す（原本は 10%）→ 要確認と税率の警告。登録金額 100,000 は候補 101,000 と違うので追加の確認も必要', async () => {
+    nextAmounts = QA_B
+    await mountAndConfirm()
+    await type(field<HTMLInputElement>('消費税額'), '9000')
+    expect(chip()).toBe('要確認')
+    expect(container.textContent).toContain('消費税額 ¥9,000 が、原本の税率 10% で計算した額と合いません')
+    await click(checkbox())
+    expect(alertText()).toContain('原本の税抜 ¥101,000 と異なります')
+    expect(registerButton().disabled).toBe(true)
+  })
+
+  it('税率の印字がない内税（税込と消費税だけ）→ 「税抜は計算値」（10% と決めつけず、登録はできる）', async () => {
+    nextAmounts = { ...QA_B, printed_tax_rates: [] }
+    await mountAndConfirm()
+    expect(chip()).toBe('税抜は計算値')
+    expect(registerButton().disabled).toBe(false)
+  })
+})
+
+describe('VendorInvoiceImportTab：メモが空欄なら note は null（担当者の入力だけを保存）', () => {
+  it('メモ空欄 → note は null（「業者名からの請求」を自動で入れない）', async () => {
+    await mountAndConfirm()
+    await click(registerButton())
+    expect(posted).toHaveLength(1)
+    expect(posted[0].note).toBeNull()
+    expect(posted[0].vendor_name).toBe('架空設備テスト')
+  })
+
+  it('空白だけのメモ → null。入力したメモはそのまま保存', async () => {
+    await mountAndConfirm()
+    await type(field<HTMLInputElement>('メモ（任意）'), '   ')
+    await click(registerButton())
+    expect(posted[0].note).toBeNull()
+  })
+
+  it('入力したメモ → その内容を保存', async () => {
+    await mountAndConfirm()
+    await type(field<HTMLInputElement>('メモ（任意）'), '7月分材料費')
+    await click(registerButton())
+    expect(posted[0].note).toBe('7月分材料費')
+  })
+})
