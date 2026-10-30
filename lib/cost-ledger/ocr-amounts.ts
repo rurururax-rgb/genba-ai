@@ -41,9 +41,24 @@ export type PrintedAmounts = {
   tax_breakdown: TaxBreakdownRow[]
   /** 値引き・源泉徴収などの印字（なければ空配列。省略時も空とみなす） */
   adjustments?: AdjustmentRow[]
+  /** 合計欄・消費税の行に印字された税率（「消費税（10%）」「うち消費税 10%」→ [10]）。印字がなければ空配列。省略時も空 */
+  printed_tax_rates?: number[]
 }
 
 export type AmountMessage = { level: 'info' | 'warn'; text: string }
+
+/**
+ * 照合の内訳。金額の計算が合うことと、税区分・税率が原本の印字と合うことは別々に評価する
+ * （計算が合っていても税区分が印字と矛盾していれば「整合OK」にしない）。
+ * - arithmetic: consistent = 印字どうしの計算が合う / inconsistent = 合わない / unverifiable = 照合できる金額がそろわない
+ * - treatment:  consistent = 税区分と印字された金額の組み合わせが合う / inconsistent = 合わない / unknown = 税区分が不明
+ * - tax_rate:   consistent = 原本に印字された税率で消費税額を検算できた / inconsistent = 合わない / not_checked = 税率の印字がない等で検算しない
+ */
+export type AmountChecks = {
+  arithmetic: 'consistent' | 'inconsistent' | 'unverifiable'
+  treatment: 'consistent' | 'inconsistent' | 'unknown'
+  tax_rate: 'consistent' | 'inconsistent' | 'not_checked'
+}
 
 export type AmountReview = {
   /** 登録金額（税抜）の候補。判断できなければ null（人が入力する） */
@@ -52,6 +67,7 @@ export type AmountReview = {
   suggested_from: 'printed_subtotal' | 'printed_total_minus_tax' | 'non_taxable_total' | null
   /** ok = 印字された金額どうしに矛盾がなく税抜の候補がある / needs_review = 人が原本で確かめる必要がある */
   status: 'ok' | 'needs_review'
+  checks: AmountChecks
   messages: AmountMessage[]
 }
 
@@ -102,15 +118,26 @@ export function toPrintedAmounts(raw: unknown): PrintedAmounts {
         amount: toAbsAmount(row.amount),
       }
     }),
+    printed_tax_rates: [...new Set((Array.isArray(r.printed_tax_rates) ? r.printed_tax_rates : []).slice(0, 5)
+      .map(toAmount).filter((x): x is number => x != null && x > 0 && x <= 100))],
   }
 }
 
+/** 計算した税額 t を、端数処理（切り捨て・四捨五入・切り上げ）のどれかで tax と説明できるか */
+const roundsTo = (t: number, tax: number) => [Math.floor(t), Math.round(t), Math.ceil(t)].includes(tax)
+
 /** 税抜金額 × 税率 の消費税として、端数処理（切り捨て・四捨五入・切り上げ）のどれかで説明できるか */
 function plausibleTax(excl: number, tax: number): boolean {
-  return [10, 8].some(rate => {
-    const t = (excl * rate) / 100
-    return [Math.floor(t), Math.round(t), Math.ceil(t)].includes(tax)
-  })
+  return [10, 8].some(rate => roundsTo((excl * rate) / 100, tax))
+}
+
+/**
+ * 印字された税率で消費税額を説明できるか。対象額が税抜（× 税率）でも税込（× 税率 ÷ (100 + 税率)）でもよい
+ * （内税の請求書は「10%対象 ¥110,000（うち消費税 ¥10,000）」のように税込の対象額を印字することがある）
+ */
+function taxMatchesRate(base: { excl: number | null; incl: number | null }, rate: number, tax: number): boolean {
+  return (base.excl != null && roundsTo((base.excl * rate) / 100, tax))
+    || (base.incl != null && roundsTo((base.incl * rate) / (100 + rate), tax))
 }
 
 /**
@@ -126,6 +153,8 @@ export function reviewInvoiceAmounts(a: PrintedAmounts): AmountReview {
   let suggested: number | null = null
   let from: AmountReview['suggested_from'] = null
   let needsReview = false
+  // 印字どうしの計算が合わないことが分かった
+  let arithmeticBad = false
 
   // 税率の内訳（8%・10% 混在など）
   const rates = [...new Set(a.tax_breakdown.map(b => b.rate).filter((r): r is number => r != null))].sort((x, y) => y - x)
@@ -149,6 +178,7 @@ export function reviewInvoiceAmounts(a: PrintedAmounts): AmountReview {
       warn(`税率ごとの消費税額の合計（${yen(sumTax)}）が消費税額（${yen(tax)}）と一致しません`)
       needsReview = true
     }
+    if ((ex != null && sumTaxable != null && sumTaxable !== ex) || (tax != null && sumTax != null && sumTax !== tax)) arithmeticBad = true
   }
 
   if (a.tax_treatment === 'non_taxable') {
@@ -162,7 +192,7 @@ export function reviewInvoiceAmounts(a: PrintedAmounts): AmountReview {
       from = ex != null ? 'printed_subtotal' : 'non_taxable_total'
       info('非課税の請求書として読み取りました（消費税なし）。原本で確認してください')
       if (tax != null && tax > 0) { warn('非課税と読み取りましたが、消費税額が記載されています'); needsReview = true }
-      if (ex != null && inc != null && ex !== inc) { warn('非課税と読み取りましたが、税抜金額と合計が一致しません'); needsReview = true }
+      if (ex != null && inc != null && ex !== inc) { warn('非課税と読み取りましたが、税抜金額と合計が一致しません'); needsReview = true; arithmeticBad = true }
     }
   } else if (ex != null) {
     suggested = ex
@@ -170,23 +200,23 @@ export function reviewInvoiceAmounts(a: PrintedAmounts): AmountReview {
     if (tax != null && inc != null) {
       if (ex + tax !== inc) {
         warn(`税抜金額 ${yen(ex)} ＋ 消費税額 ${yen(tax)} が税込合計 ${yen(inc)} と一致しません（差 ${yen(Math.abs(ex + tax - inc))}）。値引き・端数処理を原本で確認してください`)
-        needsReview = true
+        needsReview = true; arithmeticBad = true
       }
     } else if (tax == null && inc == null) {
       warn('消費税額・税込合計の記載を読み取れませんでした。この金額が税抜かどうか原本で確認してください')
       needsReview = true
     } else if (tax == null && inc != null) {
-      if (inc < ex) { warn('税込合計が税抜金額より小さくなっています'); needsReview = true }
+      if (inc < ex) { warn('税込合計が税抜金額より小さくなっています'); needsReview = true; arithmeticBad = true }
       else if (!plausibleTax(ex, inc - ex)) {
         // 差額が 10%・8% の消費税として説明できない（値引き・別の費用・読み違いの可能性）
         warn(`税込合計 ${yen(inc)} − 税抜金額 ${yen(ex)} = ${yen(inc - ex)} が消費税（10%・8%）と合いません。原本で確認してください`)
-        needsReview = true
+        needsReview = true; arithmeticBad = true
       } else info('消費税額の記載はありません（税込合計 − 税抜金額 で確認できます）')
     }
   } else if (inc != null && tax != null) {
     if (tax > inc) {
       warn('消費税額が税込合計より大きくなっています')
-      needsReview = true
+      needsReview = true; arithmeticBad = true
     } else {
       suggested = inc - tax
       from = 'printed_total_minus_tax'
@@ -231,6 +261,57 @@ export function reviewInvoiceAmounts(a: PrintedAmounts): AmountReview {
     needsReview = true
   }
 
+  // ── 税区分と印字された金額の組み合わせ（計算の一致とは別に評価する）──
+  let treatmentCheck: AmountChecks['treatment'] = 'consistent'
+  if (a.tax_treatment === 'unknown') {
+    treatmentCheck = 'unknown'
+    warn('税区分（外税・内税・非課税）を読み取れませんでした。原本で確認して選んでください')
+    needsReview = true
+  } else if (a.tax_treatment === 'exclusive' && ex == null && inc != null) {
+    // 外税の請求書なら税抜（小計）が印字されるはず。税込と消費税だけなら内税の可能性が高い
+    treatmentCheck = 'inconsistent'
+    warn('外税になっていますが、原本に税抜金額の記載がありません。内税ではないか原本で確認してください')
+    needsReview = true
+  } else if (a.tax_treatment === 'inclusive' && inc == null && ex != null) {
+    treatmentCheck = 'inconsistent'
+    warn('内税になっていますが、原本に税込合計の記載がありません。外税ではないか原本で確認してください')
+    needsReview = true
+  } else if (a.tax_treatment === 'non_taxable' && tax != null && tax > 0) {
+    treatmentCheck = 'inconsistent'
+  }
+
+  // ── 原本に印字された税率での消費税額の検算（印字がある場合だけ。10% 固定では判定しない）──
+  // 値引き・源泉徴収などがあると対象額がどの段階か決めきれないため検算しない（すでに要確認）
+  let rateCheck: AmountChecks['tax_rate'] = 'not_checked'
+  if (a.tax_treatment !== 'non_taxable' && adjustments.length === 0) {
+    const checkedRows = a.tax_breakdown.filter(b => b.rate != null && b.tax_amount != null && b.taxable_amount != null)
+    const printedRates = a.printed_tax_rates ?? []
+    if (checkedRows.length > 0) {
+      // 税率ごとの内訳: 行ごとに 対象額 × 税率 を検算する（8%・10% 混在に対応）
+      const bad = checkedRows.filter(b => !taxMatchesRate({ excl: b.taxable_amount, incl: b.taxable_amount }, b.rate!, b.tax_amount!))
+      rateCheck = bad.length === 0 ? 'consistent' : 'inconsistent'
+      for (const b of bad) warn(`${b.rate}% の対象額 ${yen(b.taxable_amount!)} に対して消費税額 ${yen(b.tax_amount!)} が合いません。原本で確認してください`)
+    } else if (tax != null && (ex != null || inc != null)) {
+      // 内訳の行がない（または対象額が印字されていない）: 合計欄に印字された税率がちょうど 1 つのときだけ検算する。
+      // 税率が複数印字されていて内訳がなければ、税率ごとの対象額が分からないので検算しない
+      const rowRates = [...new Set(a.tax_breakdown.map(b => b.rate).filter((r): r is number => r != null))]
+      const candidates = rowRates.length === 1 ? rowRates : rowRates.length === 0 ? printedRates : []
+      if (candidates.length === 1) {
+        const rate = candidates[0]
+        if (taxMatchesRate({ excl: ex, incl: inc }, rate, tax)) rateCheck = 'consistent'
+        else {
+          rateCheck = 'inconsistent'
+          warn(`消費税額 ${yen(tax)} が、原本の税率 ${rate}% で計算した額と合いません。原本で確認してください`)
+        }
+      }
+    }
+    if (rateCheck === 'inconsistent') needsReview = true
+  }
+
+  const arithmetic: AmountChecks['arithmetic'] = arithmeticBad ? 'inconsistent'
+    : (ex != null && tax != null && inc != null) || (a.tax_treatment === 'non_taxable' && ex != null && inc != null) ? 'consistent'
+    : 'unverifiable'
+
   if (suggested != null && !Number.isInteger(suggested)) {
     warn('金額に 1 円未満の端数があります。原本で確認してください')
     needsReview = true
@@ -246,6 +327,37 @@ export function reviewInvoiceAmounts(a: PrintedAmounts): AmountReview {
     suggested_excl_tax: suggested,
     suggested_from: from,
     status: needsReview || suggested == null ? 'needs_review' : 'ok',
+    checks: { arithmetic, treatment: treatmentCheck, tax_rate: rateCheck },
     messages,
   }
+}
+
+/**
+ * 登録金額が原本の税抜と食い違う危険。あれば警告と追加の確認を求める（正当な例外は確認すれば登録できる）。
+ * - total_incl: 登録金額が税込合計と同じ（税込を税抜として登録しようとしている可能性が高い）
+ * - differs: 原本の印字から決まる税抜の候補と違う
+ */
+export function registerAmountRisk(
+  registered: number | null,
+  review: Pick<AmountReview, 'suggested_excl_tax'>,
+  printed: { excl: number | null; incl: number | null; treatment: TaxTreatment },
+): { kind: 'total_incl' | 'differs'; message: string; confirmLabel: string } | null {
+  if (registered === null) return null
+  const suggestion = review.suggested_excl_tax
+  if (printed.treatment !== 'non_taxable' && printed.incl != null && registered === printed.incl && registered !== printed.excl) {
+    return {
+      kind: 'total_incl',
+      message: `登録金額 ${yen(registered)} は税込合計と同じです。原価台帳は税抜で集計します`
+        + (suggestion != null && suggestion !== registered ? `（原本の税抜は ${yen(suggestion)}）` : ''),
+      confirmLabel: '税込合計と同じ金額を、税抜として登録する',
+    }
+  }
+  if (suggestion != null && registered !== suggestion) {
+    return {
+      kind: 'differs',
+      message: `登録金額 ${yen(registered)} は原本の税抜 ${yen(suggestion)} と異なります`,
+      confirmLabel: '原本の税抜と異なる金額で登録する',
+    }
+  }
+  return null
 }

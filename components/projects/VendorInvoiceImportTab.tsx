@@ -6,7 +6,7 @@ import {
   createRegisterAttempt, postInvoice,
   type ExistingDocument, type RegisterAttempt, type SimilarInvoiceSummary,
 } from '@/lib/cost-ledger/invoice-client'
-import { reviewInvoiceAmounts, toAmount, type AdjustmentKind, type TaxTreatment } from '@/lib/cost-ledger/ocr-amounts'
+import { registerAmountRisk, reviewInvoiceAmounts, toAmount, type AdjustmentKind, type AmountReview, type TaxTreatment } from '@/lib/cost-ledger/ocr-amounts'
 import type { ExtractedVendorInvoice } from '@/lib/cost-ledger/ocr-extraction'
 import { checkInvoiceImageFile, formatMegabytes, prepareInvoiceImage } from '@/lib/cost-ledger/invoice-image'
 
@@ -105,6 +105,8 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
   // 原価台帳に登録する金額（税抜）と、その金額を担当者が原本で確認したか
   const [registerAmount, setRegisterAmount] = useState('')
   const [confirmed, setConfirmed]   = useState(false)
+  // 登録金額が原本の税抜（候補）と違う・税込合計と同じときの追加の確認
+  const [deviationConfirmed, setDeviationConfirmed] = useState(false)
 
   const [ledgerItems, setLedgerItems] = useState<CostLedgerItem[]>([])
   const [selectedItemId, setSelectedItemId] = useState<string>('')
@@ -153,6 +155,7 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
     setTreatment('unknown')
     setRegisterAmount('')
     setConfirmed(false)
+    setDeviationConfirmed(false)
     setSelectedItemId('')
     setSaved(null)
     setBlocker(null)
@@ -236,6 +239,7 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
       // 登録金額の初期値は、原本の印字から決まる税抜の候補だけ（なければ空欄。担当者が入力する）
       setRegisterAmount(amountText(result.review.suggested_excl_tax))
       setConfirmed(false)
+      setDeviationConfirmed(false)
 
       // 業者名でledger itemを自動選択
       if (result.vendor_name) {
@@ -269,14 +273,18 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
     tax_treatment:     treatment,
     tax_breakdown:     extracted?.amounts.tax_breakdown ?? [],
     adjustments:       extracted?.amounts.adjustments ?? [],
+    printed_tax_rates: extracted?.amounts.printed_tax_rates ?? [],
   }), [printedEx, printedTax, printedInc, treatment, extracted])
 
   // 原本の金額・税区分や登録金額を変えたら、確認はやり直す（確認したときの内容と登録する内容を一致させる）。
   // 登録金額は書き換えない（原本の税抜を使うかは担当者が選ぶ）
-  const editedAmount = <T,>(set: (v: T) => void) => (v: T) => { edited(set)(v); setConfirmed(false) }
+  const editedAmount = <T,>(set: (v: T) => void) => (v: T) => { edited(set)(v); setConfirmed(false); setDeviationConfirmed(false) }
 
   const parsedRegister = parseAmount(registerAmount)
   const changeRegisterAmount = editedAmount(setRegisterAmount)
+  const risk = registerAmountRisk(parsedRegister, review, {
+    excl: toAmount(printedEx), incl: toAmount(printedInc), treatment,
+  })
 
   // 台帳に登録。confirmSimilar = 「以前の請求書と似ています」を確認したうえで登録する
   const register = async (confirmSimilar = false) => {
@@ -285,6 +293,7 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
     const parsedAmount = parseAmount(registerAmount)
     if (parsedAmount === null) { setError('登録金額（税抜）を正しく入力してください'); return }
     if (!confirmed) { setError('登録金額が税抜であることを原本で確認し、チェックを入れてください'); return }
+    if (risk && !deviationConfirmed) { setError(risk.confirmLabel + '場合は、チェックを入れてください'); return }
     const gen = genRef.current
     const itemId = selectedItemId
     setSaving(true)
@@ -295,7 +304,8 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
         amount:          parsedAmount,
         invoice_date:    invoiceDate || null,
         payment_date:    paymentDate || null,
-        note:            note || (vendorName ? `${vendorName}からの請求` : null),
+        // メモ欄が空なら null（担当者が入力した内容だけを保存する）
+        note:            note.trim() || null,
         vendor_name:     vendorName || null,
         invoice_number:  invoiceNumber || null,
         document_sha256: extracted.document_sha256,
@@ -341,7 +351,7 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
   }
 
   const selectedItem = ledgerItems.find(i => i.id === selectedItemId)
-  const canRegister = !!extracted && !!selectedItemId && parsedRegister !== null && confirmed && !saving
+  const canRegister = !!extracted && !!selectedItemId && parsedRegister !== null && confirmed && (!risk || deviationConfirmed) && !saving
   const reviewSuggestion = review.suggested_excl_tax
   const showUseSuggestion = reviewSuggestion != null && parsedRegister !== reviewSuggestion
 
@@ -520,7 +530,7 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
                 <div style={CARD}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 12 }}>
                     <CardTitle noMargin>原本の金額</CardTitle>
-                    <StatusChip ok={review.status === 'ok'} />
+                    <StatusChip review={review} />
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 }}>
                     <AmountField label="税抜金額" value={printedEx} onChange={editedAmount(setPrintedEx)} />
@@ -654,6 +664,23 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
                     </span>
                   </label>
 
+                  {risk && (
+                    <div role="alert" style={{ ...NOTICE_ALERT, marginTop: 10 }}>
+                      <div>⚠ {risk.message}</div>
+                      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginTop: 8, minHeight: 32, cursor: 'pointer', fontWeight: 600 }}>
+                        <input
+                          type="checkbox"
+                          aria-label="原本の税抜と異なる登録金額の確認"
+                          checked={deviationConfirmed}
+                          disabled={!!saved}
+                          onChange={e => setDeviationConfirmed(e.target.checked)}
+                          style={{ width: 18, height: 18, marginTop: 1, accentColor: '#92400E' }}
+                        />
+                        <span>{risk.confirmLabel}</span>
+                      </label>
+                    </div>
+                  )}
+
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginTop: 14 }}>
                     <Field label="支払日（支払済みの場合のみ）">
                       <Input type="date" inputSize="compact" value={paymentDate} onChange={e => edited(setPaymentDate)(e.target.value)} />
@@ -745,7 +772,8 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
                         <p style={{ fontSize: 11, color: G.textTer, marginTop: 6 }}>
                           {!selectedItemId ? '登録先の台帳項目を選んでください'
                             : parsedRegister === null ? '登録金額（税抜）を入力してください'
-                            : '登録金額を原本で確認し、チェックを入れてください'}
+                            : !confirmed ? '登録金額を原本で確認し、チェックを入れてください'
+                            : '原本の税抜と異なる金額の確認にチェックを入れてください'}
                         </p>
                       )}
                     </>
@@ -809,17 +837,25 @@ function CardTitle({ children, noMargin }: { children: React.ReactNode; noMargin
 }
 
 /** 原本の金額の照合結果（AI の判定ではなく、画面の値で照合した結果） */
-function StatusChip({ ok }: { ok: boolean }) {
+/**
+ * 原本の金額の照合結果。「金額の整合OK」は、要確認の点がなく、印字どうしの計算か印字された税率での検算が合ったときだけ。
+ * 税込 − 消費税 で税抜を出しただけで検算できなければ「税抜は計算値」（登録はできる。原本で確認する）
+ */
+function StatusChip({ review }: { review: AmountReview }) {
+  const verified = review.checks.arithmetic === 'consistent' || review.checks.tax_rate === 'consistent'
+  const kind = review.status !== 'ok' ? 'review' : verified ? 'ok' : 'derived'
+  const ok = kind === 'ok'
   return (
     <span style={{
       fontSize: 11, fontWeight: 700, borderRadius: 4, padding: '3px 8px',
       background: ok ? G.light : '#FFFBEB', color: ok ? G.dark : '#92400E',
       border: `1px solid ${ok ? G.border : '#FDE68A'}`,
     }}>
-      {ok ? '金額の整合OK' : '要確認'}
+      {kind === 'ok' ? '金額の整合OK' : kind === 'derived' ? '税抜は計算値' : '要確認'}
     </span>
   )
 }
+
 
 function AmountField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
   const n = toAmount(value)
