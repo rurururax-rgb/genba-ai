@@ -6,8 +6,9 @@ import {
   createRegisterAttempt, postInvoice,
   type ExistingDocument, type RegisterAttempt, type SimilarInvoiceSummary,
 } from '@/lib/cost-ledger/invoice-client'
-import { reviewInvoiceAmounts, toAmount, type TaxTreatment } from '@/lib/cost-ledger/ocr-amounts'
+import { reviewInvoiceAmounts, toAmount, type AdjustmentKind, type TaxTreatment } from '@/lib/cost-ledger/ocr-amounts'
 import type { ExtractedVendorInvoice } from '@/lib/cost-ledger/ocr-extraction'
+import { checkInvoiceImageFile, formatMegabytes, prepareInvoiceImage } from '@/lib/cost-ledger/invoice-image'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -51,6 +52,12 @@ const TREATMENT_LABEL: Record<TaxTreatment, string> = {
   unknown:     '不明',
 }
 
+const ADJUSTMENT_LABEL: Record<AdjustmentKind, string> = {
+  discount:    '値引き',
+  withholding: '源泉徴収',
+  other:       'その他の増減',
+}
+
 const ZOOMS = [1, 1.5, 2, 3] as const
 
 type Props = {
@@ -79,6 +86,8 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
   const [dragging, setDragging]     = useState(false)
   const [loading, setLoading]       = useState(false)
   const [error, setError]           = useState<string | null>(null)
+  // 送信前に画像を縮小したときの案内（元の大きさ → 送った大きさ）
+  const [uploadNote, setUploadNote] = useState<string | null>(null)
 
   const [extracted, setExtracted]   = useState<ExtractedVendorInvoice | null>(null)
   const [vendorName, setVendorName] = useState('')
@@ -148,25 +157,26 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
     setSaved(null)
     setBlocker(null)
     setError(null)
+    setUploadNote(null)
   }, [attempt])
 
   // ファイルセット
   const handleFile = useCallback((f: File) => {
     // 登録の送信中は画像を変えない（どの画像の登録か分からなくなる）
     if (attempt.busy) return
-    const allowed = ['image/jpeg', 'image/png', 'image/webp']
-    if (!allowed.includes(f.type)) {
-      setError('JPEG / PNG / WebP の画像ファイルを選択してください')
-      return
-    }
-    if (f.size > 8 * 1024 * 1024) {
-      setError('8MB 以下のファイルを選択してください')
-      return
-    }
+    // 前の画像の選択・プレビュー・読み取り結果・登録候補は、新しいファイルが使えるかどうかに関係なく捨てる
+    // （使えないファイルを選んだあとに、前の請求書を読み取ったり登録したりできないようにする）
     clearDocument()
-    setFile(f)
+    setFile(null)
     setPreview(null)
     setZoom(1)
+    // HEIC・PDF など対応していない形式は理由と対処を案内する。大きい画像は読み取り時に縮小して送る
+    const check = checkInvoiceImageFile(f)
+    if (!check.ok) {
+      setError(check.message)
+      return
+    }
+    setFile(f)
     const gen = genRef.current
     const reader = new FileReader()
     reader.onload = e => { if (genRef.current === gen) setPreview(e.target?.result as string) }
@@ -190,14 +200,27 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
     extractAbortRef.current = ctrl
     setLoading(true)
     setError(null)
+    setUploadNote(null)
     try {
+      // 送信前に 3.5MB 以下へ縮小する（Vercel の 4.5MB 制限）。縮小できなければ送らずに案内する
+      const prepared = await prepareInvoiceImage(file)
+      if (genRef.current !== gen) return
+      if (!prepared.ok) throw new Error(prepared.message)
+      if (prepared.resized) {
+        setUploadNote(`送信用に画像を縮小しました（${formatMegabytes(prepared.originalBytes)} → ${formatMegabytes(prepared.file.size)}）。数字が読みにくければ撮り直してください`)
+      }
       const fd = new FormData()
-      fd.append('file', file)
+      fd.append('file', prepared.file)
       const res = await fetch('/api/ai/extract-vendor-invoice', { method: 'POST', body: fd, signal: ctrl.signal })
-      const data = await res.json()
+      // サーバーに届く前に断られた場合（Vercel の容量制限など）は JSON ではない
+      const data = await res.json().catch(() => null)
       // 読み取り中に画像が変わった。古い結果は使わない
       if (genRef.current !== gen) return
-      if (!res.ok) throw new Error(data.error ?? 'AI抽出に失敗しました')
+      if (!res.ok || !data) {
+        throw new Error(data?.error ?? (res.status === 413
+          ? '画像が大きすぎて送れませんでした。請求書の部分だけが写るように撮り直してください'
+          : '読み取りに失敗しました。時間をおいてもう一度お試しください'))
+      }
       const result = data as ExtractedVendorInvoice
       if (typeof result.document_sha256 !== 'string' || !result.amounts || !result.review) throw new Error('AI抽出に失敗しました')
       // 新しい画像の読み取り結果 = 新しい登録操作
@@ -245,6 +268,7 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
     total_incl_tax:    toAmount(printedInc),
     tax_treatment:     treatment,
     tax_breakdown:     extracted?.amounts.tax_breakdown ?? [],
+    adjustments:       extracted?.amounts.adjustments ?? [],
   }), [printedEx, printedTax, printedInc, treatment, extracted])
 
   // 原本の金額・税区分や登録金額を変えたら、確認はやり直す（確認したときの内容と登録する内容を一致させる）。
@@ -436,6 +460,7 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
           {/* ── 右: 読み取り結果と登録 ── */}
           <section aria-label="読み取り結果と登録" style={{ minWidth: 0 }}>
             {error && <ErrorBox message={error} />}
+            {uploadNote && <div style={{ ...NOTICE_INFO, marginBottom: 12 }}>{uploadNote}</div>}
 
             {!extracted && (
               <div style={{ ...CARD, textAlign: 'center' }}>
@@ -520,6 +545,16 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
                       {extracted.amounts.tax_breakdown.map((b, i) => (
                         <span key={i} style={{ marginLeft: 8 }}>
                           {b.rate != null ? `${b.rate}%` : '税率不明'} 対象 {b.taxable_amount != null ? `¥${fmt(b.taxable_amount)}` : '—'} ／ 税 {b.tax_amount != null ? `¥${fmt(b.tax_amount)}` : '—'}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {(extracted.amounts.adjustments ?? []).length > 0 && (
+                    <div style={{ marginTop: 10, fontSize: 12, color: G.textSec }}>
+                      値引き・源泉徴収など（AIの読み取り・原本で確認）：
+                      {(extracted.amounts.adjustments ?? []).map((a, i) => (
+                        <span key={i} style={{ marginLeft: 8 }}>
+                          {ADJUSTMENT_LABEL[a.kind]} {a.amount != null ? `¥${fmt(a.amount)}` : '—'}
                         </span>
                       ))}
                     </div>
@@ -633,7 +668,8 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
                 {extracted.items.length > 0 && (
                   <details style={{ ...CARD, padding: '12px 16px' }}>
                     <summary style={{ fontSize: 12, color: G.textSec, cursor: 'pointer', fontWeight: 600 }}>
-                      読み取った明細（参考・{extracted.items.length} 件）
+                      読み取った明細（参考・{extracted.items.length} 件
+                      {extracted.items_total > extracted.items.length ? ` ／ 原本は ${extracted.items_total} 行。残りは原本で確認` : ''}）
                     </summary>
                     <div style={{ border: `1px solid ${G.borderLight}`, borderRadius: 8, overflow: 'hidden', marginTop: 8 }}>
                       {extracted.items.slice(0, 20).map((item, i) => (

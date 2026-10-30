@@ -11,7 +11,7 @@ let aiText = ''
 
 vi.mock('@anthropic-ai/sdk', () => ({
   default: class {
-    messages = { create: async () => ({ content: [{ type: 'text', text: aiText }] }) }
+    messages = { create: async () => ({ content: [{ type: 'text', text: aiText }], stop_reason: 'end_turn' }) }
   },
 }))
 vi.mock('@/lib/supabase/server', () => ({
@@ -69,6 +69,7 @@ describe('extract-vendor-invoice', () => {
     expect(json.amounts).toEqual({
       subtotal_excl_tax: 100000, tax_amount: 10000, total_incl_tax: 110000, tax_treatment: 'exclusive',
       tax_breakdown: [{ rate: 10, taxable_amount: 100000, tax_amount: 10000 }],
+      adjustments: [],
     })
     expect(json.review).toMatchObject({ suggested_excl_tax: 100000, suggested_from: 'printed_subtotal', status: 'ok' })
     expect(json.items).toEqual([{ name: '部材', amount: 100000 }])
