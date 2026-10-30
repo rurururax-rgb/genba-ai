@@ -19,7 +19,7 @@ let nextAmounts: Record<string, unknown> = EXCLUSIVE
 /** 次の読み取りでサーバーが返す登録金額の候補（模擬） */
 let nextSuggested: number | null = 100000
 /** 次の読み取りの応答を差し替える（失敗・途中終了など）。null なら正常な読み取り結果 */
-let nextExtractResponse: (() => Response) | null = null
+let nextExtractResponse: (() => Response | Promise<Response>) | null = null
 
 /** 架空の請求書の読み取り結果 */
 function extraction(sha: string) {
@@ -348,5 +348,106 @@ describe('VendorInvoiceImportTab：トライアル前の修正（金額不明・
     await loadInvoice()
     expect(text()).toContain('20 件')
     expect(text()).toContain('原本は 45 行')
+  })
+})
+
+describe('VendorInvoiceImportTab：使えないファイルを選んだら、前の請求書の選択・読み取り結果・登録候補を残さない', () => {
+  const text = () => container.textContent ?? ''
+  const hasButton = (label: string) => [...container.querySelectorAll('button')].some(b => b.textContent?.includes(label))
+
+  async function mount() {
+    await act(async () => { root.render(<VendorInvoiceImportTab projectId="p1" />) })
+    await flush()
+  }
+
+  async function pick(file: File) {
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!
+    Object.defineProperty(input, 'files', { value: [file], configurable: true })
+    await act(async () => { input.dispatchEvent(new Event('change', { bubbles: true })) })
+    await flush()
+  }
+
+  const heic = () => new File([new Uint8Array(10)], 'IMG_0002.HEIC', { type: 'image/heic' })
+  const pdf = () => new File([new Uint8Array(10)], 'invoice-2.pdf', { type: 'application/pdf' })
+  /** 40MB を超える JPEG（中身は小さく、大きさだけ偽る） */
+  const oversized = () => {
+    const f = new File([new Uint8Array(10)], 'huge.jpg', { type: 'image/jpeg' })
+    Object.defineProperty(f, 'size', { value: 41 * 1024 * 1024 })
+    return f
+  }
+
+  /** 前の請求書の画像・読み取り結果・登録候補・登録ボタンが一つも残っていないこと */
+  function expectNothingLeft() {
+    expect(container.querySelector('img[alt="請求書の原本"]')).toBeNull()
+    expect(text()).not.toContain('原本の金額')
+    expect(text()).not.toContain('架空設備テスト')
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull()
+    expect(hasButton('原価台帳に登録')).toBe(false)
+    expect(hasButton('請求書を読み取る')).toBe(false)
+  }
+
+  const cases: Array<[string, () => File, string]> = [
+    ['HEIC', heic, 'HEIC 形式の写真には対応していません'],
+    ['PDF', pdf, 'PDF には対応していません'],
+    ['40MB 超', oversized, '画像が大きすぎます（40MB まで）'],
+  ]
+
+  for (const [name, make, message] of cases) {
+    it(`読み取り・確認済みの請求書がある状態で ${name} を選ぶ → 案内だけを出し、前の請求書を登録できない`, async () => {
+      await mount()
+      await loadInvoice()
+      expect(field<HTMLInputElement>('登録金額（税抜）').value).toBe('100000')
+      await click(checkbox())
+      expect(registerButton().disabled).toBe(false)
+
+      await pick(make())
+      expect(text()).toContain(message)
+      expectNothingLeft()
+      expect(extractCount).toBe(1)
+      expect(posted).toHaveLength(0)
+    })
+  }
+
+  it('読み取り前の画像を選んだ状態で PDF を選ぶ → 前の画像を読み取れない', async () => {
+    await mount()
+    await pick(new File([new Uint8Array([1, 2, 3])], 'invoice-1.png', { type: 'image/png' }))
+    expect(hasButton('請求書を読み取る')).toBe(true)
+    await pick(pdf())
+    expect(text()).toContain('PDF には対応していません')
+    expectNothingLeft()
+    expect(extractCount).toBe(0)
+  })
+
+  it('読み取り中に HEIC を選ぶ → 遅れて届いた前の請求書の読み取り結果は表示せず、登録候補も出ない', async () => {
+    let release!: () => void
+    nextExtractResponse = () => new Promise<Response>(resolve => {
+      release = () => resolve(json(extraction('sha-old')))
+    })
+    await mount()
+    await pick(new File([new Uint8Array([1, 2, 3])], 'invoice-1.png', { type: 'image/png' }))
+    await click(button('請求書を読み取る'))
+    expect(extractCount).toBe(1)
+
+    await pick(heic())
+    await act(async () => { release() })
+    await flush()
+    expect(text()).toContain('HEIC 形式の写真には対応していません')
+    expectNothingLeft()
+    expect(posted).toHaveLength(0)
+  })
+
+  it('使えないファイルのあとに正しい画像を選べば、新しい請求書として読み取り・登録できる（前の確認は引き継がない）', async () => {
+    await mount()
+    await loadInvoice()
+    await click(checkbox())
+    await pick(heic())
+    await loadInvoice('invoice-3.png')
+    expect(extractCount).toBe(2)
+    expect(text()).not.toContain('HEIC 形式の写真には対応していません')
+    expect(checkbox().checked).toBe(false)
+    await click(checkbox())
+    await click(registerButton())
+    expect(posted).toHaveLength(1)
+    expect(posted[0].document_sha256).toBe('sha-2')
   })
 })

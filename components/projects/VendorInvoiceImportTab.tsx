@@ -164,16 +164,19 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
   const handleFile = useCallback((f: File) => {
     // 登録の送信中は画像を変えない（どの画像の登録か分からなくなる）
     if (attempt.busy) return
+    // 前の画像の選択・プレビュー・読み取り結果・登録候補は、新しいファイルが使えるかどうかに関係なく捨てる
+    // （使えないファイルを選んだあとに、前の請求書を読み取ったり登録したりできないようにする）
+    clearDocument()
+    setFile(null)
+    setPreview(null)
+    setZoom(1)
     // HEIC・PDF など対応していない形式は理由と対処を案内する。大きい画像は読み取り時に縮小して送る
     const check = checkInvoiceImageFile(f)
     if (!check.ok) {
       setError(check.message)
       return
     }
-    clearDocument()
     setFile(f)
-    setPreview(null)
-    setZoom(1)
     const gen = genRef.current
     const reader = new FileReader()
     reader.onload = e => { if (genRef.current === gen) setPreview(e.target?.result as string) }
