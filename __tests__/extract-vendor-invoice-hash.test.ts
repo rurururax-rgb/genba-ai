@@ -70,6 +70,7 @@ describe('extract-vendor-invoice', () => {
       subtotal_excl_tax: 100000, tax_amount: 10000, total_incl_tax: 110000, tax_treatment: 'exclusive',
       tax_breakdown: [{ rate: 10, taxable_amount: 100000, tax_amount: 10000 }],
       adjustments: [],
+      printed_tax_rates: [],
     })
     expect(json.review).toMatchObject({ suggested_excl_tax: 100000, suggested_from: 'printed_subtotal', status: 'ok' })
     expect(json.items).toEqual([{ name: '部材', amount: 100000 }])

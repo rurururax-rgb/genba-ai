@@ -34,6 +34,7 @@ const SYSTEM_PROMPT = `あなたはリフォーム会社が業者（仕入れ先
   - 合計欄（「小計」「消費税（10%）」「うち消費税 10%」「合計」など）から内訳を組み立てない。合計欄しかなければ空配列
   - 税率別の行に対象額が印字されていなければ taxable_amount は null（小計などから補わない）
   - 税率が1つでも、税率別の行・表として印字されていればその1行を書き写す
+- printed_tax_rates: 合計欄・消費税の行に**印字されている**税率の数字（例:「消費税（10%）」「うち消費税 10%」→ [10]、「8%対象」「10%対象」→ [10, 8]）。印字がなければ空配列（10% と推測しない）
 - adjustments: 小計と合計のあいだ、または合計の後に印字された増減の行（値引き・出精値引き・端数値引き・源泉所得税・調整・相殺・前受金など）を書き写す [{ "kind": 種類, "amount": 金額 }]
   - kind は "discount"（値引き）・"withholding"（源泉所得税・源泉徴収）・"other"（それ以外）のどれか
   - amount は印字された金額の絶対値（マイナス記号・▲は付けない）。読めなければ null。なければ空配列
@@ -54,6 +55,7 @@ const SYSTEM_PROMPT = `あなたはリフォーム会社が業者（仕入れ先
   "total_incl_tax": null,
   "tax_treatment": "unknown",
   "tax_breakdown": [],
+  "printed_tax_rates": [],
   "adjustments": [],
   "items": [{ "name": "品名", "amount": null }],
   "items_total": null,
