@@ -8,6 +8,7 @@ import { parseNumericInput, resolveNumericCommit } from '@/lib/input/numeric-inp
 import { jsonInit, writeRequest } from '@/lib/api/write-request'
 import { createRegisterAttempt, postInvoice, type RegisterAttempt } from '@/lib/cost-ledger/invoice-client'
 import { actualCostLockState, staleInvoiceCaches } from '@/lib/cost-ledger/invoice-lock-state'
+import { syncResultMessage, type SyncResult } from '@/lib/cost-ledger/sync-message'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -28,6 +29,8 @@ type CostItem = {
   /** 業者請求書の件数（一覧 API が DB から数えた値）。1件以上なら実績原価は請求書の合計で、直接編集できない。
    *  null / 未設定 = 不明（実績原価は編集させない） */
   invoice_count?: number | null
+  /** 見積から削除された見積行を指す項目（請求・実績・予算があるため見積同期で残した。KI-005） */
+  estimate_removed?: boolean
 }
 
 type Invoice = {
@@ -690,17 +693,12 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
     if (!confirm('見積エディタの最新内容を原価台帳に反映します。\n※ 実行予算・実績・注意点の入力済み値は変更されません。')) return
     setSyncing(true)
     try {
-      const result = await writeRequest<{ added: number; updated: number; removed: number }>(
+      const result = await writeRequest<SyncResult>(
         '/api/cost-ledger/sync', jsonInit('POST', { project_id: projectId }), '同期に失敗しました',
       )
       if (result.ok && result.data) {
         await load()
-        const { added, updated, removed } = result.data
-        const parts = []
-        if (added)   parts.push(`追加 ${added}件`)
-        if (updated) parts.push(`更新 ${updated}件`)
-        if (removed) parts.push(`削除 ${removed}件`)
-        alert(parts.length ? `同期完了：${parts.join('・')}` : '差分なし（変更はありませんでした）')
+        alert(syncResultMessage(result.data))
       } else {
         alert(result.ok ? '同期に失敗しました' : result.message)
         void load()  // 途中まで反映された可能性があるため DB の値で再同期する
@@ -817,7 +815,16 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
         actual_cost_total: prev.actual_cost_total - (old.actual_cost ?? 0),
       } : prev)
     }
-    const result = await writeRequest(`/api/cost-ledger/${id}`, jsonInit('DELETE'), '削除に失敗しました')
+    let result = await writeRequest(`/api/cost-ledger/${id}`, jsonInit('DELETE'), '削除に失敗しました')
+    // 実績原価・予算が入った行は、合計から外れることを確認してから削除する（請求書がある行は削除できない）
+    if (!result.ok && result.code === 'needs_confirm' && confirm(`${result.message}\n削除してよろしいですか？`)) {
+      result = await writeRequest(`/api/cost-ledger/${id}?confirm=values`, jsonInit('DELETE'), '削除に失敗しました')
+    } else if (!result.ok && result.code === 'needs_confirm') {
+      setItems(prevItems)
+      setSummary(prevSummary)
+      setChecked(prevChecked)
+      return
+    }
     if (!result.ok) {
       // 削除できていない行を画面から消したままにしない
       setItems(prevItems)
@@ -1183,6 +1190,11 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                                 background: item.source === 'from_estimate' ? C.accent : C.textMuted,
                               }} />
                               <span style={{ color: C.text, fontWeight: 500 }}>{item.name}</span>
+                              {item.estimate_removed && (
+                                <span style={st.removedBadge} title="見積からは削除されましたが、請求・実績・予算があるため原価台帳に残しています">
+                                  見積から削除済み
+                                </span>
+                              )}
                             </div>
                           )}
                         </td>
@@ -2389,6 +2401,10 @@ const st: Record<string, React.CSSProperties> = {
   },
   tdNum: { textAlign: 'right', fontVariantNumeric: 'tabular-nums' } as React.CSSProperties,
   nameCell: { display: 'flex', alignItems: 'center', gap: 7, cursor: 'text', minHeight: 26 },
+  removedBadge: {
+    fontSize: 10, fontWeight: 600, color: '#9A3412', background: '#FFF7ED', border: '1px solid #FED7AA',
+    borderRadius: 4, padding: '1px 6px', whiteSpace: 'nowrap',
+  },
   dot: { display: 'inline-block', width: 6, height: 6, borderRadius: '50%', flexShrink: 0 },
   editCell: { display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 4, cursor: 'text', minHeight: 26, borderRadius: 4 },
   pen: { fontSize: 10, color: C.border, flexShrink: 0 },

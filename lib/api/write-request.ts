@@ -13,7 +13,7 @@
 
 export type WriteResult<T> =
   | { ok: true; data: T }
-  | { ok: false; message: string; status: number | null }
+  | { ok: false; message: string; status: number | null; code?: string }
 
 export const NETWORK_ERROR_MESSAGE = '通信できませんでした。接続を確認して、もう一度お試しください。'
 
@@ -37,7 +37,10 @@ export async function writeRequest<T = unknown>(
     const serverMessage = body && typeof body === 'object' && typeof (body as { error?: unknown }).error === 'string'
       ? (body as { error: string }).error
       : null
-    return { ok: false, message: serverMessage ?? `${fallbackMessage}（${res.status}）`, status: res.status }
+    const code = body && typeof body === 'object' && typeof (body as { code?: unknown }).code === 'string'
+      ? (body as { code: string }).code
+      : undefined
+    return { ok: false, message: serverMessage ?? `${fallbackMessage}（${res.status}）`, status: res.status, ...(code ? { code } : {}) }
   }
   return { ok: true, data: body as T }
 }
