@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
 import { calculateSellingPrice, DEFAULT_MARKUP_RATE } from '@/lib/estimate/pricing'
-import { isActiveProject, isActiveGroupInProject } from '@/lib/estimate/ownership'
+import { isActiveProject, isActiveGroupInProject, isSortOrder } from '@/lib/estimate/ownership'
 
 type ImportItem = {
   name: string
@@ -23,6 +23,32 @@ type RequestBody = {
   items: ImportItem[]
 }
 
+/** 1 回で取り込める行数の上限（見積書 10 枚 × 明細 150 行を超えない） */
+const MAX_IMPORT_ITEMS = 1500
+
+const isNumOrNull = (v: unknown) => v == null || (typeof v === 'number' && Number.isFinite(v))
+const isStrOrNull = (v: unknown) => v == null || typeof v === 'string'
+
+/**
+ * 取り込む行の形を確かめる。数値の欄に文字列・NaN・Infinity が入ると、DB で失敗するか
+ * 売価の計算（cost_price × 掛け率）が壊れるため、保存前に断る。問題なければ null
+ */
+function validateImportItems(items: unknown[]): string | null {
+  if (items.length > MAX_IMPORT_ITEMS) return `一度に取り込めるのは ${MAX_IMPORT_ITEMS} 行までです`
+  for (const raw of items) {
+    const it = (raw && typeof raw === 'object' ? raw : null) as Record<string, unknown> | null
+    if (!it || typeof it.name !== 'string' || it.name.trim() === '') return '品名のない行は取り込めません'
+    if (!isNumOrNull(it.quantity) || !isNumOrNull(it.cost_price) || !isNumOrNull(it.selling_price)) {
+      return '数量・単価は数値で入力してください'
+    }
+    if ((it.cost_price as number | null) != null && (it.cost_price as number) < 0) return '原価の単価にマイナスは取り込めません'
+    if (!isStrOrNull(it.unit) || !isStrOrNull(it.internal_memo) || !isStrOrNull(it.memo) || !isStrOrNull(it.vendor_name)) {
+      return '取り込む行の形式が正しくありません'
+    }
+  }
+  return null
+}
+
 // POST /api/estimate-items/import
 // 仕入れ見積書からインポートした項目を estimate_items に追加する。
 // line_event_id 不要・source='import'。
@@ -34,8 +60,13 @@ export async function POST(request: NextRequest) {
     const body = (await request.json()) as RequestBody
     const { project_id, group_id, sort_order: requestedSortOrder, items } = body
 
-    if (!project_id || !items?.length) {
+    if (!project_id || !Array.isArray(items) || !items.length) {
       return NextResponse.json({ error: 'Missing required fields' }, { status: 400 })
+    }
+    const invalid = validateImportItems(items)
+    if (invalid) return NextResponse.json({ error: invalid }, { status: 400 })
+    if (requestedSortOrder !== undefined && !isSortOrder(requestedSortOrder)) {
+      return NextResponse.json({ error: '挿入位置が正しくありません' }, { status: 400 })
     }
 
     const supabase = await getServerClient()
@@ -107,7 +138,7 @@ export async function POST(request: NextRequest) {
         project_id,
         company_id,
         group_id:           group_id ?? null,
-        name:               item.name,
+        name:               item.name.trim(),
         unit:               item.unit ?? '式',
         quantity:           item.quantity ?? 1,
         cost_price:         costPrice,

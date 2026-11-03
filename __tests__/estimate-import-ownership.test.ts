@@ -205,3 +205,43 @@ describe('見積取込: 権限外・不正な保存先は拒否し、1行も保�
     expect(imported()).toEqual([])
   })
 })
+
+describe('見積取込: 行の形が正しくなければ 400 で断り、1行も保存しない（OCR の読み取り結果の改ざん・崩れ）', () => {
+  const bad = async (items: unknown[], extra: Record<string, unknown> = {}) => {
+    const before = itemCount()
+    const r = await post({ project_id: P_A1, group_id: G_A1, items, ...extra })
+    expect(r.status).toBe(400)
+    expect(itemCount()).toBe(before)
+  }
+
+  it('単価・数量が文字列・NaN 相当（null 以外の非数値）', async () => {
+    await bad([{ ...ITEM, cost_price: '50,000' }])
+    await bad([{ ...ITEM, quantity: '1' }])
+    await bad([{ ...ITEM, selling_price: 'abc' }])
+  })
+
+  it('品名が空・空白だけ・行が null', async () => {
+    await bad([{ ...ITEM, name: '' }])
+    await bad([{ ...ITEM, name: '   ' }])
+    await bad([ITEM, null])
+  })
+
+  it('原価の単価がマイナス', async () => {
+    await bad([{ ...ITEM, cost_price: -100 }])
+  })
+
+  it('挿入位置（sort_order）が整数でない', async () => {
+    await bad([ITEM], { sort_order: 1.5 })
+    await bad([ITEM], { sort_order: 'x' })
+  })
+
+  it('一度に 1,500 行を超える', async () => {
+    await bad(Array.from({ length: 1501 }, () => ITEM))
+  })
+
+  it('単価 null（読み取れなかった行）はこれまでどおり取り込める（売価も null）', async () => {
+    const r = await post({ project_id: P_A1, group_id: G_A1, items: [{ ...ITEM, cost_price: null, quantity: null }] })
+    expect(r.status).toBe(200)
+    expect(imported()).toEqual([expect.objectContaining({ cost_price: null, selling_price: null, quantity: 1 })])
+  })
+})

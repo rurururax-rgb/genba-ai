@@ -2457,6 +2457,8 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   }
 
 
+  const importDropsInFlight = useRef<Set<string>>(new Set())
+
   async function handleDropImportItem(
     row: { name: string; quantity: number; unit: string; cost_price: number | null; vendor_name: string; memo: string; _importId?: string },
     groupId: string,
@@ -2481,19 +2483,31 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       }
     }
 
-    const res = await fetch('/api/estimate-items/import', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        project_id: projectId, group_id: groupId,
-        ...(insertSortOrder !== undefined ? { sort_order: insertSortOrder } : {}),
-        items: [{ name: row.name, quantity: row.quantity, unit: row.unit, cost_price: row.cost_price, vendor_name: row.vendor_name || null, internal_memo: row.memo || null }],
-      }),
-    })
-    if (res.ok) {
-      window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items' } }))
-      if (row._importId) {
-        window.dispatchEvent(new CustomEvent('genba:import-item-moved', { detail: { importId: row._importId } }))
+    // 同じ取り込み候補の連続ドロップで二重に追加しない（取り込みタブにも送信中を伝え、追加ボタンを止める）
+    const importId = row._importId
+    if (importId) {
+      if (importDropsInFlight.current.has(importId)) return
+      importDropsInFlight.current.add(importId)
+      window.dispatchEvent(new CustomEvent('genba:import-item-adding', { detail: { importId } }))
+    }
+    try {
+      const res = await fetch('/api/estimate-items/import', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          project_id: projectId, group_id: groupId,
+          ...(insertSortOrder !== undefined ? { sort_order: insertSortOrder } : {}),
+          items: [{ name: row.name, quantity: row.quantity, unit: row.unit, cost_price: row.cost_price, vendor_name: row.vendor_name || null, internal_memo: row.memo || null }],
+        }),
+      }).catch(() => null)
+      if (res?.ok) {
+        window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items' } }))
+        if (importId) window.dispatchEvent(new CustomEvent('genba:import-item-moved', { detail: { importId } }))
+      } else if (importId) {
+        const d = res ? await res.json().catch(() => null) as { error?: string } | null : null
+        window.dispatchEvent(new CustomEvent('genba:import-item-failed', { detail: { importId, error: d?.error ?? '見積への追加に失敗しました' } }))
       }
+    } finally {
+      if (importId) importDropsInFlight.current.delete(importId)
     }
   }
 
