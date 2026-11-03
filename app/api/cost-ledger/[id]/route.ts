@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
 import { countItemInvoices } from '@/lib/cost-ledger/actual-cost-lock'
 import { ACTUAL_COST_LOCKED_MESSAGE, mapCostLedgerDbError } from '@/lib/cost-ledger/rpc-errors'
-import { describeReasons, protectionReasons } from '@/lib/cost-ledger/ledger-protection'
+import { describeReasons, isStateToken, ledgerStateToken, protectionReasons } from '@/lib/cost-ledger/ledger-protection'
 
 type Params = { params: Promise<{ id: string }> }
 
@@ -57,10 +57,13 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   return NextResponse.json(data)
 }
 
-// DELETE /api/cost-ledger/[id]（?confirm=values で、実績原価・予算の入った行も削除する）
+// DELETE /api/cost-ledger/[id]（?confirm=<state_token> で、実績原価・予算の入った行も削除する）
 // ソフトデリート。論理削除した行は案件の実績原価・予算の合計から消えるため（KI-005）:
 //   - 業者請求書がある行は削除しない（409 has_invoices。先に請求書を削除する）
-//   - 実績原価・実行予算・完工予算が入った行は、確認（?confirm=values）がなければ削除しない（409 needs_confirm）
+//   - 実績原価・実行予算・完工予算が入った行は、確認がなければ削除しない（409 needs_confirm + state_token）。
+//     state_token は確認画面を出したときの状態（実績・予算・請求書の件数・最終更新）の識別子。
+//     OK のあとは ?confirm=<state_token> で送り、今の状態が同じときだけ削除する。違えば 409 changed（削除しない）。
+//     形式の合わない値（以前の ?confirm=values など）は確認なしと同じに扱う（needs_confirm を返し、削除しない）
 //   - 削除は「確かめたときの値のまま」の行だけを対象にする条件付き UPDATE。
 //     確かめた後に請求書の登録・値の変更があれば 0 行になり、削除しない（409 changed）
 export async function DELETE(req: NextRequest, { params }: Params) {
@@ -85,6 +88,10 @@ export async function DELETE(req: NextRequest, { params }: Params) {
   if (invoiceCount === null) return NextResponse.json({ error: '削除できませんでした。もう一度お試しください。' }, { status: 500 })
 
   const reasons = protectionReasons(item, invoiceCount)
+  const token = ledgerStateToken(item, invoiceCount)
+  const confirmed = req.nextUrl.searchParams.get('confirm')
+  // 確認画面を出した後に状態が変わった（請求書の登録・実績や予算の変更）。確認した内容と違うので削除しない
+  if (isStateToken(confirmed) && confirmed !== token) return changed()
   if (reasons.includes('invoices')) {
     return NextResponse.json({
       error: 'この項目には業者請求書が登録されているため削除できません。先に請求書を削除してください。',
@@ -92,13 +99,15 @@ export async function DELETE(req: NextRequest, { params }: Params) {
       reasons,
     }, { status: 409 })
   }
-  const confirmed = req.nextUrl.searchParams.get('confirm') === 'values'
-  if (reasons.length > 0 && !confirmed) {
-    return NextResponse.json({
-      error: `この項目には${describeReasons(reasons)}が入力されています。削除すると案件の合計から外れます。`,
-      code: 'needs_confirm',
-      reasons,
-    }, { status: 409 })
+  if (reasons.length > 0) {
+    if (!isStateToken(confirmed)) {
+      return NextResponse.json({
+        error: `この項目には${describeReasons(reasons)}が入力されています。削除すると案件の合計から外れます。`,
+        code: 'needs_confirm',
+        reasons,
+        state_token: token,
+      }, { status: 409 })
+    }
   }
 
   // 確かめたときの値のままの行だけを削除する（請求書の登録・値の変更と重なったら削除しない）
@@ -118,12 +127,14 @@ export async function DELETE(req: NextRequest, { params }: Params) {
     const mapped = mapCostLedgerDbError(error)
     return NextResponse.json(mapped.body, { status: mapped.status })
   }
-  if (!Array.isArray(deleted) || deleted.length !== 1) {
-    return NextResponse.json({
-      error: 'この項目は確認の後に変更されました。画面を読み込み直してから、もう一度お試しください。',
-      code: 'changed',
-    }, { status: 409 })
-  }
+  if (!Array.isArray(deleted) || deleted.length !== 1) return changed()
 
   return new NextResponse(null, { status: 204 })
+}
+
+function changed() {
+  return NextResponse.json({
+    error: 'この項目は確認の後に変更されました。削除していません。画面を読み込み直してから、もう一度お試しください。',
+    code: 'changed',
+  }, { status: 409 })
 }

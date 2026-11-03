@@ -46,6 +46,7 @@ const USER_B = randomUUID()
 type SyncBody = {
   added: number; updated: number; removed: number; deduplicated: number
   kept: Array<{ id: string; name: string; reasons: string[] }>
+  duplicates: Array<{ estimate_item_id: string; ids: string[] }>
   code?: string; step?: string; applied?: { added: number; updated: number; removed: number }
 }
 
@@ -110,10 +111,10 @@ async function sync(projectId: string): Promise<{ status: number; body: SyncBody
   return { status: res.status, body: await res.json() }
 }
 
-async function del(id: string, confirm = false) {
-  const res = await DELETE(new NextRequest(`http://localhost/api/cost-ledger/${id}${confirm ? '?confirm=values' : ''}`, { method: 'DELETE' }),
+async function del(id: string, confirm?: string) {
+  const res = await DELETE(new NextRequest(`http://localhost/api/cost-ledger/${id}${confirm ? `?confirm=${confirm}` : ''}`, { method: 'DELETE' }),
     { params: Promise.resolve({ id }) })
-  return { status: res.status, body: res.status === 204 ? null : await res.json() as { code?: string; reasons?: string[] } }
+  return { status: res.status, body: res.status === 204 ? null : await res.json() as { code?: string; reasons?: string[]; state_token?: string } }
 }
 
 /** 本物の接続に、特定の SQL の直前で処理を差し込む（失敗・待ち合わせ・別の接続での書き込み） */
@@ -411,7 +412,7 @@ describe('同時実行：請求書の登録と同期・削除が重なっても�
       { name: '新しい見積行A', live: 1, total: 2 },
       { name: '新しい見積行B', live: 1, total: 2 },
     ])
-    expect(r1.body.added + r2.body.added).toBe(2)
+    // 余分な行（各見積行で 1 行ずつ）は、どちらかの同期が論理削除した（どちらが消したかは実行の順による）
     expect(r1.body.deduplicated + r2.body.deduplicated).toBe(2)
   })
 })
@@ -424,25 +425,59 @@ describe('台帳項目の削除：請求書のある行は削除しない。実�
     const l = await newLedger(p, null, '請求書あり')
     const ua = await userConnection(USER_A)
     await rpcInsert(ua, l, 5000)
-    for (const confirm of [false, true]) {
+    for (const confirm of [undefined, 'values', 'a'.repeat(64)]) {
       const r = await del(l, confirm)
       expect(r.status).toBe(409)
-      expect(r.body).toMatchObject({ code: 'has_invoices' })
+      expect(r.body?.code).toBe(confirm === 'a'.repeat(64) ? 'changed' : 'has_invoices')
     }
     expect(await ledger(l)).toMatchObject({ deleted: false, actual_cost: 5000 })
     await ua.end()
   })
 
-  it('実績原価・予算がある → 409 needs_confirm。確認（?confirm=values）すれば削除できる', async () => {
+  it('実績原価・予算がある → 409 needs_confirm と状態の識別子。その識別子で確認すれば削除できる', async () => {
     const p = await newProject()
     const l = await newLedger(p, null, '予算あり', { budget_cost: 3000, actual_cost: 100 })
     const r = await del(l)
     expect(r.status).toBe(409)
     expect(r.body).toMatchObject({ code: 'needs_confirm', reasons: ['actual_cost', 'budget_cost'] })
+    expect(r.body?.state_token).toMatch(/^[0-9a-f]{64}$/)
+    // 同じ状態なら同じ識別子（確認画面を出し直しても変わらない）
+    expect((await del(l)).body?.state_token).toBe(r.body?.state_token)
     expect(await ledger(l)).toMatchObject({ deleted: false })
-    expect((await del(l, true)).status).toBe(204)
+    expect((await del(l, r.body!.state_token)).status).toBe(204)
     expect(await ledger(l)).toMatchObject({ deleted: true })
   })
+
+  it('確認なしで ?confirm=values・不正な値を直接送っても削除しない（needs_confirm を返す）', async () => {
+    const p = await newProject()
+    const l = await newLedger(p, null, '直接呼び出し', { budget_cost: 3000 })
+    for (const c of ['values', 'true', '1', 'A'.repeat(64), 'abc']) {
+      const r = await del(l, c)
+      expect(r.status).toBe(409)
+      expect(r.body?.code).toBe('needs_confirm')
+    }
+    expect(await ledger(l)).toMatchObject({ deleted: false, budget_cost: 3000 })
+  })
+
+  const betweenConfirmAndOk: Array<[string, (id: string) => Promise<unknown>, Record<string, unknown>]> = [
+    ['実行予算の変更', id => admin.query('UPDATE cost_ledger_items SET budget_cost = 3500, updated_at = now() WHERE id = $1', [id]), { budget_cost: 3500 }],
+    ['実績原価の変更（同じ値で上書き・最終更新だけ変わる）', id => admin.query('UPDATE cost_ledger_items SET actual_cost = 100, updated_at = now() WHERE id = $1', [id]), { actual_cost: 100 }],
+    ['完工予算の入力', id => admin.query('UPDATE cost_ledger_items SET completion_cost = 1, updated_at = now() WHERE id = $1', [id]), { completion_cost: 1 }],
+    ['請求書の登録', async id => { const ua = await userConnection(USER_A); await rpcInsert(ua, id, 777); await ua.end() }, { actual_cost: 777 }],
+  ]
+  for (const [name, change, expected] of betweenConfirmAndOk) {
+    it(`確認画面を出してから OK までに${name} → 409 changed（削除しない）`, async () => {
+      const p = await newProject()
+      const l = await newLedger(p, null, `確認後に${name}`, { budget_cost: 3000, actual_cost: 100 })
+      const first = await del(l)
+      expect(first.body?.code).toBe('needs_confirm')
+      await change(l)
+      const r = await del(l, first.body!.state_token)
+      expect(r.status).toBe(409)
+      expect(r.body?.code).toBe('changed')
+      expect(await ledger(l)).toMatchObject({ deleted: false, ...expected })
+    })
+  }
 
   it('値のない行はそのまま削除できる（従来どおり）。他社の行は 404', async () => {
     const p = await newProject()
@@ -467,7 +502,8 @@ describe('台帳項目の削除：請求書のある行は削除しない。実�
         await rpcInsert(ua, l, 4500)
       }
     })
-    const r = await del(l, true)
+    const token = (await del(l)).body!.state_token
+    const r = await del(l, token)
     expect(r.status).toBe(409)
     expect(r.body).toMatchObject({ code: 'changed' })
     expect(await ledger(l)).toMatchObject({ deleted: false, actual_cost: 4500, budget_cost: 1000 })
@@ -484,8 +520,187 @@ describe('台帳項目の削除：請求書のある行は削除しない。実�
         await admin.query('UPDATE cost_ledger_items SET budget_cost = 2000, updated_at = now() WHERE id = $1', [l])
       }
     })
-    const r = await del(l, true)
+    const token = (await del(l)).body!.state_token
+    const r = await del(l, token)
     expect(r.status).toBe(409)
     expect(await ledger(l)).toMatchObject({ deleted: false, budget_cost: 2000 })
+  })
+})
+
+// ── 5. 見積同期：更新件数の検証 ─────────────────────────────────
+
+describe('見積同期：既存行の更新が 0 行（読んだ後に削除された）なら、更新したことにせず 409 で知らせる', () => {
+  it('更新の直前に行が削除された → 409 sync_conflict。updated は数えず、ほかの行も壊さない。やり直しで正しい状態になる', async () => {
+    const p = await newProject()
+    const e1 = await newEstimate(p, '新しい名前1')
+    const e2 = await newEstimate(p, '新しい名前2')
+    const l1 = await newLedger(p, e1, '古い名前1')
+    const l2 = await newLedger(p, e2, '古い名前2')
+
+    let done = false
+    routeClient = hooked(await server.connect(), async sql => {
+      if (isLedgerUpdate(sql) && !done) {
+        done = true
+        // 1 件目の更新の直前に、別の画面で 1 件目（空の行）が削除された
+        await admin.query('UPDATE cost_ledger_items SET deleted_at = now() WHERE id = $1', [l1])
+      }
+    })
+    const r = await sync(p)
+    expect(r.status).toBe(409)
+    expect(r.body).toMatchObject({ code: 'sync_conflict', step: 'update', applied: { updated: 0 } })
+    expect(await ledger(l1)).toMatchObject({ deleted: true, name: '古い名前1' })
+    expect(await ledger(l2)).toMatchObject({ deleted: false })
+
+    // やり直し: 削除された見積行の台帳項目は追加し直し（見積には残っているため）、2 件目は更新される
+    routeClient = await server.connect()
+    const again = await sync(p)
+    expect(again.status).toBe(200)
+    expect(again.body).toMatchObject({ added: 1, updated: 1 })
+    expect(await ledger(l2)).toMatchObject({ name: '新しい名前2' })
+  })
+
+  it('更新に差分がなければ updated は 0（何度同期しても数が増えない）', async () => {
+    const p = await newProject()
+    const e = await newEstimate(p, '同じ名前')
+    await newLedger(p, e, '同じ名前')
+    for (let i = 0; i < 2; i++) expect((await sync(p)).body).toMatchObject({ added: 0, updated: 0 })
+  })
+})
+
+// ── 6. 同時同期による重複：すべての競合の順序で 1 行に揃い、保護対象は消さない ────────────
+
+/** その接続で「台帳項目の INSERT のトランザクションを確定（COMMIT）する直前」に待つ。待ちに入ったら arrived が解決する */
+function holdInsertCommit(real: Client) {
+  let last = ''
+  let held = false
+  let release!: () => void
+  let arrivedResolve!: () => void
+  const released = new Promise<void>(r => { release = r })
+  const arrived = new Promise<void>(r => { arrivedResolve = r })
+  const client = hooked(real, async sql => {
+    if (sql === 'COMMIT' && isLedgerInsert(last) && !held) {
+      held = true
+      arrivedResolve()
+      await released
+    }
+    if (sql !== 'COMMIT' && sql !== 'BEGIN' && !sql.startsWith('SELECT set_config') && !sql.startsWith('SET LOCAL')) last = sql
+  })
+  return { client, release, arrived }
+}
+
+async function liveRows(projectId: string) {
+  return (await admin.query(
+    `SELECT l.id, e.name, l.budget_cost::float8 AS budget_cost, l.deleted_at IS NOT NULL AS deleted
+     FROM cost_ledger_items l JOIN estimate_items e ON e.id = l.estimate_item_id
+     WHERE l.project_id = $1 ORDER BY l.created_at, l.id`, [projectId])).rows as Array<{ id: string; name: string; budget_cost: number | null; deleted: boolean }>
+}
+
+describe('同時同期：作成時刻と確定の順が違っても、片方が重複を確かめ終えた後にもう片方が確定しても 1 行に揃う', () => {
+  it('先に作った同期 S1 の確定が遅れ、後から来た S2 が先に全部終える → S1 が後で確かめ、S2 の空の行を論理削除して 1 行に揃う', async () => {
+    const p = await newProject()
+    await newEstimate(p, '競合する見積行')
+
+    const s1conn = holdInsertCommit(await server.connect())
+    routeClient = s1conn.client
+    const s1 = sync(p)
+    await s1conn.arrived // S1: INSERT 済み・未確定（作成時刻は S1 のほうが古い）
+
+    routeClient = await server.connect()
+    const s2 = await sync(p) // S2: S1 の行が見えないので追加し、重複を確かめ終える（自分の行だけ見える）
+    expect(s2.body).toMatchObject({ added: 1, deduplicated: 0 })
+    expect((await liveRows(p)).filter(r => !r.deleted)).toHaveLength(1)
+
+    s1conn.release() // S1 が確定 → S1 の重複確認は両方を見る
+    const r1 = await s1
+    expect(r1.status).toBe(200)
+    expect(r1.body).toMatchObject({ added: 1, deduplicated: 1, duplicates: [] })
+
+    const rows = await liveRows(p)
+    expect(rows).toHaveLength(2)
+    // 残ったのは作成時刻の古い S1 の行。S2 の行は空なので論理削除された
+    expect(rows.map(r => r.deleted)).toEqual([false, true])
+  })
+
+  it('同じ順序で、S1 の確定前に S2 の行へ実行予算が入力された → 保護対象の S2 の行を残し、S1 は自分の空の行を論理削除する', async () => {
+    const p = await newProject()
+    await newEstimate(p, '保護される競合')
+
+    const s1conn = holdInsertCommit(await server.connect())
+    routeClient = s1conn.client
+    const s1 = sync(p)
+    await s1conn.arrived
+
+    routeClient = await server.connect()
+    await sync(p)
+    const s2Row = (await liveRows(p)).find(r => !r.deleted)!
+    await admin.query('UPDATE cost_ledger_items SET budget_cost = 8800 WHERE id = $1', [s2Row.id])
+
+    s1conn.release()
+    const r1 = await s1
+    expect(r1.body).toMatchObject({ added: 0, deduplicated: 1, duplicates: [] })
+
+    const rows = await liveRows(p)
+    expect(rows.filter(r => !r.deleted)).toEqual([{ id: s2Row.id, name: '保護される競合', budget_cost: 8800, deleted: false }])
+  })
+
+  it('以前から残っていた重複は次の同期で揃える。空の行は消し、保護対象どうしは消さずに duplicates として知らせ、両方を見積に合わせて更新する', async () => {
+    const p = await newProject()
+    const eEmpty = await newEstimate(p, '空どうし')
+    const eMixed = await newEstimate(p, '空と保護')
+    const eBoth = await newEstimate(p, '保護どうし')
+    const emptyOld = await newLedger(p, eEmpty, '古い名前')
+    const emptyNew = await newLedger(p, eEmpty, '古い名前')
+    const mixedEmptyOld = await newLedger(p, eMixed, '古い名前')
+    const mixedProtected = await newLedger(p, eMixed, '古い名前', { budget_cost: 100 })
+    const bothA = await newLedger(p, eBoth, '古い名前', { budget_cost: 1 })
+    const bothB = await newLedger(p, eBoth, '古い名前', { actual_cost: 2 })
+
+    const r = await sync(p)
+    expect(r.status).toBe(200)
+    expect(r.body.deduplicated).toBe(2)
+    expect(r.body.duplicates).toEqual([{ estimate_item_id: eBoth, ids: expect.arrayContaining([bothA, bothB]) }])
+
+    expect(await ledger(emptyOld)).toMatchObject({ deleted: false, name: '空どうし' })
+    expect(await ledger(emptyNew)).toMatchObject({ deleted: true })
+    // 古いほうが空でも、保護対象を残す
+    expect(await ledger(mixedProtected)).toMatchObject({ deleted: false, budget_cost: 100, name: '空と保護' })
+    expect(await ledger(mixedEmptyOld)).toMatchObject({ deleted: true })
+    // 保護対象どうしは消さない。どちらも見積の内容に合わせる
+    expect(await ledger(bothA)).toMatchObject({ deleted: false, budget_cost: 1, name: '保護どうし' })
+    expect(await ledger(bothB)).toMatchObject({ deleted: false, actual_cost: 2, name: '保護どうし' })
+
+    // 次の同期: 揃えた分はそのまま。保護対象どうしは引き続き知らせる
+    const again = await sync(p)
+    expect(again.body).toMatchObject({ added: 0, updated: 0, deduplicated: 0 })
+    expect(again.body.duplicates).toHaveLength(1)
+  })
+
+  it('3 つの同期が同時に同じ見積行を追加しても 1 行に揃う', async () => {
+    const p = await newProject()
+    await newEstimate(p, '三者の競合')
+    let arrived = 0
+    let release!: () => void
+    const barrier = new Promise<void>(r => { release = r })
+    const gate = () => {
+      let first = true
+      return async (sql: string) => {
+        if (isLedgerInsert(sql) && first) {
+          first = false
+          if (++arrived === 3) release()
+          await barrier
+        }
+      }
+    }
+    const runs: Array<Promise<{ status: number; body: SyncBody }>> = []
+    for (let i = 0; i < 3; i++) {
+      routeClient = hooked(await server.connect(), gate())
+      runs.push(sync(p))
+    }
+    const results = await Promise.all(runs)
+    expect(results.map(r => r.status)).toEqual([200, 200, 200])
+    const rows = await liveRows(p)
+    expect(rows).toHaveLength(3)
+    expect(rows.filter(r => !r.deleted)).toHaveLength(1)
+    expect(results.reduce((s, r) => s + r.body.deduplicated, 0)).toBe(2)
   })
 })

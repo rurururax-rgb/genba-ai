@@ -36,6 +36,12 @@ describe('syncResultMessage', () => {
     expect(msg).toContain('「見積から削除済み」')
   })
 
+  it('保護対象どうしの重複は、自動で消さなかったことと確認のお願いを知らせる', () => {
+    const msg = syncResultMessage({ added: 0, updated: 0, removed: 0, duplicates: [{ estimate_item_id: 'e', ids: ['a', 'b'] }] })
+    expect(msg).toContain('1組 重複しています')
+    expect(msg).toContain('自動では削除していません')
+  })
+
   it('残した項目がなければ従来どおり。11 件以上は「ほか N件」', () => {
     expect(syncResultMessage({ added: 0, updated: 0, removed: 0 })).toBe('差分なし（変更はありませんでした）')
     const kept = Array.from({ length: 12 }, (_, i) => ({ id: `${i}`, name: `項目${i}`, reasons: ['budget_cost' as const] }))
@@ -46,7 +52,10 @@ describe('syncResultMessage', () => {
 describe('writeRequest：サーバーのエラーコードを返す', () => {
   it('409 の code（needs_confirm）を呼び出し側に渡す。code が無ければ付けない', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: '確認してください', code: 'needs_confirm' }), { status: 409 })))
-    expect(await writeRequest('/x', { method: 'DELETE' }, '失敗')).toEqual({ ok: false, message: '確認してください', status: 409, code: 'needs_confirm' })
+    expect(await writeRequest('/x', { method: 'DELETE' }, '失敗')).toEqual({
+      ok: false, message: '確認してください', status: 409, code: 'needs_confirm',
+      body: { error: '確認してください', code: 'needs_confirm' },
+    })
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: 'だめ' }), { status: 500 })))
     expect(await writeRequest('/x', { method: 'DELETE' }, '失敗')).toEqual({ ok: false, message: 'だめ', status: 500 })
   })

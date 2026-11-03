@@ -12,34 +12,25 @@
  *   のどちらかになり、「請求書があるのに論理削除された項目」はできない。
  */
 
+import { createHash } from 'node:crypto'
 import type { SupabaseClient } from '@supabase/supabase-js'
+import type { LedgerValues } from './protection-reasons'
 
-export type ProtectionReason = 'invoices' | 'actual_cost' | 'budget_cost' | 'completion_cost'
+export { PROTECTION_LABEL, describeReasons, protectionReasons } from './protection-reasons'
+export type { LedgerValues, ProtectionReason } from './protection-reasons'
 
-export type LedgerValues = {
-  actual_cost: number | null
-  budget_cost: number | null
-  completion_cost: number | null
+/**
+ * 削除の確認に使う、台帳項目の状態の識別子（DELETE /api/cost-ledger/[id]）。
+ * 確認画面を出したときの状態（実績原価・予算・請求書の件数・最終更新）と、OK を押したあとの状態が同じかを比べる。
+ * 秘密ではない（同じ状態なら誰が計算しても同じ値）。状態が変わっていれば値が変わる
+ */
+export function ledgerStateToken(item: LedgerValues & { updated_at: string | null }, invoiceCount: number): string {
+  const state = [item.actual_cost, item.budget_cost, item.completion_cost, item.updated_at, invoiceCount]
+  return createHash('sha256').update(JSON.stringify(state)).digest('hex')
 }
 
-export const PROTECTION_LABEL: Record<ProtectionReason, string> = {
-  invoices:        '業者請求書',
-  actual_cost:     '実績原価',
-  budget_cost:     '実行予算',
-  completion_cost: '完工予算',
-}
+export const isStateToken = (v: string | null): v is string => v != null && /^[0-9a-f]{64}$/.test(v)
 
-/** 論理削除すると合計から消えてしまうもの。空なら守る必要がない */
-export function protectionReasons(item: LedgerValues, invoiceCount: number): ProtectionReason[] {
-  const reasons: ProtectionReason[] = []
-  if (invoiceCount > 0) reasons.push('invoices')
-  if (item.actual_cost != null) reasons.push('actual_cost')
-  if (item.budget_cost != null) reasons.push('budget_cost')
-  if (item.completion_cost != null) reasons.push('completion_cost')
-  return reasons
-}
-
-export const describeReasons = (reasons: ProtectionReason[]) => reasons.map(r => PROTECTION_LABEL[r]).join('・')
 
 const INVOICE_COUNT_CHUNK = 100
 // 1回に読む請求書の行数。PostgREST の max-rows（Supabase の既定は 1000）がこれより小さくても、

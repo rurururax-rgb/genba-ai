@@ -817,8 +817,12 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
     }
     let result = await writeRequest(`/api/cost-ledger/${id}`, jsonInit('DELETE'), '削除に失敗しました')
     // 実績原価・予算が入った行は、合計から外れることを確認してから削除する（請求書がある行は削除できない）
-    if (!result.ok && result.code === 'needs_confirm' && confirm(`${result.message}\n削除してよろしいですか？`)) {
-      result = await writeRequest(`/api/cost-ledger/${id}?confirm=values`, jsonInit('DELETE'), '削除に失敗しました')
+    // 確認画面を出したときの状態（state_token）を送り、OK を押すまでに変わっていたら削除しない（409 changed）
+    const stateToken = !result.ok && result.code === 'needs_confirm'
+      ? (result.body as { state_token?: unknown } | undefined)?.state_token
+      : undefined
+    if (typeof stateToken === 'string' && confirm(`${result.ok ? '' : result.message}\n削除してよろしいですか？`)) {
+      result = await writeRequest(`/api/cost-ledger/${id}?confirm=${encodeURIComponent(stateToken)}`, jsonInit('DELETE'), '削除に失敗しました')
     } else if (!result.ok && result.code === 'needs_confirm') {
       setItems(prevItems)
       setSummary(prevSummary)

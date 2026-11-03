@@ -1,4 +1,4 @@
-import { describeReasons, type ProtectionReason } from './ledger-protection'
+import { describeReasons, type ProtectionReason } from './protection-reasons'
 
 /** POST /api/cost-ledger/sync の応答 */
 export type SyncResult = {
@@ -8,6 +8,8 @@ export type SyncResult = {
   /** 見積から削除されたが、請求・実績・予算があるため残した項目（reasons が空 = 確かめた直後に値が入った） */
   kept?: Array<{ id: string; name: string; reasons: ProtectionReason[] }>
   deduplicated?: number
+  /** 同じ見積行を指す、請求・実績・予算のある台帳項目が複数ある（自動では揃えない。人が確認する） */
+  duplicates?: Array<{ estimate_item_id: string; ids: string[] }>
 }
 
 /** 同期の結果を、現場の人に分かる文で返す */
@@ -26,6 +28,11 @@ export function syncResultMessage(r: SyncResult): string {
     }
     if (kept.length > 10) lines.push(`・ほか ${kept.length - 10}件`)
     lines.push('一覧では「見積から削除済み」と表示されます。不要なら請求書を削除してから、行を削除してください。')
+  }
+  const duplicates = r.duplicates ?? []
+  if (duplicates.length > 0) {
+    lines.push('')
+    lines.push(`同じ見積項目に対応する原価台帳の行が ${duplicates.length}組 重複しています。どれにも請求・実績・予算があるため、自動では削除していません。内容を確認して、不要な行を整理してください。`)
   }
   return lines.join('\n')
 }
