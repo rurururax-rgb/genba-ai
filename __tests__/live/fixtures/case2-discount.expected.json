@@ -1,0 +1,91 @@
+{
+  "id": "case2-discount",
+  "supplier": "架空設備工業",
+  "subtotal": 367000,
+  "adjustments": [
+    {
+      "label": "出精値引",
+      "amount": 17000
+    }
+  ],
+  "excludedNames": [],
+  "rows": [
+    {
+      "name": "既存浴室解体撤去",
+      "unit": "式",
+      "quantity": 1,
+      "list_price": null,
+      "rate": null,
+      "unit_price": 85000,
+      "amount": 85000,
+      "cost_price": 85000,
+      "review": false
+    },
+    {
+      "name": "産業廃棄物処分費",
+      "unit": "式",
+      "quantity": 1,
+      "list_price": null,
+      "rate": null,
+      "unit_price": 42000,
+      "amount": 42000,
+      "cost_price": 42000,
+      "review": false
+    },
+    {
+      "name": "給排水配管工事",
+      "unit": "式",
+      "quantity": 1,
+      "list_price": null,
+      "rate": null,
+      "unit_price": 68000,
+      "amount": 68000,
+      "cost_price": 68000,
+      "review": false
+    },
+    {
+      "name": "電気配線工事",
+      "unit": "式",
+      "quantity": 1,
+      "list_price": null,
+      "rate": null,
+      "unit_price": 36000,
+      "amount": 36000,
+      "cost_price": 36000,
+      "review": false
+    },
+    {
+      "name": "ユニットバス組立工事",
+      "unit": "式",
+      "quantity": 1,
+      "list_price": null,
+      "rate": null,
+      "unit_price": 95000,
+      "amount": 95000,
+      "cost_price": 95000,
+      "review": false
+    },
+    {
+      "name": "ドア枠補修",
+      "unit": "箇所",
+      "quantity": 2,
+      "list_price": null,
+      "rate": null,
+      "unit_price": 14500,
+      "amount": 29000,
+      "cost_price": 14500,
+      "review": false
+    },
+    {
+      "name": "養生費",
+      "unit": "式",
+      "quantity": 1,
+      "list_price": null,
+      "rate": null,
+      "unit_price": 12000,
+      "amount": 12000,
+      "cost_price": 12000,
+      "review": false
+    }
+  ]
+}

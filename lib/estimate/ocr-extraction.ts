@@ -17,6 +17,9 @@ export type OcrMessage = { level: 'info' | 'warn'; text: string }
 
 export type AdjustmentRow = { label: string; amount: number | null }
 
+/** 明細に入れなかった行（「別途」「含む」「0 円」）。別途は原価に入っていないので必ず知らせる */
+export type ExcludedRow = { name: string; reason: '別途' | '含む' | '0円' | 'その他' }
+
 /** 読み取った明細 1 行（金額は原本に印字された値。読めなければ null） */
 export type EstimateOcrItem = {
   name: string
@@ -46,6 +49,8 @@ export type EstimateOcrFile = {
   subtotal: number | null
   /** 明細外の増減（値引き・調整など）。見積の原価には自動で入れない */
   adjustments: AdjustmentRow[]
+  /** 明細に入れなかった行 */
+  excluded: ExcludedRow[]
   /** 原本の明細行の数（AI が数えたもの）。数えられなければ null */
   items_total: number | null
   /** 単価が税込と明記されているか */
@@ -132,14 +137,25 @@ export function reviewEstimateItem(item: Pick<EstimateOcrItem, 'quantity' | 'cos
 export const needsReview = (messages: OcrMessage[]) => messages.some(m => m.level === 'warn')
 
 /** 画像全体の照合（明細の金額合計と小計、増減の行、明細の数） */
-export function reviewEstimateFile(f: Pick<EstimateOcrFile, 'items' | 'subtotal' | 'adjustments' | 'items_total' | 'prices_include_tax'>, aiWarnings: string[] = [], droppedItems = 0): OcrMessage[] {
+export function reviewEstimateFile(f: Pick<EstimateOcrFile, 'items' | 'subtotal' | 'adjustments' | 'items_total' | 'prices_include_tax'> & { excluded?: ExcludedRow[] }, aiWarnings: string[] = [], droppedItems = 0): OcrMessage[] {
   const messages: OcrMessage[] = []
   const warn = (text: string) => messages.push({ level: 'warn', text })
+  const info = (text: string) => messages.push({ level: 'info', text })
 
   if (f.prices_include_tax) warn('単価が税込と書かれています。原価は税抜で登録するため、原本で確認してください')
 
   for (const a of f.adjustments) {
     warn(`原本に「${a.label || '値引き・調整'}」${a.amount != null ? ` ${yen(a.amount)}` : ''} があります。見積の原価には反映していません。必要なら見積エディタで調整してください`)
+  }
+
+  // 金額・定価の列がなければ、単価の読み違いを照合で見つけられない（AI の注意書きに頼らず必ず知らせる）
+  if (f.items.length > 0 && f.items.every(i => i.amount == null && i.list_price == null)) {
+    warn('この見積書には金額・定価の列がないため、単価の読み違いを照合で見つけられません。単価を原本と 1 行ずつ照らしてください')
+  }
+
+  for (const e of f.excluded ?? []) {
+    if (e.reason === '別途') warn(`「${e.name}」は原本で「別途」となっており、明細に入れていません。この見積の原価に含まれていないため、別の手配・見積が必要か確認してください`)
+    else info(`「${e.name}」は原本で「${e.reason === 'その他' ? '金額なし' : e.reason}」のため、明細に入れていません`)
   }
 
   if (f.subtotal != null && f.items.length > 0 && f.items.every(i => i.amount != null)) {
@@ -151,8 +167,9 @@ export function reviewEstimateFile(f: Pick<EstimateOcrFile, 'items' | 'subtotal'
 
   if (droppedItems > 0) {
     warn(`明細が多いため、最初の ${MAX_ITEMS_PER_FILE} 行だけを取り込みました（残り ${droppedItems} 行）。画像を分けて読み取ってください`)
-  } else if (f.items_total != null && f.items_total > f.items.length) {
-    warn(`原本の明細は ${f.items_total} 行ありますが、${f.items.length} 行しか読み取れませんでした。残りは原本で確認してください`)
+  } else if (f.items_total != null && f.items_total > f.items.length + (f.excluded?.length ?? 0)) {
+    // 「別途」「含む」「0 円」で明細に入れなかった行は読み落としではない
+    warn(`原本の明細は ${f.items_total} 行ありますが、${f.items.length} 行しか読み取れませんでした${f.excluded?.length ? `（別途・含む等で除いた ${f.excluded.length} 行を除く）` : ''}。残りは原本で確認してください`)
   }
 
   for (const w of aiWarnings) warn(`AI の注意書き: ${w}`)
@@ -201,6 +218,13 @@ export function normalizeEstimateExtraction(raw: unknown, fileName: string): Est
     return { label: str(row.label, 50), amount: toOcrNumber(row.amount) }
   }).filter(a => a.label || a.amount != null)
 
+  const REASONS: ExcludedRow['reason'][] = ['別途', '含む', '0円', 'その他']
+  const excluded: ExcludedRow[] = (Array.isArray(r.excluded_rows) ? r.excluded_rows : []).slice(0, 20).map(x => {
+    const row = (x && typeof x === 'object' ? x : {}) as Record<string, unknown>
+    const reason = str(row.reason, 10).replace(/^0\s*円$/, '0円')
+    return { name: str(row.name, 100), reason: REASONS.includes(reason as ExcludedRow['reason']) ? reason as ExcludedRow['reason'] : 'その他' }
+  }).filter(x => x.name)
+
   const itemsTotal = toOcrNumber(r.items_total)
   const aiWarnings = [
     ...(Array.isArray(r.warnings) ? r.warnings : []),
@@ -214,6 +238,7 @@ export function normalizeEstimateExtraction(raw: unknown, fileName: string): Est
     items: kept,
     subtotal: toOcrNumber(r.subtotal),
     adjustments,
+    excluded,
     items_total: itemsTotal != null && Number.isInteger(itemsTotal) ? itemsTotal : null,
     prices_include_tax: r.prices_include_tax === true,
   }

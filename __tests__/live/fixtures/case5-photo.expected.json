@@ -1,0 +1,119 @@
+{
+  "id": "case5-photo",
+  "supplier": "架空住設株式会社",
+  "subtotal": 1130530,
+  "adjustments": [],
+  "excludedNames": [],
+  "rows": [
+    {
+      "name": "システムバス 架空 SB-1616 本体",
+      "unit": "台",
+      "quantity": 1,
+      "list_price": 980000,
+      "rate": 0.55,
+      "unit_price": 539000,
+      "amount": 539000,
+      "cost_price": 539000,
+      "review": false
+    },
+    {
+      "name": "浴室換気乾燥機 KV-200",
+      "unit": "台",
+      "quantity": 1,
+      "list_price": 128000,
+      "rate": 0.6,
+      "unit_price": 76800,
+      "amount": 76800,
+      "cost_price": 76800,
+      "review": false
+    },
+    {
+      "name": "洗面化粧台 W750 LX-750",
+      "unit": "台",
+      "quantity": 1,
+      "list_price": 186000,
+      "rate": 0.58,
+      "unit_price": 107880,
+      "amount": 107880,
+      "cost_price": 107880,
+      "review": false
+    },
+    {
+      "name": "混合水栓 TS-10",
+      "unit": "個",
+      "quantity": 2,
+      "list_price": 42000,
+      "rate": 0.6,
+      "unit_price": 25200,
+      "amount": 50400,
+      "cost_price": 25200,
+      "review": false
+    },
+    {
+      "name": "クッションフロア CF-180",
+      "unit": "㎡",
+      "quantity": 12.5,
+      "list_price": 3800,
+      "rate": 0.5,
+      "unit_price": 1900,
+      "amount": 23750,
+      "cost_price": 1900,
+      "review": false
+    },
+    {
+      "name": "ビニルクロス 量産品 VC-01",
+      "unit": "㎡",
+      "quantity": 48,
+      "list_price": 1200,
+      "rate": 0.55,
+      "unit_price": 660,
+      "amount": 31680,
+      "cost_price": 660,
+      "review": false
+    },
+    {
+      "name": "温水洗浄便座 架空 WB-3",
+      "unit": "台",
+      "quantity": 1,
+      "list_price": 89000,
+      "rate": 0.62,
+      "unit_price": 55180,
+      "amount": 55180,
+      "cost_price": 55180,
+      "review": false
+    },
+    {
+      "name": "タイル目地材 GM-5",
+      "unit": "袋",
+      "quantity": 6,
+      "list_price": 2400,
+      "rate": 0.7,
+      "unit_price": 1680,
+      "amount": 10080,
+      "cost_price": 1680,
+      "review": false
+    },
+    {
+      "name": "給湯器 24号 GT-2460",
+      "unit": "台",
+      "quantity": 1,
+      "list_price": 412000,
+      "rate": 0.48,
+      "unit_price": 197760,
+      "amount": 197760,
+      "cost_price": 197760,
+      "review": false
+    },
+    {
+      "name": "配管部材 一式",
+      "unit": "式",
+      "quantity": 1,
+      "list_price": null,
+      "rate": null,
+      "unit_price": 38000,
+      "amount": 38000,
+      "cost_price": 38000,
+      "review": false
+    }
+  ]
+}

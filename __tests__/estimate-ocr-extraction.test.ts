@@ -141,3 +141,43 @@ describe('画像全体の照合', () => {
     expect(t).toContain('旧形式')
   })
 })
+
+describe('照合できない見積書・明細に入れなかった行（実 AI 検証で見つけた点）', () => {
+  it('金額・定価の列がない見積書は、単価を照合できないことを必ず警告する（AI の注意書きに頼らない）', () => {
+    const f = normalizeEstimateExtraction({ items: [{ name: 'A', quantity: 18, cost_price: 4850 }, { name: 'B', quantity: 1, cost_price: 25000 }] }, 'a')
+    expect(f.messages).toContainEqual(expect.objectContaining({ level: 'warn', text: expect.stringContaining('照合で見つけられません') }))
+  })
+
+  it('金額の列があれば、その警告は出さない', () => {
+    const f = normalizeEstimateExtraction({ items: [{ name: 'A', quantity: 2, cost_price: 100, amount: 200 }] }, 'a')
+    expect(f.messages.some(m => m.text.includes('照合で見つけられません'))).toBe(false)
+  })
+
+  it('「別途」の行は明細に入れず、原価に含まれていないと警告する。「含む」「0円」は案内だけ', () => {
+    const f = normalizeEstimateExtraction({
+      items: [{ name: 'A', quantity: 1, cost_price: 100, amount: 100 }],
+      excluded_rows: [{ name: '電気工事', reason: '別途' }, { name: '運搬費', reason: '含む' }, { name: '管理費', reason: '0 円' }, { name: 'x', reason: '不明' }, { name: '', reason: '別途' }],
+    }, 'a')
+    expect(f.items).toHaveLength(1)
+    expect(f.excluded).toEqual([
+      { name: '電気工事', reason: '別途' }, { name: '運搬費', reason: '含む' }, { name: '管理費', reason: '0円' }, { name: 'x', reason: 'その他' },
+    ])
+    expect(f.messages.filter(m => m.level === 'warn').map(m => m.text)).toEqual([expect.stringContaining('電気工事')])
+    expect(f.messages.filter(m => m.level === 'info')).toHaveLength(3)
+  })
+})
+
+describe('読み落としの警告は、明細に入れなかった行を数に含める（実 AI 検証の誤警告）', () => {
+  const items = Array.from({ length: 6 }, (_, i) => ({ name: `A${i}`, quantity: 1, cost_price: 100, amount: 100 }))
+  const excluded_rows = [{ name: '運搬費', reason: '含む' }, { name: '管理費', reason: '0円' }, { name: '電気', reason: '別途' }]
+
+  it('原本 9 行 = 明細 6 行 + 除外 3 行 なら読み落としの警告を出さない', () => {
+    const f = normalizeEstimateExtraction({ items, excluded_rows, items_total: 9 }, 'a')
+    expect(f.messages.some(m => m.text.includes('しか読み取れませんでした'))).toBe(false)
+  })
+
+  it('原本 10 行なら 1 行の読み落としとして警告する', () => {
+    const f = normalizeEstimateExtraction({ items, excluded_rows, items_total: 10 }, 'a')
+    expect(f.messages.some(m => m.level === 'warn' && m.text.includes('しか読み取れませんでした'))).toBe(true)
+  })
+})

@@ -32,7 +32,7 @@ const SYSTEM_PROMPT = `あなたはリフォーム会社が業者（仕入れ先
 ## 行の扱い
 - 「小計」「合計」「消費税」「総合計」などの集計行は items に含めない
 - 「値引」「出精値引」「端数調整」などの値引き・調整の行は items に含めず、adjustments に書き写す（amount は印字された金額の絶対値。▲やマイナスは付けない）
-- 金額が「0」「含む」「別途」「該当なし」の行は items に含めない
+- 金額が「0」「含む」「別途」「該当なし」の行は items に含めず、excluded_rows に品名と理由（"別途" / "含む" / "0円" / "その他"）を書く
 - 数字はカンマなしの数値で返す
 - vendor_name は、その行の仕入先が書類全体の supplier と違うときだけ書く（同じなら null）
 
@@ -56,6 +56,7 @@ const SYSTEM_PROMPT = `あなたはリフォーム会社が業者（仕入れ先
   "items_total": 原本に印字されている明細行の数（数えられなければnull）,
   "subtotal": 印字された小計（税抜）の数値またはnull,
   "adjustments": [{ "label": "出精値引など印字どおり", "amount": 数値またはnull }],
+  "excluded_rows": [{ "name": "品名", "reason": "別途" }],
   "prices_include_tax": 単価・金額が税込と明記されていれば true、それ以外は false,
   "warnings": ["かすれ・切れ・読み取りに自信のない点（なければ空配列）"]
 }`
