@@ -1,39 +1,98 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { Input } from '@/components/ui/input'
+import {
+  needsReview, reviewEstimateItem, toOcrNumber,
+  type EstimateOcrFile, type EstimateOcrItem, type OcrMessage,
+} from '@/lib/estimate/ocr-extraction'
+import { checkEstimateImageFile, formatMegabytes, prepareEstimateImage } from '@/lib/estimate/ocr-image'
 
 // ── 型定義 ────────────────────────────────────────────────
 
-type ExtractedItem = {
-  name: string
-  quantity: number | null
-  unit: string | null
-  cost_price: number | null
-  vendor_name: string | null
-  note: string | null
-}
-
-type FileResult = {
-  fileName: string
-  supplier: string
-  document_type: string
-  items: ExtractedItem[]
-  subtotal: number | null
-  raw_warning: string | null
-}
-
+/** 取り込み候補 1 行。金額は原本に印字された値（人が直したら直した値） */
 type CandidateRow = {
   id: string
+  fileName: string
+  /** 取り込み元の画像（同じファイル名の別の画像と区別する。画像全体の警告との対応に使う） */
+  fileKey: string
+  /** 人が「原本と照らして確認した」と押した（数量・単価などを直すと取り消す） */
+  acked: boolean
   name: string
+  /** 取り込む数量。原本で読めなければ 1 */
   quantity: number
+  /** 原本で数量を読めたか（読めなければ「要確認」） */
+  quantityRead: boolean
   unit: string
   cost_price: number | null
+  cost_from: EstimateOcrItem['cost_from']
+  list_price: number | null
+  rate: number | null
+  amount: number | null
   vendor_name: string
   memo: string
+  messages: OcrMessage[]
 }
+
+type FileState =
+  | { state: 'selected' }
+  | { state: 'running'; note?: string }
+  | { state: 'done'; note?: string; summary: Pick<EstimateOcrFile, 'supplier' | 'document_type'>; messages: OcrMessage[]; count: number }
+  | { state: 'failed'; error: string }
 
 function uid() { return Math.random().toString(36).slice(2) }
 function fmt(v: number) { return v.toLocaleString('ja-JP') }
+const fileKey = (f: File) => `${f.name}:${f.size}:${f.lastModified}`
+
+/** 同時に送る画像の数（AI のレート制限と端末の通信量を抑える） */
+const CONCURRENCY = 2
+
+/** 行の照合をやり直す（人が数量・単価を直したときも同じ規則で検査する） */
+function withReview(r: Omit<CandidateRow, 'messages'>): CandidateRow {
+  return {
+    ...r,
+    messages: reviewEstimateItem({
+      quantity: r.quantityRead ? r.quantity : null,
+      cost_price: r.cost_price, cost_from: r.cost_from,
+      list_price: r.list_price, rate: r.rate, amount: r.amount,
+    }),
+  }
+}
+
+function toCandidate(item: Partial<EstimateOcrItem>, file: File): CandidateRow {
+  const quantity = toOcrNumber(item.quantity)
+  return withReview({
+    id: uid(),
+    fileName: file.name,
+    fileKey: fileKey(file),
+    acked: false,
+    name: String(item.name ?? ''),
+    quantity: quantity ?? 1,
+    quantityRead: quantity != null,
+    unit: item.unit || '式',
+    cost_price: toOcrNumber(item.cost_price),
+    cost_from: item.cost_from ?? null,
+    list_price: toOcrNumber(item.list_price),
+    rate: toOcrNumber(item.rate),
+    amount: toOcrNumber(item.amount),
+    vendor_name: item.vendor_name ?? '',
+    memo: item.note ?? '',
+  })
+}
+
+/** 追加の前に人が確認すべき内容（行の要確認・取り込み元の画像全体の警告）。どちらも無ければ null */
+type PendingReview = { rowWarns: string[]; fileName: string; fileWarns: string[] }
+const warnTexts = (m: OcrMessage[]) => m.filter(x => x.level === 'warn').map(x => x.text)
+
+const toImportItem = (r: CandidateRow) => ({
+  name: r.name, quantity: r.quantity, unit: r.unit, cost_price: r.cost_price,
+  vendor_name: r.vendor_name || null, internal_memo: r.memo || null,
+})
+
+/** 応答を JSON として読む（Vercel が 413 などを JSON 以外で返す場合がある） */
+async function readJson(res: Response): Promise<Record<string, unknown> | null> {
+  try { return await res.json() as Record<string, unknown> } catch { return null }
+}
 
 // ── デザイントークン ──────────────────────────────────────
 
@@ -50,24 +109,75 @@ const G = {
   textTer:     '#8AA491',
 } as const
 
+const WARN = { bg: '#FFFBEB', border: '#FCD34D', text: '#92400E', bar: '#D97706' } as const
+
 type Props = { projectId: string }
 
 export function EstimateImportTab({ projectId }: Props) {
   const inputRef = useRef<HTMLInputElement>(null)
   const abortRef = useRef<AbortController | null>(null)
+  /** 画像の選び直し・キャンセルで増やす。古い読み取り結果を画面に入れないため */
+  const runRef = useRef(0)
+  /** 追加中の行（state の更新を待たずに二重送信を止める） */
+  const inFlightRef = useRef<Set<string>>(new Set())
+  /** この画面で見積に追加した画像（同じ画像の再取り込みに気づけるように） */
+  const importedFilesRef = useRef<Set<string>>(new Set())
 
   const MAX_FILES = 10
 
   const [files,        setFiles]       = useState<File[]>([])
   const [previews,     setPreviews]    = useState<string[]>([])
+  const [fileStates,   setFileStates]  = useState<FileState[]>([])
   const [loading,      setLoading]     = useState(false)
   const [rows,         setRows]        = useState<CandidateRow[]>([])
   const [removingIds,  setRemovingIds] = useState<Set<string>>(new Set())
   const [addingIds,    setAddingIds]   = useState<Set<string>>(new Set())
   const [error,        setError]       = useState<string | null>(null)
-  const [overLimitMsg, setOverLimit]   = useState<string | null>(null)
+  const [notices,      setNotices]     = useState<string[]>([])
   const [dragging,     setDragging]    = useState(false)
   const [addedCount,   setAddedCount]  = useState(0)
+  const [confirmAll,   setConfirmAll]  = useState(false)
+  /** 画像全体の警告を確認済みにした画像（fileKey） */
+  const [ackedFiles,   setAckedFiles]  = useState<Set<string>>(new Set())
+
+  // ドラッグ成功の通知（一度だけ登録するリスナー）から最新の行・画像を参照するため
+  const rowsRef = useRef<CandidateRow[]>([])
+  const filesRef = useRef<File[]>([])
+  useEffect(() => { rowsRef.current = rows; filesRef.current = files }, [rows, files])
+
+  function markAdding(ids: string[], on: boolean) {
+    ids.forEach(id => (on ? inFlightRef.current.add(id) : inFlightRef.current.delete(id)))
+    setAddingIds(prev => {
+      const n = new Set(prev)
+      ids.forEach(id => (on ? n.add(id) : n.delete(id)))
+      return n
+    })
+  }
+
+  /** 見積に追加した行の元画像を覚えておく（同じ画像の再取り込みの注意に使う） */
+  function rememberImported(ids: string[]) {
+    rowsRef.current.filter(r => ids.includes(r.id)).forEach(r => importedFilesRef.current.add(r.fileKey))
+  }
+
+  /** 画像ごとの警告（取り込み元の画像の fileKey で引く。ファイル名が同じ別の画像と混ぜない） */
+  function fileWarnsOf(key: string): string[] {
+    const i = files.findIndex(f => fileKey(f) === key)
+    const st = fileStates[i]
+    return st?.state === 'done' ? warnTexts(st.messages) : []
+  }
+
+  function pendingOf(r: CandidateRow): PendingReview | null {
+    const rowWarns = r.acked ? [] : warnTexts(r.messages)
+    const fileWarns = ackedFiles.has(r.fileKey) ? [] : fileWarnsOf(r.fileKey)
+    return rowWarns.length || fileWarns.length ? { rowWarns, fileName: r.fileName, fileWarns } : null
+  }
+
+  /** 人が確認した行と、その取り込み元の画像を確認済みにする */
+  function acknowledge(targets: CandidateRow[]) {
+    const ids = new Set(targets.map(r => r.id))
+    setRows(prev => prev.map(r => (ids.has(r.id) ? { ...r, acked: true } : r)))
+    setAckedFiles(prev => new Set([...prev, ...targets.map(r => r.fileKey)]))
+  }
 
   function fadeRemove(id: string) {
     setRemovingIds(prev => new Set([...prev, id]))
@@ -78,131 +188,248 @@ export function EstimateImportTab({ projectId }: Props) {
     }, 280)
   }
 
-  // ドラッグ成功通知を受けて該当カードを消す
+  // 見積エディタへのドラッグ: 送信開始・成功・失敗の通知を受ける
   useEffect(() => {
-    const handler = (e: Event) => {
+    const adding = (e: Event) => {
       const { importId } = (e as CustomEvent<{ importId: string }>).detail
+      markAdding([importId], true)
+    }
+    const moved = (e: Event) => {
+      const { importId } = (e as CustomEvent<{ importId: string }>).detail
+      rememberImported([importId])
+      markAdding([importId], false)
       fadeRemove(importId)
     }
-    window.addEventListener('genba:import-item-moved', handler)
-    return () => window.removeEventListener('genba:import-item-moved', handler)
+    const failed = (e: Event) => {
+      const { importId, error: msg } = (e as CustomEvent<{ importId: string; error?: string }>).detail
+      markAdding([importId], false)
+      setError(msg || '見積への追加に失敗しました')
+    }
+    window.addEventListener('genba:import-item-adding', adding)
+    window.addEventListener('genba:import-item-moved', moved)
+    window.addEventListener('genba:import-item-failed', failed)
+    return () => {
+      window.removeEventListener('genba:import-item-adding', adding)
+      window.removeEventListener('genba:import-item-moved', moved)
+      window.removeEventListener('genba:import-item-failed', failed)
+    }
   }, [])
 
+  function clearResults() {
+    runRef.current += 1
+    setRows([]); setError(null); setAddedCount(0); setConfirmAll(false); setAckedFiles(new Set())
+  }
+
   function addFiles(newFiles: FileList | File[]) {
-    const arr = Array.from(newFiles).filter(f =>
-      (f.type === 'image/jpeg' || f.type === 'image/png') && f.size <= 8 * 1024 * 1024
-    )
-    if (!arr.length) return
-    const combined = [...files, ...arr]
-    setRows([]); setError(null); setAddedCount(0)
-    if (combined.length > MAX_FILES) {
-      const over = combined.length - MAX_FILES
-      setOverLimit(`最大${MAX_FILES}枚までです。${over}枚を超えた分は選択されませんでした。`)
-      const trimmed = combined.slice(0, MAX_FILES)
-      setFiles(trimmed)
-      setPreviews(trimmed.map(f => URL.createObjectURL(f)))
-    } else {
-      setOverLimit(null)
-      setFiles(combined)
-      setPreviews(combined.map(f => URL.createObjectURL(f)))
+    if (loading) return
+    const picked = Array.from(newFiles)
+    const msgs: string[] = []
+    const accepted: File[] = []
+    for (const f of picked) {
+      const check = checkEstimateImageFile(f)
+      if (!check.ok) { msgs.push(check.message); continue }
+      if (files.some(x => fileKey(x) === fileKey(f)) || accepted.some(x => fileKey(x) === fileKey(f))) {
+        msgs.push(`「${f.name}」はすでに選択されています`)
+        continue
+      }
+      if (importedFilesRef.current.has(fileKey(f))) {
+        msgs.push(`「${f.name}」はこの画面で見積に追加済みの画像です。読み取ると同じ明細が重複して追加される場合があります`)
+      }
+      accepted.push(f)
     }
+    let combined = [...files, ...accepted]
+    if (combined.length > MAX_FILES) {
+      msgs.push(`最大${MAX_FILES}枚までです。${combined.length - MAX_FILES}枚を超えた分は選択されませんでした。`)
+      combined = combined.slice(0, MAX_FILES)
+    }
+    setNotices(msgs)
+    if (combined.length === files.length) return
+    clearResults()
+    previews.forEach(u => URL.revokeObjectURL(u))
+    setFiles(combined)
+    setPreviews(combined.map(f => URL.createObjectURL(f)))
+    setFileStates(combined.map(() => ({ state: 'selected' })))
   }
 
   function removeFile(i: number) {
+    if (loading) return
+    clearResults(); setNotices([])
+    URL.revokeObjectURL(previews[i])
     setFiles(files.filter((_, idx) => idx !== i))
     setPreviews(previews.filter((_, idx) => idx !== i))
-    setRows([]); setOverLimit(null)
+    setFileStates(fileStates.filter((_, idx) => idx !== i))
   }
 
   function reset() {
-    setFiles([]); setPreviews([]); setRows([])
-    setError(null); setOverLimit(null); setAddedCount(0)
+    abortRef.current?.abort()
+    clearResults()
+    previews.forEach(u => URL.revokeObjectURL(u))
+    setFiles([]); setPreviews([]); setFileStates([]); setNotices([]); setLoading(false)
+  }
+
+  /** 画像 1 枚を縮小して送り、結果を返す */
+  async function extractFile(file: File, i: number, run: number, signal: AbortSignal): Promise<CandidateRow[]> {
+    const setState = (st: FileState) => {
+      if (runRef.current === run) setFileStates(prev => prev.map((x, idx) => (idx === i ? st : x)))
+    }
+    setState({ state: 'running' })
+    const prepared = await prepareEstimateImage(file)
+    if (!prepared.ok) { setState({ state: 'failed', error: prepared.message }); return [] }
+    const note = prepared.resized ? `送信用に縮小しました（${formatMegabytes(prepared.originalBytes)} → ${formatMegabytes(prepared.file.size)}）` : undefined
+    if (note) setState({ state: 'running', note })
+
+    const fd = new FormData()
+    fd.append('files', prepared.file, file.name)
+    let res: Response
+    try {
+      res = await fetch('/api/ai/extract-estimate', { method: 'POST', body: fd, signal })
+    } catch (e) {
+      if ((e as Error).name === 'AbortError') throw e
+      setState({ state: 'failed', error: '通信できませんでした。電波の良い場所でもう一度お試しください' })
+      return []
+    }
+    const data = await readJson(res)
+    if (!res.ok || !data) {
+      const msg = typeof data?.error === 'string' ? data.error
+        : res.status === 413 ? '画像が大きすぎて送れませんでした。見積書の部分だけが写るように撮り直してください'
+        : '読み取りに失敗しました。時間をおいてもう一度お試しください'
+      setState({ state: 'failed', error: msg })
+      return []
+    }
+    const fileResults = (Array.isArray(data.files) ? data.files : []) as Partial<EstimateOcrFile>[]
+    const failures = (Array.isArray(data.failures) ? data.failures : []) as Array<{ error?: string }>
+    if (!fileResults.length) {
+      setState({ state: 'failed', error: failures[0]?.error ?? '読み取りに失敗しました' })
+      return []
+    }
+    const fr = fileResults[0]
+    const items = (Array.isArray(fr.items) ? fr.items : []).map(it => toCandidate(it, file)).filter(r => r.name)
+    const messages = Array.isArray(fr.messages) ? fr.messages : []
+    // 旧形式の応答（raw_warning）も注意書きとして出す
+    const legacy = (fr as { raw_warning?: unknown }).raw_warning
+    if (typeof legacy === 'string' && legacy && !messages.length) messages.push({ level: 'warn', text: `AI の注意書き: ${legacy}` })
+    setState({
+      state: 'done', note, messages, count: items.length,
+      summary: { supplier: fr.supplier ?? '', document_type: fr.document_type ?? '' },
+    })
+    return items
   }
 
   async function extract() {
-    if (!files.length) return
+    if (!files.length || loading) return
     const ac = new AbortController()
     abortRef.current = ac
-    setLoading(true); setError(null)
+    const run = ++runRef.current
+    setLoading(true); setError(null); setRows([]); setAddedCount(0); setConfirmAll(false); setAckedFiles(new Set())
+    setFileStates(files.map(() => ({ state: 'selected' })))
+    const results: CandidateRow[][] = files.map(() => [])
     try {
-      const fd = new FormData()
-      files.forEach(f => fd.append('files', f))
-      const res = await fetch('/api/ai/extract-estimate', { method: 'POST', body: fd, signal: ac.signal })
-      if (!res.ok) { const d = await res.json(); throw new Error(d.error) }
-      const data: { files: FileResult[]; items: ExtractedItem[] } = await res.json()
-      setRows(data.items.map(item => ({
-        id: uid(),
-        name: item.name,
-        quantity: item.quantity ?? 1,
-        unit: item.unit ?? '式',
-        cost_price: item.cost_price,
-        vendor_name: item.vendor_name ?? '',
-        memo: item.note ?? '',
-      })))
-      setAddedCount(0)
+      let next = 0
+      const worker = async () => {
+        while (next < files.length) {
+          const i = next++
+          results[i] = await extractFile(files[i], i, run, ac.signal)
+        }
+      }
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, files.length) }, worker))
+      if (runRef.current !== run) return
+      const all = results.flat()
+      setRows(all)
+      if (!all.length) setError('明細を読み取れませんでした。各画像の案内を確認してください')
     } catch (e) {
-      if ((e as Error).name !== 'AbortError')
-        setError(e instanceof Error ? e.message : '読み取りに失敗しました')
+      if ((e as Error).name !== 'AbortError' && runRef.current === run) setError('読み取りに失敗しました')
     } finally {
-      setLoading(false); abortRef.current = null
+      if (runRef.current === run) { setLoading(false); abortRef.current = null }
     }
   }
 
-  function cancelExtract() { abortRef.current?.abort(); setLoading(false) }
+  function cancelExtract() {
+    abortRef.current?.abort()
+    runRef.current += 1
+    setLoading(false)
+    setFileStates(files.map(() => ({ state: 'selected' })))
+  }
+
+  function updateRow(id: string, patch: Partial<Pick<CandidateRow, 'name' | 'quantity' | 'unit' | 'cost_price'>>) {
+    setConfirmAll(false)
+    setRows(prev => prev.map(r => {
+      if (r.id !== id) return r
+      const { messages: _m, ...rest } = r
+      void _m
+      return withReview({
+        ...rest, ...patch,
+        // 値を直したら、直した後の内容でもう一度確認してもらう
+        acked: false,
+        // 人が数量を入力したら「読めなかった」扱いをやめる
+        quantityRead: patch.quantity !== undefined ? true : r.quantityRead,
+        cost_from: patch.cost_price !== undefined ? 'printed_unit_price' : r.cost_from,
+      })
+    }))
+  }
+
+  async function postImport(targets: CandidateRow[]): Promise<boolean> {
+    const res = await fetch('/api/estimate-items/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project_id: projectId, items: targets.map(toImportItem) }),
+    }).catch(() => null)
+    if (res?.ok) {
+      window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items' } }))
+      return true
+    }
+    const d = res ? await readJson(res) : null
+    setError(typeof d?.error === 'string' ? d.error : '追加に失敗しました。通信状態を確認してもう一度お試しください')
+    return false
+  }
 
   // 1件だけ追加（カードの「→ 追加」ボタン用）
-  async function quickAdd(row: CandidateRow) {
-    setAddingIds(prev => new Set([...prev, row.id]))
+  // 要確認の行・警告のある画像の行は、カードの確認欄の「確認したので追加する」からだけ送る（confirmed = true）
+  async function quickAdd(row: CandidateRow, confirmed: boolean) {
+    if (inFlightRef.current.has(row.id) || !row.name.trim()) return
+    if (pendingOf(row) && !confirmed) return
+    if (confirmed) acknowledge([row])
+    markAdding([row.id], true)
     try {
-      const res = await fetch('/api/estimate-items/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_id: projectId,
-          items: [{ name: row.name, quantity: row.quantity, unit: row.unit, cost_price: row.cost_price, vendor_name: row.vendor_name || null, internal_memo: row.memo || null }],
-        }),
-      })
-      if (res.ok) {
-        window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items' } }))
-        fadeRemove(row.id)
-      } else {
-        const d = await res.json()
-        setError(d.error ?? '追加に失敗しました')
-      }
+      if (await postImport([row])) { rememberImported([row.id]); fadeRemove(row.id) }
     } finally {
-      setAddingIds(prev => { const n = new Set(prev); n.delete(row.id); return n })
+      markAdding([row.id], false)
     }
   }
 
-  // 残り全件追加
-  async function addAll() {
-    if (!rows.length) return
-    const ids = rows.map(r => r.id)
-    ids.forEach(id => setAddingIds(prev => new Set([...prev, id])))
+  // 残り全件追加（要確認の行・警告のある画像・読み取れなかった画像があるときは、確認欄を挟む）
+  // confirmed は確認欄の「確認したので追加する」からだけ true（一括ボタンの連打で確認を飛ばさない）
+  async function addAll(confirmed: boolean) {
+    const targets = rows.filter(r => !inFlightRef.current.has(r.id) && !removingIds.has(r.id) && r.name.trim())
+    if (!targets.length) return
+    if ((targets.some(r => pendingOf(r)) || failedFiles.length > 0) && !confirmed) { setConfirmAll(true); return }
+    setConfirmAll(false)
+    acknowledge(targets)
+    const ids = targets.map(r => r.id)
+    markAdding(ids, true)
     try {
-      const res = await fetch('/api/estimate-items/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_id: projectId,
-          items: rows.map(r => ({ name: r.name, quantity: r.quantity, unit: r.unit, cost_price: r.cost_price, vendor_name: r.vendor_name || null, internal_memo: r.memo || null })),
-        }),
-      })
-      if (res.ok) {
-        window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items' } }))
-        ids.forEach(id => fadeRemove(id))
-      } else {
-        const d = await res.json()
-        setError(d.error ?? '追加に失敗しました')
-      }
+      if (await postImport(targets)) { rememberImported(ids); ids.forEach(id => fadeRemove(id)) }
     } finally {
-      ids.forEach(id => setAddingIds(prev => { const n = new Set(prev); n.delete(id); return n }))
+      markAdding(ids, false)
     }
   }
 
   // removingIds.size > 0 を含めることで、最後の1件が消えるアニメーション中に
   // アップロード画面に戻ってしまうフラッシュを防ぐ
   const showResults = rows.length > 0 || addedCount > 0 || removingIds.size > 0
+  const reviewCount = rows.filter(r => needsReview(r.messages)).length
+  const bulkBusy = rows.some(r => addingIds.has(r.id))
+  const failedFiles = fileStates.flatMap((st, i) => (st.state === 'failed' ? [files[i]?.name ?? ''] : []))
+  // 一括追加の確認欄に出す、画像ごとの未確認の警告（取り込み元の画像ごとにまとめる）
+  const bulkFileWarns = files.flatMap(f => {
+    const key = fileKey(f)
+    if (ackedFiles.has(key) || !rows.some(r => r.fileKey === key)) return []
+    const warns = fileWarnsOf(key)
+    return warns.length ? [{ key, name: f.name, warns }] : []
+  })
+  const unackedReviewCount = rows.filter(r => !r.acked && needsReview(r.messages)).length
+  const doneFiles = fileStates
+    .map((st, i) => ({ st, name: files[i]?.name ?? '' }))
+    .filter(x => x.st.state === 'done' || x.st.state === 'failed')
 
   return (
     <div style={s.root}>
@@ -216,7 +443,7 @@ export function EstimateImportTab({ projectId }: Props) {
         }
         .ei-progress { animation: ei-progress 1.4s ease-in-out infinite; }
         @keyframes ei-fadeout {
-          from { opacity: 1; transform: translateX(0); max-height: 80px; margin-bottom: 8px; }
+          from { opacity: 1; transform: translateX(0); max-height: 400px; margin-bottom: 8px; }
           to   { opacity: 0; transform: translateX(32px); max-height: 0;  margin-bottom: 0; }
         }
         .ei-removing {
@@ -257,9 +484,9 @@ export function EstimateImportTab({ projectId }: Props) {
             onDragLeave={() => setDragging(false)}
             onDrop={e => { e.preventDefault(); setDragging(false); addFiles(e.dataTransfer.files) }}
           >
-            <input ref={inputRef} type="file" multiple accept="image/jpeg,image/png"
+            <input ref={inputRef} type="file" multiple accept="image/jpeg,image/png,image/webp"
               style={{ display: 'none' }}
-              onChange={e => e.target.files && addFiles(e.target.files)}
+              onChange={e => { if (e.target.files) addFiles(e.target.files); e.target.value = '' }}
             />
             <div style={s.dropIconCircle}>
               <svg width="28" height="28" viewBox="0 0 24 24" fill="none"
@@ -269,58 +496,66 @@ export function EstimateImportTab({ projectId }: Props) {
               </svg>
             </div>
             <p style={s.dropTitle}>ドラッグ＆ドロップ、またはクリックして選択</p>
-            <p style={s.dropSub}>JPEG・PNG • 最大{MAX_FILES}枚 • 1枚8MBまで</p>
-            <button style={s.browseBtn} onClick={e => { e.stopPropagation(); inputRef.current?.click() }}>
+            <p style={s.dropSub}>JPEG・PNG・WebP • 最大{MAX_FILES}枚 • 1ページ1枚で撮影 • 大きい写真は自動で縮小します</p>
+            <button style={s.browseBtn} disabled={loading} onClick={e => { e.stopPropagation(); inputRef.current?.click() }}>
               ファイルを選択
             </button>
           </div>
 
           {files.length > 0 && (
             <div style={s.fileCardList}>
-              {files.map((file, i) => (
-                <div key={i} style={s.fileCard}>
-                  <div style={s.fileThumbWrap}>
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={previews[i]} alt="" style={s.fileThumb} />
-                  </div>
-                  <div style={s.fileCardInfo}>
-                    <span style={s.fileCardName}>{file.name}</span>
-                    <div style={s.fileCardMeta}>
-                      <span style={s.fileCardSize}>{(file.size / 1024).toFixed(0)} KB</span>
-                      {loading ? (
-                        <>
-                          <span style={s.fileCardDot}>•</span>
-                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                            stroke={G.med} strokeWidth="2.5" strokeLinecap="round" className="ei-spin">
-                            <path d="M21 12a9 9 0 11-6.219-8.56"/>
-                          </svg>
-                          <span style={s.fileCardStatus}>解析中</span>
-                        </>
-                      ) : (
-                        <>
-                          <span style={s.fileCardDot}>•</span>
-                          <span style={{ ...s.fileCardStatus, color: G.med }}>選択済み</span>
-                        </>
-                      )}
+              {files.map((file, i) => {
+                const st = fileStates[i] ?? { state: 'selected' }
+                return (
+                  <div key={fileKey(file)} style={s.fileCard}>
+                    <div style={s.fileThumbWrap}>
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={previews[i]} alt="" style={s.fileThumb} />
                     </div>
-                    {loading && (
-                      <div style={s.progressTrack}>
-                        <div style={s.progressFill} className="ei-progress" />
+                    <div style={s.fileCardInfo}>
+                      <span style={s.fileCardName}>{file.name}</span>
+                      <div style={s.fileCardMeta}>
+                        <span style={s.fileCardSize}>{(file.size / 1024).toFixed(0)} KB</span>
+                        <span style={s.fileCardDot}>•</span>
+                        {st.state === 'running' ? (
+                          <>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                              stroke={G.med} strokeWidth="2.5" strokeLinecap="round" className="ei-spin">
+                              <path d="M21 12a9 9 0 11-6.219-8.56"/>
+                            </svg>
+                            <span style={s.fileCardStatus}>解析中</span>
+                          </>
+                        ) : st.state === 'failed' ? (
+                          <span style={{ ...s.fileCardStatus, color: '#991B1B' }}>失敗</span>
+                        ) : st.state === 'done' ? (
+                          <span style={{ ...s.fileCardStatus, color: G.med }}>完了（{st.count}件）</span>
+                        ) : (
+                          <span style={{ ...s.fileCardStatus, color: G.med }}>{loading ? '待機中' : '選択済み'}</span>
+                        )}
                       </div>
+                      {st.state === 'running' && (
+                        <div style={s.progressTrack}>
+                          <div style={s.progressFill} className="ei-progress" />
+                        </div>
+                      )}
+                      {(st.state === 'running' || st.state === 'done') && st.note && (
+                        <span style={{ fontSize: 11, color: G.textSec }}>{st.note}</span>
+                      )}
+                      {st.state === 'failed' && <span style={{ fontSize: 12, color: '#991B1B' }}>{st.error}</span>}
+                    </div>
+                    {!loading && (
+                      <button style={s.fileCardRemove} onClick={() => removeFile(i)} aria-label="削除">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+                          stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                          <circle cx="12" cy="12" r="10"/>
+                          <line x1="15" y1="9" x2="9" y2="15"/>
+                          <line x1="9" y1="9" x2="15" y2="15"/>
+                        </svg>
+                      </button>
                     )}
                   </div>
-                  {!loading && (
-                    <button style={s.fileCardRemove} onClick={() => removeFile(i)} aria-label="削除">
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-                        stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                        <circle cx="12" cy="12" r="10"/>
-                        <line x1="15" y1="9" x2="9" y2="15"/>
-                        <line x1="9" y1="9" x2="15" y2="15"/>
-                      </svg>
-                    </button>
-                  )}
-                </div>
-              ))}
+                )
+              })}
               {files.length < MAX_FILES && !loading && (
                 <button style={s.addMoreCard} onClick={() => inputRef.current?.click()}>
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
@@ -351,10 +586,12 @@ export function EstimateImportTab({ projectId }: Props) {
         </>
       )}
 
-      {overLimitMsg && (
-        <div style={s.warnBox}><span style={{ fontWeight: 700 }}>⚠</span> {overLimitMsg}</div>
+      {notices.length > 0 && (
+        <div style={s.warnBox} role="status">
+          {notices.map((m, i) => <div key={i}><span style={{ fontWeight: 700 }}>⚠</span> {m}</div>)}
+        </div>
       )}
-      {error && <div style={s.errorBox}>{error}</div>}
+      {error && <div style={s.errorBox} role="alert">{error}</div>}
 
       {/* ── 抽出結果（カード一覧）── */}
       {showResults && (
@@ -375,23 +612,62 @@ export function EstimateImportTab({ projectId }: Props) {
             <button style={s.changeBtn} onClick={reset}>画像を変更</button>
           </div>
 
+          {/* 画像ごとの読み取り結果（業者名・確認事項・失敗） */}
+          {doneFiles.some(x => x.st.state === 'failed' || (x.st.state === 'done' && (x.st.messages.length > 0 || x.st.summary.supplier))) && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {doneFiles.map(({ st, name }, i) => st.state === 'failed' ? (
+                <div key={i} style={s.errorBox}><strong>{name}</strong>：{st.error}</div>
+              ) : st.state === 'done' && (st.messages.length > 0 || st.summary.supplier) ? (
+                <div key={i} style={st.messages.some(m => m.level === 'warn') ? s.warnBox : s.fileSummary}>
+                  <div style={{ fontWeight: 700 }}>
+                    {name}{st.summary.supplier ? `（${st.summary.supplier}${st.summary.document_type ? `・${st.summary.document_type}` : ''}）` : ''}
+                  </div>
+                  {st.messages.map((m, j) => <div key={j}>{m.level === 'warn' ? '⚠ ' : ''}{m.text}</div>)}
+                </div>
+              ) : null)}
+            </div>
+          )}
+
           {/* インフォバナー */}
           {rows.length > 0 && (
             <div style={s.infoBanner}>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' as const }}>
                 <span>
                   <strong>{rows.length}件</strong> の明細が読み取れました。
+                  {reviewCount > 0 && (
+                    <strong style={{ color: WARN.text, marginLeft: 6 }}>うち {reviewCount}件は要確認です。</strong>
+                  )}
                   <span style={{ color: G.textSec, marginLeft: 6 }}>
-                    カードを左の見積エディタにドラッグ、または「→ 追加」で1件ずつ追加できます。
+                    金額は AI の読み取り候補です。原本と照らして、違っていれば「修正」で直してから追加してください。
                   </span>
                 </span>
                 <button
-                  style={s.addAllBtn}
-                  onClick={addAll}
+                  style={{ ...s.addAllBtn, ...(bulkBusy || confirmAll ? { opacity: 0.5, cursor: 'not-allowed' } : {}) }}
+                  onClick={() => addAll(false)}
+                  disabled={bulkBusy || confirmAll}
                 >
                   残り全件を追加（{rows.length}件）
                 </button>
               </div>
+              {confirmAll && (
+                <div data-testid="bulk-confirm" role="alertdialog" style={{ ...s.warnBox, marginTop: 8, display: 'flex', flexDirection: 'column' as const, gap: 6 }}>
+                  {unackedReviewCount > 0 && <div>⚠ 要確認の行が {unackedReviewCount}件 含まれています。</div>}
+                  {bulkFileWarns.map(g => (
+                    <div key={g.key} data-testid="bulk-confirm-file">
+                      <div style={{ fontWeight: 700 }}>⚠ 画像「{g.name}」全体の注意</div>
+                      {g.warns.map((w, j) => <div key={j} style={{ paddingLeft: 14 }}>{w}</div>)}
+                    </div>
+                  ))}
+                  {failedFiles.length > 0 && (
+                    <div data-testid="bulk-confirm-failed">⚠ 読み取れなかった画像があります（{failedFiles.join('、')}）。その画像の明細は追加されません。</div>
+                  )}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' as const }}>
+                    <span>原本と照らして確認しましたか？</span>
+                    <button style={s.addAllBtn} onClick={() => addAll(true)} disabled={bulkBusy}>確認したので追加する</button>
+                    <button style={s.changeBtn} onClick={() => setConfirmAll(false)}>戻る</button>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -413,7 +689,10 @@ export function EstimateImportTab({ projectId }: Props) {
                 row={row}
                 removing={removingIds.has(row.id)}
                 adding={addingIds.has(row.id)}
-                onAdd={() => quickAdd(row)}
+                pending={pendingOf(row)}
+                onAdd={confirmed => quickAdd(row, confirmed)}
+                onAck={() => acknowledge([row])}
+                onChange={patch => updateRow(row.id, patch)}
               />
             ))}
           </div>
@@ -431,24 +710,36 @@ export function EstimateImportTab({ projectId }: Props) {
 
 // ── ItemCard ──────────────────────────────────────────────
 
-function ItemCard({ row, removing, adding, onAdd }: {
+function ItemCard({ row, removing, adding, pending, onAdd, onAck, onChange }: {
   row: CandidateRow
   removing: boolean
   adding: boolean
-  onAdd: () => void
+  /** 追加の前に確認すべき内容（null なら確認なしで追加・ドラッグできる） */
+  pending: PendingReview | null
+  onAdd: (confirmed: boolean) => void
+  /** 確認済みにする（その後はドラッグで見積エディタの好きな位置に入れられる） */
+  onAck: () => void
+  onChange: (patch: Partial<Pick<CandidateRow, 'name' | 'quantity' | 'unit' | 'cost_price'>>) => void
 }) {
   const [dragOver, setDragOver] = useState(false)
+  const [editing, setEditing] = useState(false)
+  const [asking, setAsking] = useState(false)
+  const showConfirm = asking && pending != null
+  const flagged = needsReview(row.messages)
+  const accent = flagged ? WARN.bar : G.med
 
   return (
     <div
       className={removing ? 'ei-removing' : 'ei-card'}
+      data-testid="ocr-candidate"
+      data-needs-review={flagged ? 'true' : 'false'}
       style={{
         marginBottom: 8,
         background: dragOver ? '#E8F5EC' : G.cardBg,
         borderTop: `1px solid ${dragOver ? G.dark : G.borderLight}`,
         borderRight: `1px solid ${dragOver ? G.dark : G.borderLight}`,
         borderBottom: `1px solid ${dragOver ? G.dark : G.borderLight}`,
-        borderLeft: `4px solid ${G.med}`,
+        borderLeft: `4px solid ${accent}`,
         borderRadius: 10,
         display: 'flex',
         alignItems: 'stretch',
@@ -459,8 +750,10 @@ function ItemCard({ row, removing, adding, onAdd }: {
     >
       {/* ドラッグハンドル */}
       <div
-        draggable={!adding}
+        draggable={!adding && !editing && row.name.trim() !== ''}
         onDragStart={e => {
+          // 要確認の行・警告のある画像の行は、確認するまでドラッグで見積に入れさせない
+          if (pending) { e.preventDefault(); setAsking(true); return }
           e.dataTransfer.effectAllowed = 'copy'
           e.dataTransfer.setData('application/genba-import-item', JSON.stringify({
             _importId: row.id,
@@ -476,7 +769,7 @@ function ItemCard({ row, removing, adding, onAdd }: {
           color: G.textTer,
           userSelect: 'none',
         }}
-        title="ドラッグして左の見積エディタに追加"
+        title={pending ? '原本と照らして確認してからドラッグできます' : 'ドラッグして左の見積エディタに追加'}
       >
         <svg width="10" height="14" viewBox="0 0 10 14" fill="none">
           <circle cx="2.5" cy="2.5" r="1.5" fill="currentColor" />
@@ -491,12 +784,22 @@ function ItemCard({ row, removing, adding, onAdd }: {
       {/* メイン情報 */}
       <div style={{ flex: 1, padding: '10px 12px', minWidth: 0 }}>
         {/* 名称 */}
-        <div style={{
-          fontSize: 14, fontWeight: 700, color: G.textPri,
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          marginBottom: 5,
-        }}>
-          {row.name}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
+          <div style={{
+            flex: 1, minWidth: 0,
+            fontSize: 14, fontWeight: 700, color: G.textPri,
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            {row.name || '（品名なし）'}
+          </div>
+          <button
+            style={s.editBtn}
+            onClick={() => setEditing(v => !v)}
+            disabled={adding}
+            aria-expanded={editing}
+          >
+            {editing ? '閉じる' : '修正'}
+          </button>
         </div>
 
         {/* メタ行 */}
@@ -512,18 +815,28 @@ function ItemCard({ row, removing, adding, onAdd }: {
             color={G.textSec}
           />
 
-          {/* 仕入原価 */}
-          {row.cost_price != null && (
+          {/* 仕入原価（単価） */}
+          {row.cost_price != null ? (
             <MetaChip
               icon={
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                   <line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/>
                 </svg>
               }
-              label={`原価 ¥${fmt(row.cost_price)}`}
+              label={`原価単価 ¥${fmt(row.cost_price)}`}
               color="#1E5C3A"
               bg="#E3F4EA"
             />
+          ) : (
+            <MetaChip icon={<span>?</span>} label="原価 未読取" color={WARN.text} bg={WARN.bg} />
+          )}
+
+          {/* 原本の金額（照合用） */}
+          {row.amount != null && (
+            <MetaChip icon={<span>=</span>} label={`原本の金額 ¥${fmt(row.amount)}`} color={G.textSec} />
+          )}
+          {row.list_price != null && (
+            <MetaChip icon={<span>定</span>} label={`定価 ¥${fmt(row.list_price)}${row.rate != null ? ` × ${Math.round(row.rate * 1000) / 10}%` : ''}`} color={G.textSec} />
           )}
 
           {/* 業者名 */}
@@ -555,12 +868,78 @@ function ItemCard({ row, removing, adding, onAdd }: {
             />
           )}
         </div>
+
+        {/* 確認事項 */}
+        {row.messages.length > 0 && (
+          <ul style={s.rowMessages}>
+            {row.messages.map((m, i) => (
+              <li key={i} style={{ color: m.level === 'warn' ? WARN.text : G.textSec }}>
+                {m.level === 'warn' ? '⚠ ' : ''}{m.text}
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {/* 追加の前の確認（要確認の行・警告のある画像の行） */}
+        {showConfirm && (
+          <div data-testid="row-confirm" role="alertdialog" style={{ ...s.warnBox, marginTop: 8, display: 'flex', flexDirection: 'column' as const, gap: 4 }}>
+            {pending.rowWarns.length > 0 && (
+              <div>
+                <div style={{ fontWeight: 700 }}>⚠ この行は要確認です</div>
+                {pending.rowWarns.map((w, i) => <div key={i} style={{ paddingLeft: 14 }}>{w}</div>)}
+              </div>
+            )}
+            {pending.fileWarns.length > 0 && (
+              <div>
+                <div style={{ fontWeight: 700 }}>⚠ 画像「{pending.fileName}」全体の注意</div>
+                {pending.fileWarns.map((w, i) => <div key={i} style={{ paddingLeft: 14 }}>{w}</div>)}
+              </div>
+            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' as const }}>
+              <span>原本と照らして確認しましたか？</span>
+              <button style={s.addAllBtn} onClick={() => { setAsking(false); onAdd(true) }} disabled={adding}>確認したので追加する</button>
+              <button style={s.editBtn} onClick={() => { setAsking(false); onAck() }}>確認済みにする（ドラッグで入れる）</button>
+              <button style={s.changeBtn} onClick={() => setAsking(false)}>戻る</button>
+            </div>
+          </div>
+        )}
+
+        {/* 修正フォーム（原本と違う値を直す） */}
+        {editing && (
+          <div style={s.editGrid}>
+            <label style={{ ...s.editLabel, gridColumn: '1 / -1' }}>
+              品名
+              <Input inputSize="compact" value={row.name} maxLength={200}
+                onChange={e => onChange({ name: e.target.value })} />
+            </label>
+            <label style={s.editLabel}>
+              数量
+              <Input inputSize="compact" inputMode="decimal" defaultValue={String(row.quantity)}
+                onChange={e => { const n = toOcrNumber(e.target.value); if (n != null) onChange({ quantity: n }) }} />
+            </label>
+            <label style={s.editLabel}>
+              単位
+              <Input inputSize="compact" value={row.unit} maxLength={20}
+                onChange={e => onChange({ unit: e.target.value })} />
+            </label>
+            <label style={s.editLabel}>
+              原価単価（円）
+              <Input inputSize="compact" inputMode="decimal" defaultValue={row.cost_price != null ? String(row.cost_price) : ''}
+                placeholder="原本の単価"
+                onChange={e => {
+                  const v = e.target.value.trim()
+                  if (v === '') onChange({ cost_price: null })
+                  else { const n = toOcrNumber(v); if (n != null) onChange({ cost_price: n }) }
+                }} />
+            </label>
+          </div>
+        )}
       </div>
 
       {/* 追加ボタン（常時表示・固定幅） */}
       <button
-        onClick={onAdd}
-        disabled={adding}
+        onClick={() => (pending ? setAsking(true) : onAdd(false))}
+        disabled={adding || !row.name.trim()}
         style={{
           width: 60,
           flexShrink: 0,
@@ -746,4 +1125,14 @@ const s: Record<string, React.CSSProperties> = {
     fontSize: 14, fontWeight: 700, color: G.dark,
     justifyContent: 'center',
   },
+
+  fileSummary: { padding: '10px 14px', background: G.cardBg, border: `1px solid ${G.border}`, borderRadius: 8, fontSize: 13, color: G.textSec },
+  editBtn: {
+    flexShrink: 0, minHeight: 28, padding: '2px 10px',
+    background: G.cardBg, border: `1px solid ${G.border}`, borderRadius: 6,
+    fontSize: 12, fontWeight: 600, color: G.textSec, cursor: 'pointer',
+  },
+  rowMessages: { margin: '6px 0 0', padding: 0, listStyle: 'none', fontSize: 12, lineHeight: 1.6, display: 'flex', flexDirection: 'column' as const, gap: 2 },
+  editGrid: { marginTop: 8, display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(100px, 1fr))', gap: 8 },
+  editLabel: { display: 'flex', flexDirection: 'column' as const, gap: 4, fontSize: 11, color: G.textSec, fontWeight: 600 },
 }

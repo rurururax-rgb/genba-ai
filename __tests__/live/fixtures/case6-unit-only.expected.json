@@ -1,0 +1,75 @@
+{
+  "id": "case6-unit-only",
+  "supplier": "架空床材店",
+  "subtotal": null,
+  "adjustments": [],
+  "excludedNames": [],
+  "rows": [
+    {
+      "name": "フローリング 12mm FL-12",
+      "unit": "㎡",
+      "quantity": 18,
+      "list_price": null,
+      "rate": null,
+      "unit_price": 4850,
+      "amount": null,
+      "cost_price": 4850,
+      "review": false
+    },
+    {
+      "name": "フローリング施工手間",
+      "unit": "㎡",
+      "quantity": 18,
+      "list_price": null,
+      "rate": null,
+      "unit_price": 2200,
+      "amount": null,
+      "cost_price": 2200,
+      "review": false
+    },
+    {
+      "name": "既存床撤去",
+      "unit": "㎡",
+      "quantity": 18,
+      "list_price": null,
+      "rate": null,
+      "unit_price": 1500,
+      "amount": null,
+      "cost_price": 1500,
+      "review": false
+    },
+    {
+      "name": "床下地調整",
+      "unit": "㎡",
+      "quantity": 18,
+      "list_price": null,
+      "rate": null,
+      "unit_price": 900,
+      "amount": null,
+      "cost_price": 900,
+      "review": false
+    },
+    {
+      "name": "巾木 H60",
+      "unit": "m",
+      "quantity": 24,
+      "list_price": null,
+      "rate": null,
+      "unit_price": 780,
+      "amount": null,
+      "cost_price": 780,
+      "review": false
+    },
+    {
+      "name": "廃材処分",
+      "unit": "式",
+      "quantity": 1,
+      "list_price": null,
+      "rate": null,
+      "unit_price": 25000,
+      "amount": null,
+      "cost_price": 25000,
+      "review": false
+    }
+  ]
+}
