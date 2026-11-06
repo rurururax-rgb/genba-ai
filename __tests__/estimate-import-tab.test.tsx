@@ -207,3 +207,170 @@ describe('二重登録の防止', () => {
     expect(container.textContent).toContain('見積に追加済みの画像です')
   })
 })
+
+// ── 警告を読み飛ばして金額を登録しない（PR #52 追加監査） ──────────────────
+const SEPARATE = { level: 'warn', text: '「電気配線工事」は原本で「別途」となっており、明細に入れていません。' }
+const NO_CHECK = { level: 'warn', text: 'この見積書には金額・定価の列がないため、単価の読み違いを照合で見つけられません。' }
+const addBtnOf = (card: HTMLElement) => [...card.querySelectorAll('button')].find(b => b.title === '見積に追加')!
+const btnIn = (el: HTMLElement, text: string) => [...el.querySelectorAll('button')].find(b => b.textContent?.includes(text))
+function startDrag(card: HTMLElement) {
+  const payload: Record<string, unknown> = {}
+  const dt = { setData: (_t: string, v: string) => Object.assign(payload, JSON.parse(v)), effectAllowed: '' }
+  const ev = new Event('dragstart', { bubbles: true, cancelable: true }) as Event & { dataTransfer: unknown }
+  ev.dataTransfer = dt
+  act(() => { (card.querySelector('[draggable]') as HTMLElement).dispatchEvent(ev) })
+  return { payload, cancelled: ev.defaultPrevented }
+}
+
+describe('画像全体の警告（別途・値引き・照合不能）は一括追加の確認に入る', () => {
+  it('明細がすべて照合済みでも、画像全体の警告があれば一括追加の前に確認し、警告の内容を確認欄に出す', async () => {
+    extractReply = name => json({ files: [fileResult(name, [GOOD], [SEPARATE])], items: [GOOD], failures: [] })
+    await readImages([img('p1.jpg')])
+    click(button('残り全件を追加'))
+    await flush()
+    expect(imports).toHaveLength(0)
+    const box = container.querySelector('[data-testid=bulk-confirm]') as HTMLElement
+    expect(box.textContent).toContain('p1.jpg')
+    expect(box.textContent).toContain('電気配線工事')
+    click(button('確認したので追加する'))
+    await flush()
+    expect(imports).toHaveLength(1)
+  })
+
+  it('警告のない画像だけなら、一括追加はこれまでどおり 1 回で送る', async () => {
+    extractReply = name => json({ files: [fileResult(name, [GOOD])], items: [GOOD], failures: [] })
+    await readImages([img('p1.jpg')])
+    click(button('残り全件を追加'))
+    await flush()
+    expect(imports).toHaveLength(1)
+  })
+
+  it('読み取れなかった画像があるときも、一括追加の前に確認する（その画像の原価が入っていない）', async () => {
+    extractReply = name => name === 'p2.jpg'
+      ? json({ error: '読み取りが途中で終わりました', code: 'ai_truncated' }, 502)
+      : json({ files: [fileResult(name, [GOOD])], items: [GOOD], failures: [] })
+    await readImages([img('p1.jpg'), img('p2.jpg')])
+    click(button('残り全件を追加'))
+    await flush()
+    expect(imports).toHaveLength(0)
+    expect((container.querySelector('[data-testid=bulk-confirm]') as HTMLElement).textContent).toContain('p2.jpg')
+  })
+})
+
+describe('要確認の行は、個別追加・ドラッグでも確認なしに通らない', () => {
+  it('個別の「追加」: 要確認の行は確認欄を出し、確認するまで送らない', async () => {
+    await readImages([img('p1.jpg')])
+    const bad = cards()[1]
+    click(addBtnOf(bad)); click(addBtnOf(bad))
+    await flush()
+    expect(imports).toHaveLength(0)
+    const box = cards()[1].querySelector('[data-testid=row-confirm]') as HTMLElement
+    expect(box.textContent).toContain('金額欄を単価として読んだ可能性')
+    click(btnIn(box, '確認したので追加する'))
+    await flush()
+    expect(imports).toHaveLength(1)
+    expect((imports[0].items as Array<Record<string, unknown>>)[0]).toMatchObject({ name: '配管部材', quantity: 3, cost_price: 15000 })
+  })
+
+  it('ドラッグ: 要確認の行はドラッグを始めず（payload も渡さない）、確認欄を出す。確認後はドラッグできる', async () => {
+    await readImages([img('p1.jpg')])
+    const first = startDrag(cards()[1])
+    expect(first.cancelled).toBe(true)
+    expect(first.payload._importId).toBeUndefined()
+    const box = cards()[1].querySelector('[data-testid=row-confirm]') as HTMLElement
+    click(btnIn(box, '確認済みにする'))
+    expect(imports).toHaveLength(0)
+    const second = startDrag(cards()[1])
+    expect(second.cancelled).toBe(false)
+    expect(second.payload).toMatchObject({ name: '配管部材', cost_price: 15000 })
+  })
+
+  it('個別の「追加」: 画像全体に警告がある画像の行は、照合済みの行でも初回は確認する。確認後は同じ画像の行は 1 回で追加できる', async () => {
+    const GOOD2 = { ...GOOD, name: '水栓 FX-1' }
+    extractReply = name => json({ files: [fileResult(name, [GOOD, GOOD2], [NO_CHECK])], items: [GOOD, GOOD2], failures: [] })
+    await readImages([img('p1.jpg')])
+    click(addBtnOf(cards()[0]))
+    await flush()
+    expect(imports).toHaveLength(0)
+    const box = cards()[0].querySelector('[data-testid=row-confirm]') as HTMLElement
+    expect(box.textContent).toContain('照合で見つけられません')
+    click(btnIn(box, '確認したので追加する'))
+    await flush()
+    expect(imports).toHaveLength(1)
+    click(addBtnOf(cards().find(c => c.textContent?.includes('水栓'))!))
+    await flush()
+    expect(imports).toHaveLength(2)
+  })
+
+  it('確認後に数量・単価を直したら、要確認が残る行はもう一度確認する', async () => {
+    await readImages([img('p1.jpg')])
+    const bad = cards()[1]
+    click(addBtnOf(bad))
+    click(btnIn(cards()[1].querySelector('[data-testid=row-confirm]') as HTMLElement, '確認済みにする'))
+    click([...cards()[1].querySelectorAll('button')].find(b => b.textContent === '修正'))
+    const qty = [...cards()[1].querySelectorAll('label')].find(l => l.textContent?.startsWith('数量'))!.querySelector('input')!
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(qty, '4')
+      qty.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(cards()[1].dataset.needsReview).toBe('true')
+    click(addBtnOf(cards()[1]))
+    await flush()
+    expect(imports).toHaveLength(0)
+  })
+})
+
+describe('複数画像: 確認する警告は、その行の取り込み元の画像のもの', () => {
+  it('警告のある画像 A の行は確認を求め、警告のない画像 B の行は 1 回で追加できる。確認欄には A の警告だけを出す', async () => {
+    const B_ITEM = { ...GOOD, name: 'B社 便器 TX-1', vendor_name: '架空陶器' }
+    extractReply = name => name === 'a.jpg'
+      ? json({ files: [fileResult(name, [GOOD], [SEPARATE])], items: [GOOD], failures: [] })
+      : json({ files: [fileResult(name, [B_ITEM], [])], items: [B_ITEM], failures: [] })
+    await readImages([img('a.jpg'), img('b.jpg')])
+    const cardB = cards().find(c => c.textContent?.includes('B社'))!
+    click(addBtnOf(cardB))
+    await flush()
+    expect(imports).toHaveLength(1)
+    expect((imports[0].items as Array<Record<string, unknown>>)[0].name).toBe('B社 便器 TX-1')
+
+    const cardA = cards().find(c => c.textContent?.includes('洗面化粧台'))!
+    click(addBtnOf(cardA))
+    await flush()
+    expect(imports).toHaveLength(1)
+    const box = cardA.querySelector('[data-testid=row-confirm]') as HTMLElement
+    expect(box.textContent).toContain('a.jpg')
+    expect(box.textContent).toContain('電気配線工事')
+    expect(box.textContent).not.toContain('b.jpg')
+  })
+
+  it('同じファイル名の別の画像（スマホの image.jpg など）でも、警告は取り込み元の画像に対応する', async () => {
+    const first = new File([new Uint8Array(10)], 'image.jpg', { type: 'image/jpeg', lastModified: 1 })
+    const second = new File([new Uint8Array(20)], 'image.jpg', { type: 'image/jpeg', lastModified: 2 })
+    const B_ITEM = { ...GOOD, name: 'B社 便器 TX-1' }
+    let n = 0
+    extractReply = name => (n++ === 0
+      ? json({ files: [fileResult(name, [GOOD], [SEPARATE])], items: [GOOD], failures: [] })
+      : json({ files: [fileResult(name, [B_ITEM], [])], items: [B_ITEM], failures: [] }))
+    await readImages([first, second])
+    click(addBtnOf(cards().find(c => c.textContent?.includes('B社'))!))
+    await flush()
+    expect(imports).toHaveLength(1)
+    click(addBtnOf(cards().find(c => c.textContent?.includes('洗面化粧台'))!))
+    await flush()
+    expect(imports).toHaveLength(1)
+  })
+
+  it('一括追加の確認欄は、警告のある画像の名前と警告を画像ごとに出す', async () => {
+    extractReply = name => name === 'a.jpg'
+      ? json({ files: [fileResult(name, [GOOD], [SEPARATE])], items: [GOOD], failures: [] })
+      : json({ files: [fileResult(name, [{ ...GOOD, name: 'B' }], [NO_CHECK])], items: [], failures: [] })
+    await readImages([img('a.jpg'), img('b.jpg')])
+    click(button('残り全件を追加'))
+    const box = container.querySelector('[data-testid=bulk-confirm]') as HTMLElement
+    const groups = [...box.querySelectorAll('[data-testid=bulk-confirm-file]')].map(g => g.textContent ?? '')
+    expect(groups).toHaveLength(2)
+    expect(groups.find(g => g.includes('a.jpg'))).toContain('電気配線工事')
+    expect(groups.find(g => g.includes('a.jpg'))).not.toContain('照合で見つけられません')
+    expect(groups.find(g => g.includes('b.jpg'))).toContain('照合で見つけられません')
+  })
+})

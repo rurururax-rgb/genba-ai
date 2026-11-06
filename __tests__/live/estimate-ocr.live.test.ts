@@ -12,6 +12,7 @@ import { needsReview, reviewEstimateItem, type EstimateOcrFile, type EstimateOcr
  *
  * 各ケースの読み取り結果を正解データと比べ、行数・品名・数量・単価・金額・要確認の表示を採点する。
  * 必ず守るべき条件（失敗にする）:
+ *   - 正常に読み取れるべき代表ケース（MUST_SUCCEED）は、安全なエラー終了でも失敗にする（200 で全行を読むこと）
  *   - 原本と違う単価が「要確認」なしで正常扱いされない（silent wrong = 0）
  *   - 「含む」・0 円・値引きの行を明細に入れない
  *   - 値引きは adjustments として読み、画像全体の警告に出す
@@ -90,7 +91,13 @@ function score(expected: Expected, file: EstimateOcrFile) {
   }
 }
 
-const cases = ['case1-rate', 'case2-discount', 'case3-long65', 'case4-traps', 'case5-photo', 'case6-unit-only']
+// 正常に読み取れるべき代表ケース。途中終了・タイムアウトなどの「安全なエラー」で終わったら失敗にする。
+// （65 行の case3 も出力上限 8192 トークンの範囲内。実測 5,848 トークン）
+const MUST_SUCCEED = new Set(['case1-rate', 'case2-discount', 'case3-long65', 'case4-traps', 'case5-photo', 'case6-unit-only'])
+// 安全なエラー終了を許すケース（出力上限を超える大きさの見積書などを追加するとき、ここに入れる）
+const ALL_CASES = [...MUST_SUCCEED]
+
+const cases = ALL_CASES
   .filter(id => !ONLY.length || ONLY.includes(id))
   .filter(id => existsSync(path.join(FIX, `${id}.png`)))
 
@@ -110,9 +117,11 @@ describe.skipIf(!hasKey)('見積書 OCR（本物の Claude API・架空の見積
       const usage = usageLog.at(-1)
 
       if (res.status !== 200) {
-        // 途中終了などは、明細を返さず案内を出していれば「安全な失敗」（正常扱いしていない）
         writeFileSync(path.join(OUT, `${id}.json`), JSON.stringify({ status: res.status, elapsed_ms, usage, body }, null, 2))
         console.log(`[${id}] status=${res.status} code=${body.code} ${elapsed_ms}ms`)
+        // 正常に読み取れるべき代表ケースは、安全なエラーでも合格にしない
+        expect(MUST_SUCCEED.has(id), `${id} は正常に読み取れるべきケースだが ${res.status} ${body.code ?? ''} で終わった`).toBe(false)
+        // それ以外は、明細を返さず案内を出していれば「安全な失敗」（正常扱いしていない）
         expect(body.files).toBeUndefined()
         expect(['ai_truncated', 'ai_timeout', 'ai_incomplete', 'ai_invalid_response']).toContain(body.code)
         return
@@ -123,6 +132,11 @@ describe.skipIf(!hasKey)('見積書 OCR（本物の Claude API・架空の見積
       writeFileSync(path.join(OUT, `${id}.json`), JSON.stringify({ status: 200, elapsed_ms, usage, ...result, raw: file }, null, 2))
       console.log(`[${id}] ${elapsed_ms}ms`, JSON.stringify(result.summary, null, 1))
 
+      // 正常に読み取れるべきケースは、原本の明細をすべて読み、余計な行を作らない
+      if (MUST_SUCCEED.has(id)) {
+        expect.soft(result.summary.found, '読み取れた明細の数').toBe(expected.rows.length)
+        expect.soft(result.summary.extra_rows, '原本にない行').toEqual([])
+      }
       // 安全条件: 違う単価・数量を無警告で正常扱いしない
       expect.soft(result.summary.silent_wrong, '無警告の誤り').toEqual([])
       // 「含む」・0 円の行・値引きの行を明細に入れない

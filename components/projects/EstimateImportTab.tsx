@@ -14,6 +14,10 @@ import { checkEstimateImageFile, formatMegabytes, prepareEstimateImage } from '@
 type CandidateRow = {
   id: string
   fileName: string
+  /** 取り込み元の画像（同じファイル名の別の画像と区別する。画像全体の警告との対応に使う） */
+  fileKey: string
+  /** 人が「原本と照らして確認した」と押した（数量・単価などを直すと取り消す） */
+  acked: boolean
   name: string
   /** 取り込む数量。原本で読めなければ 1 */
   quantity: number
@@ -55,11 +59,13 @@ function withReview(r: Omit<CandidateRow, 'messages'>): CandidateRow {
   }
 }
 
-function toCandidate(item: Partial<EstimateOcrItem>, fileName: string): CandidateRow {
+function toCandidate(item: Partial<EstimateOcrItem>, file: File): CandidateRow {
   const quantity = toOcrNumber(item.quantity)
   return withReview({
     id: uid(),
-    fileName,
+    fileName: file.name,
+    fileKey: fileKey(file),
+    acked: false,
     name: String(item.name ?? ''),
     quantity: quantity ?? 1,
     quantityRead: quantity != null,
@@ -73,6 +79,10 @@ function toCandidate(item: Partial<EstimateOcrItem>, fileName: string): Candidat
     memo: item.note ?? '',
   })
 }
+
+/** 追加の前に人が確認すべき内容（行の要確認・取り込み元の画像全体の警告）。どちらも無ければ null */
+type PendingReview = { rowWarns: string[]; fileName: string; fileWarns: string[] }
+const warnTexts = (m: OcrMessage[]) => m.filter(x => x.level === 'warn').map(x => x.text)
 
 const toImportItem = (r: CandidateRow) => ({
   name: r.name, quantity: r.quantity, unit: r.unit, cost_price: r.cost_price,
@@ -127,6 +137,8 @@ export function EstimateImportTab({ projectId }: Props) {
   const [dragging,     setDragging]    = useState(false)
   const [addedCount,   setAddedCount]  = useState(0)
   const [confirmAll,   setConfirmAll]  = useState(false)
+  /** 画像全体の警告を確認済みにした画像（fileKey） */
+  const [ackedFiles,   setAckedFiles]  = useState<Set<string>>(new Set())
 
   // ドラッグ成功の通知（一度だけ登録するリスナー）から最新の行・画像を参照するため
   const rowsRef = useRef<CandidateRow[]>([])
@@ -144,8 +156,27 @@ export function EstimateImportTab({ projectId }: Props) {
 
   /** 見積に追加した行の元画像を覚えておく（同じ画像の再取り込みの注意に使う） */
   function rememberImported(ids: string[]) {
-    const names = new Set(rowsRef.current.filter(r => ids.includes(r.id)).map(r => r.fileName))
-    filesRef.current.filter(f => names.has(f.name)).forEach(f => importedFilesRef.current.add(fileKey(f)))
+    rowsRef.current.filter(r => ids.includes(r.id)).forEach(r => importedFilesRef.current.add(r.fileKey))
+  }
+
+  /** 画像ごとの警告（取り込み元の画像の fileKey で引く。ファイル名が同じ別の画像と混ぜない） */
+  function fileWarnsOf(key: string): string[] {
+    const i = files.findIndex(f => fileKey(f) === key)
+    const st = fileStates[i]
+    return st?.state === 'done' ? warnTexts(st.messages) : []
+  }
+
+  function pendingOf(r: CandidateRow): PendingReview | null {
+    const rowWarns = r.acked ? [] : warnTexts(r.messages)
+    const fileWarns = ackedFiles.has(r.fileKey) ? [] : fileWarnsOf(r.fileKey)
+    return rowWarns.length || fileWarns.length ? { rowWarns, fileName: r.fileName, fileWarns } : null
+  }
+
+  /** 人が確認した行と、その取り込み元の画像を確認済みにする */
+  function acknowledge(targets: CandidateRow[]) {
+    const ids = new Set(targets.map(r => r.id))
+    setRows(prev => prev.map(r => (ids.has(r.id) ? { ...r, acked: true } : r)))
+    setAckedFiles(prev => new Set([...prev, ...targets.map(r => r.fileKey)]))
   }
 
   function fadeRemove(id: string) {
@@ -186,7 +217,7 @@ export function EstimateImportTab({ projectId }: Props) {
 
   function clearResults() {
     runRef.current += 1
-    setRows([]); setError(null); setAddedCount(0); setConfirmAll(false)
+    setRows([]); setError(null); setAddedCount(0); setConfirmAll(false); setAckedFiles(new Set())
   }
 
   function addFiles(newFiles: FileList | File[]) {
@@ -272,7 +303,7 @@ export function EstimateImportTab({ projectId }: Props) {
       return []
     }
     const fr = fileResults[0]
-    const items = (Array.isArray(fr.items) ? fr.items : []).map(it => toCandidate(it, file.name)).filter(r => r.name)
+    const items = (Array.isArray(fr.items) ? fr.items : []).map(it => toCandidate(it, file)).filter(r => r.name)
     const messages = Array.isArray(fr.messages) ? fr.messages : []
     // 旧形式の応答（raw_warning）も注意書きとして出す
     const legacy = (fr as { raw_warning?: unknown }).raw_warning
@@ -289,7 +320,7 @@ export function EstimateImportTab({ projectId }: Props) {
     const ac = new AbortController()
     abortRef.current = ac
     const run = ++runRef.current
-    setLoading(true); setError(null); setRows([]); setAddedCount(0); setConfirmAll(false)
+    setLoading(true); setError(null); setRows([]); setAddedCount(0); setConfirmAll(false); setAckedFiles(new Set())
     setFileStates(files.map(() => ({ state: 'selected' })))
     const results: CandidateRow[][] = files.map(() => [])
     try {
@@ -327,6 +358,8 @@ export function EstimateImportTab({ projectId }: Props) {
       void _m
       return withReview({
         ...rest, ...patch,
+        // 値を直したら、直した後の内容でもう一度確認してもらう
+        acked: false,
         // 人が数量を入力したら「読めなかった」扱いをやめる
         quantityRead: patch.quantity !== undefined ? true : r.quantityRead,
         cost_from: patch.cost_price !== undefined ? 'printed_unit_price' : r.cost_from,
@@ -350,8 +383,11 @@ export function EstimateImportTab({ projectId }: Props) {
   }
 
   // 1件だけ追加（カードの「→ 追加」ボタン用）
-  async function quickAdd(row: CandidateRow) {
+  // 要確認の行・警告のある画像の行は、カードの確認欄の「確認したので追加する」からだけ送る（confirmed = true）
+  async function quickAdd(row: CandidateRow, confirmed: boolean) {
     if (inFlightRef.current.has(row.id) || !row.name.trim()) return
+    if (pendingOf(row) && !confirmed) return
+    if (confirmed) acknowledge([row])
     markAdding([row.id], true)
     try {
       if (await postImport([row])) { rememberImported([row.id]); fadeRemove(row.id) }
@@ -360,13 +396,14 @@ export function EstimateImportTab({ projectId }: Props) {
     }
   }
 
-  // 残り全件追加（要確認の行があるときは、もう一度押して確定する）
+  // 残り全件追加（要確認の行・警告のある画像・読み取れなかった画像があるときは、確認欄を挟む）
   // confirmed は確認欄の「確認したので追加する」からだけ true（一括ボタンの連打で確認を飛ばさない）
   async function addAll(confirmed: boolean) {
     const targets = rows.filter(r => !inFlightRef.current.has(r.id) && !removingIds.has(r.id) && r.name.trim())
     if (!targets.length) return
-    if (targets.some(r => needsReview(r.messages)) && !confirmed) { setConfirmAll(true); return }
+    if ((targets.some(r => pendingOf(r)) || failedFiles.length > 0) && !confirmed) { setConfirmAll(true); return }
     setConfirmAll(false)
+    acknowledge(targets)
     const ids = targets.map(r => r.id)
     markAdding(ids, true)
     try {
@@ -381,6 +418,15 @@ export function EstimateImportTab({ projectId }: Props) {
   const showResults = rows.length > 0 || addedCount > 0 || removingIds.size > 0
   const reviewCount = rows.filter(r => needsReview(r.messages)).length
   const bulkBusy = rows.some(r => addingIds.has(r.id))
+  const failedFiles = fileStates.flatMap((st, i) => (st.state === 'failed' ? [files[i]?.name ?? ''] : []))
+  // 一括追加の確認欄に出す、画像ごとの未確認の警告（取り込み元の画像ごとにまとめる）
+  const bulkFileWarns = files.flatMap(f => {
+    const key = fileKey(f)
+    if (ackedFiles.has(key) || !rows.some(r => r.fileKey === key)) return []
+    const warns = fileWarnsOf(key)
+    return warns.length ? [{ key, name: f.name, warns }] : []
+  })
+  const unackedReviewCount = rows.filter(r => !r.acked && needsReview(r.messages)).length
   const doneFiles = fileStates
     .map((st, i) => ({ st, name: files[i]?.name ?? '' }))
     .filter(x => x.st.state === 'done' || x.st.state === 'failed')
@@ -604,10 +650,22 @@ export function EstimateImportTab({ projectId }: Props) {
                 </button>
               </div>
               {confirmAll && (
-                <div style={{ ...s.warnBox, marginTop: 8, display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' as const }}>
-                  <span>要確認の行が {reviewCount}件 含まれています。原本と照らして確認しましたか？</span>
-                  <button style={s.addAllBtn} onClick={() => addAll(true)} disabled={bulkBusy}>確認したので追加する</button>
-                  <button style={s.changeBtn} onClick={() => setConfirmAll(false)}>戻る</button>
+                <div data-testid="bulk-confirm" role="alertdialog" style={{ ...s.warnBox, marginTop: 8, display: 'flex', flexDirection: 'column' as const, gap: 6 }}>
+                  {unackedReviewCount > 0 && <div>⚠ 要確認の行が {unackedReviewCount}件 含まれています。</div>}
+                  {bulkFileWarns.map(g => (
+                    <div key={g.key} data-testid="bulk-confirm-file">
+                      <div style={{ fontWeight: 700 }}>⚠ 画像「{g.name}」全体の注意</div>
+                      {g.warns.map((w, j) => <div key={j} style={{ paddingLeft: 14 }}>{w}</div>)}
+                    </div>
+                  ))}
+                  {failedFiles.length > 0 && (
+                    <div data-testid="bulk-confirm-failed">⚠ 読み取れなかった画像があります（{failedFiles.join('、')}）。その画像の明細は追加されません。</div>
+                  )}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' as const }}>
+                    <span>原本と照らして確認しましたか？</span>
+                    <button style={s.addAllBtn} onClick={() => addAll(true)} disabled={bulkBusy}>確認したので追加する</button>
+                    <button style={s.changeBtn} onClick={() => setConfirmAll(false)}>戻る</button>
+                  </div>
                 </div>
               )}
             </div>
@@ -631,7 +689,9 @@ export function EstimateImportTab({ projectId }: Props) {
                 row={row}
                 removing={removingIds.has(row.id)}
                 adding={addingIds.has(row.id)}
-                onAdd={() => quickAdd(row)}
+                pending={pendingOf(row)}
+                onAdd={confirmed => quickAdd(row, confirmed)}
+                onAck={() => acknowledge([row])}
                 onChange={patch => updateRow(row.id, patch)}
               />
             ))}
@@ -650,15 +710,21 @@ export function EstimateImportTab({ projectId }: Props) {
 
 // ── ItemCard ──────────────────────────────────────────────
 
-function ItemCard({ row, removing, adding, onAdd, onChange }: {
+function ItemCard({ row, removing, adding, pending, onAdd, onAck, onChange }: {
   row: CandidateRow
   removing: boolean
   adding: boolean
-  onAdd: () => void
+  /** 追加の前に確認すべき内容（null なら確認なしで追加・ドラッグできる） */
+  pending: PendingReview | null
+  onAdd: (confirmed: boolean) => void
+  /** 確認済みにする（その後はドラッグで見積エディタの好きな位置に入れられる） */
+  onAck: () => void
   onChange: (patch: Partial<Pick<CandidateRow, 'name' | 'quantity' | 'unit' | 'cost_price'>>) => void
 }) {
   const [dragOver, setDragOver] = useState(false)
   const [editing, setEditing] = useState(false)
+  const [asking, setAsking] = useState(false)
+  const showConfirm = asking && pending != null
   const flagged = needsReview(row.messages)
   const accent = flagged ? WARN.bar : G.med
 
@@ -686,6 +752,8 @@ function ItemCard({ row, removing, adding, onAdd, onChange }: {
       <div
         draggable={!adding && !editing && row.name.trim() !== ''}
         onDragStart={e => {
+          // 要確認の行・警告のある画像の行は、確認するまでドラッグで見積に入れさせない
+          if (pending) { e.preventDefault(); setAsking(true); return }
           e.dataTransfer.effectAllowed = 'copy'
           e.dataTransfer.setData('application/genba-import-item', JSON.stringify({
             _importId: row.id,
@@ -701,7 +769,7 @@ function ItemCard({ row, removing, adding, onAdd, onChange }: {
           color: G.textTer,
           userSelect: 'none',
         }}
-        title="ドラッグして左の見積エディタに追加"
+        title={pending ? '原本と照らして確認してからドラッグできます' : 'ドラッグして左の見積エディタに追加'}
       >
         <svg width="10" height="14" viewBox="0 0 10 14" fill="none">
           <circle cx="2.5" cy="2.5" r="1.5" fill="currentColor" />
@@ -812,6 +880,30 @@ function ItemCard({ row, removing, adding, onAdd, onChange }: {
           </ul>
         )}
 
+        {/* 追加の前の確認（要確認の行・警告のある画像の行） */}
+        {showConfirm && (
+          <div data-testid="row-confirm" role="alertdialog" style={{ ...s.warnBox, marginTop: 8, display: 'flex', flexDirection: 'column' as const, gap: 4 }}>
+            {pending.rowWarns.length > 0 && (
+              <div>
+                <div style={{ fontWeight: 700 }}>⚠ この行は要確認です</div>
+                {pending.rowWarns.map((w, i) => <div key={i} style={{ paddingLeft: 14 }}>{w}</div>)}
+              </div>
+            )}
+            {pending.fileWarns.length > 0 && (
+              <div>
+                <div style={{ fontWeight: 700 }}>⚠ 画像「{pending.fileName}」全体の注意</div>
+                {pending.fileWarns.map((w, i) => <div key={i} style={{ paddingLeft: 14 }}>{w}</div>)}
+              </div>
+            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' as const }}>
+              <span>原本と照らして確認しましたか？</span>
+              <button style={s.addAllBtn} onClick={() => { setAsking(false); onAdd(true) }} disabled={adding}>確認したので追加する</button>
+              <button style={s.editBtn} onClick={() => { setAsking(false); onAck() }}>確認済みにする（ドラッグで入れる）</button>
+              <button style={s.changeBtn} onClick={() => setAsking(false)}>戻る</button>
+            </div>
+          </div>
+        )}
+
         {/* 修正フォーム（原本と違う値を直す） */}
         {editing && (
           <div style={s.editGrid}>
@@ -846,7 +938,7 @@ function ItemCard({ row, removing, adding, onAdd, onChange }: {
 
       {/* 追加ボタン（常時表示・固定幅） */}
       <button
-        onClick={onAdd}
+        onClick={() => (pending ? setAsking(true) : onAdd(false))}
         disabled={adding || !row.name.trim()}
         style={{
           width: 60,
