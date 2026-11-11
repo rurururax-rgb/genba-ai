@@ -14,6 +14,8 @@ type Props = {
   pages: EstimateSourcePage[]
   selectedKey: string | null
   onSelect: (key: string) => void
+  /** 明細の「原本を見る」クリックごとに変わる値。選択済みの画像でも開ける。 */
+  openRequest?: number
 }
 
 const ZOOMS = [1, 1.5, 2, 3] as const
@@ -58,12 +60,16 @@ function ImageViewport({ page, zoom, expanded }: { page: EstimateSourcePage; zoo
  * 見積OCRの原本表示。読み取り・登録・確認状態は持たず、表示だけを担当する。
  * モーダルでも同じ画像 URL を使い、画像を Storage / DB に送らない。
  */
-export function EstimateSourceViewer({ pages, selectedKey, onSelect }: Props) {
+export function EstimateSourceViewer({ pages, selectedKey, onSelect, openRequest = 0 }: Props) {
   const [zoomIndex, setZoomIndex] = useState(0)
   const [expanded, setExpanded] = useState(false)
   const active = pages.find(p => p.key === selectedKey) ?? pages[0]
 
   useEffect(() => { setZoomIndex(0) }, [active?.key])
+
+  // 画像の選択だけでは見た目が変わらない場合があるため、明細からの操作では
+  // 原本を大きく開く。openRequest=0 の初期表示では自動で開かない。
+  useEffect(() => { if (openRequest > 0) setExpanded(true) }, [openRequest])
 
   useEffect(() => {
     if (!expanded) return
