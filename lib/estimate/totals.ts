@@ -1,5 +1,5 @@
 /**
- * 見積合計の共通 Calculation Layer（EstimateTab の画面表示と AI ツール get_estimate_total が共用）
+ * 見積合計の共通 Calculation Layer（EstimateTab の画面表示・AI ツール get_estimate_total・お客様向け見積書・Excel が共用）
  * Pure functions のみ。計算式を変えると画面の金額も変わるため、変更時は両方の影響を確認すること。
  */
 
@@ -17,6 +17,8 @@ export type EstimateTotalItem = {
 export type EstimateTotalSettings = {
   miscExpenseOverride: number | null
   roundingDiscount:    number
+  /** 消費税率。省略時は TAX_RATE（見積エディタ）。見積書・Excel は会社の tax_rate を渡す */
+  taxRate?:            number
 }
 
 export type EstimateTotals = {
@@ -52,12 +54,20 @@ export function calculateEstimateTotals(
   items: readonly EstimateTotalItem[],
   settings: EstimateTotalSettings,
 ): EstimateTotals {
-  const itemSubtotal = items.reduce((acc, i) => acc + liveAmount(i), 0)
+  return totalsFromItemSubtotal(items.reduce((acc, i) => acc + liveAmount(i), 0), settings)
+}
+
+/**
+ * 明細の小計（行ごとに四捨五入した金額の和）から、諸経費・端数値引・消費税・税込合計を出す。
+ * 諸経費は手動の上書きを優先し、なければ 小計 × 8% を四捨五入。消費税は 税抜合計 × 税率 の切り捨て。
+ * 見積書・Excel は工種ごとに集めた小計をここに渡す（見積エディタと同じ式になる）
+ */
+export function totalsFromItemSubtotal(itemSubtotal: number, settings: EstimateTotalSettings): EstimateTotals {
   const overhead     = settings.miscExpenseOverride != null
     ? settings.miscExpenseOverride
     : Math.round(itemSubtotal * OVERHEAD_RATE)
   const preTaxTotal  = itemSubtotal + overhead - settings.roundingDiscount
-  const tax          = Math.floor(preTaxTotal * TAX_RATE)
+  const tax          = Math.floor(preTaxTotal * (settings.taxRate ?? TAX_RATE))
   return {
     itemSubtotal,
     overhead,

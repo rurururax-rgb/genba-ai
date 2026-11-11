@@ -25,6 +25,7 @@ import { XMLParser, XMLBuilder } from 'fast-xml-parser'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { extractMemoContent } from '@/lib/estimate/memo-utils'
+import { totalsFromItemSubtotal } from '@/lib/estimate/totals'
 
 // ──────────────────────────────────────────────────────────
 // 定数
@@ -73,6 +74,10 @@ export type FillInputV2 = {
   groups:    FillGroupV2[]
   ungrouped: (FillItemV2 & { sort_order: number })[]
   tax_rate:  number
+  /** 案件の諸経費の手動上書き（projects.misc_expense_override）。null なら 小計 × 8% */
+  misc_expense_override?: number | null
+  /** 案件の端数値引（projects.rounding_discount）。正の値で入る */
+  rounding_discount?:     number | null
 }
 
 export type FillResultV2 = {
@@ -318,18 +323,35 @@ function fillGroupSummaryNodes(rows: XNode[], input: FillInputV2): void {
 // フッター合計（H54 / H55 / H57）
 // ──────────────────────────────────────────────────────────
 
+// お客様向け見積書（EstimateDocument）と同じ計算（lib/estimate/totals.ts の totalsFromItemSubtotal）で書く。
+//   H52 諸経費（手動の上書きを優先。テンプレートの数式 K44*0.08 は丸めないため値で置き換える）
+//   H53 端数値引（マイナスで表示。0 なら空欄のまま）
+//   H54 合計（税抜）= 明細の小計 + 諸経費 − 端数値引
+//   H55 消費税（切り捨て）  H57 総合計（税込）
 function fillFooterTotalsNodes(rows: XNode[], input: FillInputV2): void {
-  const subtotal = [
+  const itemSubtotal = [
     ...input.groups.flatMap(g => g.items),
     ...input.ungrouped,
   ].reduce((s, it) => s + (it.amount ?? 0), 0)
 
-  const tax        = Math.round(subtotal * input.tax_rate)
-  const grandTotal = subtotal + tax
+  const totals = totalsFromItemSubtotal(itemSubtotal, {
+    miscExpenseOverride: input.misc_expense_override ?? null,
+    roundingDiscount:    input.rounding_discount ?? 0,
+    taxRate:             input.tax_rate,
+  })
 
-  for (const [rowNum, value] of [[54, subtotal], [55, tax], [57, grandTotal]] as [number, number][]) {
+  const cells: Array<[number, number | null]> = [
+    [52, totals.overhead],
+    [53, totals.roundingDiscount !== 0 ? -totals.roundingDiscount : null],
+    [54, totals.preTaxTotal],
+    [55, totals.tax],
+    [57, totals.totalIncludingTax],
+  ]
+  for (const [rowNum, value] of cells) {
     const rowWrapper = findRowWrapper(rows, rowNum)
-    if (rowWrapper) setFormulaCell(rowWrapper, 'H', rowNum, value)
+    if (!rowWrapper) continue
+    if (value == null) clearCellNode(rowWrapper, 'H', rowNum)
+    else setFormulaCell(rowWrapper, 'H', rowNum, value)
   }
 }
 

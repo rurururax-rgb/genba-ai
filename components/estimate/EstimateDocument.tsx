@@ -11,6 +11,7 @@ import { PrintButton } from './PrintButton'
 import type { CustomerEstimateItem } from '@/lib/estimate/customer-output'
 import { formatEstimateValidity } from '@/lib/estimate/validity'
 import { supportsLegacyRugsDocuments } from '@/lib/company/templates'
+import { totalsFromItemSubtotal } from '@/lib/estimate/totals'
 
 // お客様向け明細（社内メモ・原価・業者名を含まない）。toCustomerEstimateItems() を通したもののみ
 type Item = CustomerEstimateItem
@@ -191,11 +192,13 @@ export function EstimateDocument({ projectId, project, company, groups, items }:
 
   const p = project as typeof project & { misc_expense_override?: number | null; rounding_discount?: number | null }
   const subtotalAll     = grouped.reduce((s, g) => s + g.subtotal, 0)
-  const miscExpense     = p.misc_expense_override != null ? p.misc_expense_override : Math.round(subtotalAll * 0.08)
-  const roundingDiscount = p.rounding_discount ?? 0
-  const taxBase         = subtotalAll + miscExpense - roundingDiscount
-  const taxAmount       = Math.floor(taxBase * taxRate)
-  const grandTotal      = taxBase + taxAmount
+  // 諸経費・端数値引・消費税は見積エディタ・Excel と同じ関数で出す（lib/estimate/totals.ts）
+  const totals = totalsFromItemSubtotal(subtotalAll, {
+    miscExpenseOverride: p.misc_expense_override ?? null,
+    roundingDiscount:    p.rounding_discount ?? 0,
+    taxRate,
+  })
+  const grandTotal      = totals.totalIncludingTax
 
   // 会社名は会社設定（display_name → name）のみから出す。特定会社名を fallback にしない
   const companyName = (company?.display_name ?? company?.name ?? '').trim()

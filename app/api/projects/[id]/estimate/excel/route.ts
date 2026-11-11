@@ -18,7 +18,7 @@ export async function GET(
   // プロジェクト + 会社情報（tax_rate を含む）
   const { data: project, error: projErr } = await supabase
     .from('projects')
-    .select('name, customer_name, site_address, companies(name, tax_rate, template_id)')
+    .select('name, customer_name, site_address, misc_expense_override, rounding_discount, companies(name, tax_rate, template_id)')
     .eq('id', projectId)
     .single()
 
@@ -65,7 +65,11 @@ export async function GET(
     return NextResponse.json({ error: '見積項目がありません' }, { status: 400 })
   }
 
-  const fillInput = buildEstimateExcelInput(groups ?? [], items, taxRate)
+  // 合計は見積書と同じ（諸経費の上書き・端数値引を反映し、消費税は切り捨て）
+  const fillInput = buildEstimateExcelInput(groups ?? [], items, taxRate, {
+    misc_expense_override: project.misc_expense_override as number | null,
+    rounding_discount:     project.rounding_discount as number | null,
+  })
 
   let result
   try {
