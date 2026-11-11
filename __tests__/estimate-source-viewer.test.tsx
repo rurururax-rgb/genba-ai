@@ -56,6 +56,28 @@ describe('見積の原本画像ビューア', () => {
     expect(element.querySelector('[data-testid=source-zoom]')?.textContent).toContain('100%')
   })
 
+  it('明細からの開く要求で、同じ画像でも原本の拡大表示を開く', () => {
+    const element = document.createElement('div')
+    document.body.appendChild(element)
+    const localRoot = createRoot(element)
+    let count = 0
+    const show = () => act(() => localRoot.render(
+      <EstimateSourceViewer pages={pages} selectedKey={pages[0].key} onSelect={() => {}} openRequest={count} />,
+    ))
+    show()
+    expect(document.querySelector('[role=dialog]')).toBeNull()
+    count++
+    show()
+    expect(document.querySelector('[role=dialog]')).not.toBeNull()
+    act(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+    expect(document.querySelector('[role=dialog]')).toBeNull()
+    count++
+    show()
+    expect(document.querySelector('[role=dialog]')).not.toBeNull()
+    act(() => localRoot.unmount())
+    element.remove()
+  })
+
   it('拡大モーダルから元画像を表示し、Escapeで閉じる', () => {
     const { element } = mount()
     click(element, '大きく表示')
