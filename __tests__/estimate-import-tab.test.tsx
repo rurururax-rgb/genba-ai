@@ -396,6 +396,7 @@ describe('原本と読み取り候補を見比べる', () => {
     expect(cards()).toHaveLength(2)
     click(btnIn(cards()[1], '原本を見る'))
     expect(container.querySelector('[data-testid=estimate-source-viewer]')?.textContent).toContain('b.jpg（2/2）')
+    expect(document.querySelector('[role=dialog] img')?.getAttribute('alt')).toContain('b.jpg')
     expect(cards()).toHaveLength(2)
     expect(imports).toHaveLength(0)
   })
