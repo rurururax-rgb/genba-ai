@@ -403,8 +403,14 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
           <p style={{ fontSize: 14, fontWeight: 600, color: G.textSec, marginBottom: 4 }}>
             請求書画像をドラッグ＆ドロップ
           </p>
+          <p style={{ fontSize: 12, color: G.textTer, marginBottom: 2 }}>
+            またはクリックしてファイルを選択
+          </p>
+          <p style={{ fontSize: 12, color: G.textTer, marginBottom: 2 }}>
+            JPEG・PNG・WebPに対応（元画像40MBまで）
+          </p>
           <p style={{ fontSize: 12, color: G.textTer }}>
-            またはクリックしてファイルを選択（JPEG / PNG / WebP・最大8MB）
+            大きな画像は送信前に自動縮小します（縮小できない画像は読み取れないことがあります）。HEIC・PDFには対応していません。
           </p>
         </div>
       )}

@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { VendorInvoiceImportTab } from '@/components/projects/VendorInvoiceImportTab'
+import { SOURCE_MAX_BYTES } from '@/lib/cost-ledger/invoice-image'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -303,6 +304,17 @@ describe('VendorInvoiceImportTab：トライアル前の修正（金額不明・
     expect(text()).not.toContain('金額の整合OK')
     expect(text()).toContain('値引き ¥1,000')
     expect(text()).toContain('値引きの記載があります')
+  })
+
+  it('ファイル選択前の案内：対応形式・元画像の上限（SOURCE_MAX_BYTES と同じ 40MB）・自動縮小・HEIC と PDF 非対応を示し、古い「最大8MB」は出さない', async () => {
+    await mount()
+    expect(SOURCE_MAX_BYTES).toBe(40 * 1024 * 1024)
+    expect(text()).toContain('JPEG・PNG・WebPに対応（元画像40MBまで）')
+    expect(text()).toContain('大きな画像は送信前に自動縮小します')
+    // 40MB 以内なら必ず読み取れる、とは読めないようにする
+    expect(text()).toContain('縮小できない画像は読み取れないことがあります')
+    expect(text()).toContain('HEIC・PDFには対応していません。')
+    expect(text()).not.toContain('8MB')
   })
 
   it('HEIC を選ぶ → 理由と対処を案内し、読み取らない', async () => {
