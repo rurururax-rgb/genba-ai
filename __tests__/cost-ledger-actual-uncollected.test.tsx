@@ -69,6 +69,7 @@ describe('請求粗利率のカード', () => {
   it('実績原価が全行 NULL（初期化直後）: 「未集計」と出し、率・粗利を出さない', async () => {
     const text = await invoiceCard([null, null, null])
     expect(text).toContain('未集計')
+    expect(text).not.toContain('暫定')
     expect(text).not.toContain('%')
     expect(text).not.toContain('売上')   // 売上・業者請求・粗利の金額欄を出さない
   })
@@ -76,12 +77,21 @@ describe('請求粗利率のカード', () => {
   it('一部の行だけ実績原価がある: 何項目分の業者請求かを出す', async () => {
     const text = await invoiceCard([200000, null, null])
     expect(text).toContain('業者請求（3 項目中 1 項目）')
-    expect(text).toContain('60.0%')   // (500,000 − 200,000) ÷ 500,000
+    expect(text).toContain('暫定・請求登録分のみ')   // 確定した粗利率に見せない
+    expect(text).toContain('60.0%')   // 計算式は変えない: (500,000 − 200,000) ÷ 500,000
+  })
+
+  it('全項目に実績原価がある: 「暫定」を出さない', async () => {
+    const text = await invoiceCard([200000, 100000, 50000])
+    expect(text).not.toContain('暫定')
+    expect(text).not.toContain('項目中')
+    expect(text).toContain('30.0%')   // (500,000 − 350,000) ÷ 500,000
   })
 
   it('0 円は入力済みとして数える（NULL と区別）', async () => {
     const text = await invoiceCard([0, 0, 0])
     expect(text).not.toContain('未集計')
+    expect(text).not.toContain('暫定')
     expect(text).toContain('業者請求')
     expect(text).not.toContain('項目中')
     expect(text).toContain('100.0%')
