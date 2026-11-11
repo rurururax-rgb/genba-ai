@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, type CSSProperties } from 'react'
+import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 
 export type EstimateSourcePage = {
@@ -59,6 +59,7 @@ function ImageViewport({ page, zoom, expanded }: { page: EstimateSourcePage; zoo
  * モーダルでも同じ画像 URL を使い、画像を Storage / DB に送らない。
  */
 export function EstimateSourceViewer({ pages, selectedKey, onSelect }: Props) {
+  const wrapperRef = useRef<HTMLElement>(null)
   const [zoomIndex, setZoomIndex] = useState(0)
   const [expanded, setExpanded] = useState(false)
   const active = pages.find(p => p.key === selectedKey) ?? pages[0]
@@ -70,8 +71,9 @@ export function EstimateSourceViewer({ pages, selectedKey, onSelect }: Props) {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setExpanded(false)
     }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
+    const doc = wrapperRef.current?.ownerDocument ?? document
+    doc.addEventListener('keydown', onKeyDown)
+    return () => doc.removeEventListener('keydown', onKeyDown)
   }, [expanded])
 
   if (!active) return null
@@ -110,7 +112,7 @@ export function EstimateSourceViewer({ pages, selectedKey, onSelect }: Props) {
   )
 
   return (
-    <section aria-label="見積書の原本" data-testid="estimate-source-viewer"
+    <section ref={wrapperRef} aria-label="見積書の原本" data-testid="estimate-source-viewer"
       style={{ background: '#fff', borderBottom: '1px solid #BDD1C3', padding: '10px 12px', position: 'sticky', top: 0, zIndex: 5 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 6 }}>
         <strong style={{ fontSize: 13, color: '#192C1F' }}>原本を見ながら確認</strong>
@@ -142,7 +144,7 @@ export function EstimateSourceViewer({ pages, selectedKey, onSelect }: Props) {
             <ImageViewport page={active} zoom={ZOOMS[zoomIndex]} expanded />
           </section>
         </div>,
-        document.body,
+        wrapperRef.current?.ownerDocument.body ?? document.body,
       )}
     </section>
   )
