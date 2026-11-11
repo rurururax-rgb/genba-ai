@@ -17,8 +17,10 @@ export async function POST(req: NextRequest) {
     .single()
   if (!membership) return NextResponse.json({ error: 'No company' }, { status: 403 })
 
-  const body = await req.json() as { project_id: string }
-  if (!body.project_id) return NextResponse.json({ error: 'project_id required' }, { status: 400 })
+  const body = await req.json().catch(() => null) as { project_id?: unknown } | null
+  if (!body || typeof body.project_id !== 'string' || !body.project_id) {
+    return NextResponse.json({ error: 'project_id required' }, { status: 400 })
+  }
 
   const projectId = body.project_id
   const companyId = membership.company_id
@@ -27,13 +29,17 @@ export async function POST(req: NextRequest) {
   }
 
   // 既存の台帳アイテムがある場合はスキップ（初期化済み）
-  const { count } = await supabase
+  // 件数を確かめられないまま作ると二重に作るおそれがあるので、読み取りの失敗は 500 で止める
+  const { count, error: countErr } = await supabase
     .from('cost_ledger_items')
     .select('id', { count: 'exact', head: true })
     .eq('project_id', projectId)
     .is('deleted_at', null)
+  if (countErr || count == null) {
+    return NextResponse.json({ error: '原価台帳の状態を確認できませんでした。台帳は作成していません。' }, { status: 500 })
+  }
 
-  if ((count ?? 0) > 0) {
+  if (count > 0) {
     return NextResponse.json(
       { error: '台帳はすでに初期化済みです。既存の行を削除してから再試行してください。' },
       { status: 409 }
@@ -59,7 +65,9 @@ export async function POST(req: NextRequest) {
   // cost_ledger_items を生成
   // estimate_cost = cost_price × quantity（スナップショット・変更不可）
   // budget_cost   = estimate_cost と同値でスタート（編集可能）
-  // actual_cost   = estimate_cost（取り込み時の原価を初期値として引き継ぎ）
+  // actual_cost   = NULL（未集計）。実績原価は業者請求書の登録・業者請求額の入力で入る。
+  //                 見積原価を入れておくと、請求がまだ無いのに「業者請求」「請求粗利率」が見積どおりに見えるため入れない
+  //                 （0 円とも区別する。0 は「実績が 0 円」と入力された値）
   const rows = estimateItems.map(item => {
     const estimateCost = item.cost_price != null
       ? item.cost_price * (item.quantity ?? 1)
@@ -74,7 +82,7 @@ export async function POST(req: NextRequest) {
       unit:             item.unit ?? '式',
       estimate_cost:    estimateCost,
       budget_cost:      estimateCost,
-      actual_cost:      estimateCost,
+      actual_cost:      null,
       vendor_name:      item.vendor_name ?? null,
       sort_order:       item.sort_order ?? 0,
       source:           'from_estimate',

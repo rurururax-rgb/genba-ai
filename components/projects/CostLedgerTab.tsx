@@ -907,6 +907,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
           estGross={estGross} estRate={estRate}
           completionGross={completionGross} completionRate={completionRate}
           actualGross={actualGross} actualRate={actualRate}
+          actualItemCount={items.filter(i => i.actual_cost != null).length} itemCount={items.length}
           additionalAmounts={additionalAmounts}
           onEditAdditional={idx => setEditingAdditional({ idx, value: String(additionalAmounts[idx] ?? '') })}
         />
@@ -2099,12 +2100,15 @@ function SummaryCards({
   smry, estGross, estRate,
   completionGross, completionRate,
   actualGross, actualRate,
+  actualItemCount, itemCount,
   additionalAmounts, onEditAdditional,
 }: {
   smry: Summary
   estGross: number; estRate: number
   completionGross: number; completionRate: number
   actualGross: number; actualRate: number
+  /** 実績原価が入っている台帳項目の数（NULL は未集計。0 円は入力済みとして数える） */
+  actualItemCount: number; itemCount: number
   additionalAmounts: [number|null, number|null, number|null]
   onEditAdditional: (idx: number) => void
 }) {
@@ -2194,10 +2198,10 @@ function SummaryCards({
           rate={actualRate}
           gross={actualGross}
           revenue={smry.contract_amount}
-          costLabel="業者請求"
+          costLabel={actualItemCount < itemCount ? `業者請求（${itemCount} 項目中 ${actualItemCount} 項目）` : '業者請求'}
           costValue={smry.actual_cost_total}
           variant="light"
-          noDataMsg="業者請求額を入力すると表示"
+          noDataMsg="未集計（業者請求書を登録すると表示）"
           hasData={smry.has_actual_data}
         />
       </div>
