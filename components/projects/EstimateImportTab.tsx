@@ -7,6 +7,7 @@ import {
   type EstimateOcrFile, type EstimateOcrItem, type OcrMessage,
 } from '@/lib/estimate/ocr-extraction'
 import { checkEstimateImageFile, formatMegabytes, prepareEstimateImage } from '@/lib/estimate/ocr-image'
+import { EstimateSourceViewer } from './EstimateSourceViewer'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -139,6 +140,8 @@ export function EstimateImportTab({ projectId }: Props) {
   const [confirmAll,   setConfirmAll]  = useState(false)
   /** 画像全体の警告を確認済みにした画像（fileKey） */
   const [ackedFiles,   setAckedFiles]  = useState<Set<string>>(new Set())
+  /** 原本ビューアの表示中画像。明細ごとの登録・確認状態とは独立 */
+  const [selectedSourceKey, setSelectedSourceKey] = useState<string | null>(null)
 
   // ドラッグ成功の通知（一度だけ登録するリスナー）から最新の行・画像を参照するため
   const rowsRef = useRef<CandidateRow[]>([])
@@ -247,6 +250,7 @@ export function EstimateImportTab({ projectId }: Props) {
     clearResults()
     previews.forEach(u => URL.revokeObjectURL(u))
     setFiles(combined)
+    setSelectedSourceKey(fileKey(combined[0]))
     setPreviews(combined.map(f => URL.createObjectURL(f)))
     setFileStates(combined.map(() => ({ state: 'selected' })))
   }
@@ -255,7 +259,9 @@ export function EstimateImportTab({ projectId }: Props) {
     if (loading) return
     clearResults(); setNotices([])
     URL.revokeObjectURL(previews[i])
-    setFiles(files.filter((_, idx) => idx !== i))
+    const remaining = files.filter((_, idx) => idx !== i)
+    setSelectedSourceKey(prev => remaining.some(f => fileKey(f) === prev) ? prev : remaining[0] ? fileKey(remaining[0]) : null)
+    setFiles(remaining)
     setPreviews(previews.filter((_, idx) => idx !== i))
     setFileStates(fileStates.filter((_, idx) => idx !== i))
   }
@@ -264,7 +270,7 @@ export function EstimateImportTab({ projectId }: Props) {
     abortRef.current?.abort()
     clearResults()
     previews.forEach(u => URL.revokeObjectURL(u))
-    setFiles([]); setPreviews([]); setFileStates([]); setNotices([]); setLoading(false)
+    setFiles([]); setPreviews([]); setFileStates([]); setNotices([]); setLoading(false); setSelectedSourceKey(null)
   }
 
   /** 画像 1 枚を縮小して送り、結果を返す */
@@ -593,6 +599,15 @@ export function EstimateImportTab({ projectId }: Props) {
       )}
       {error && <div style={s.errorBox} role="alert">{error}</div>}
 
+      {/* ── 原本表示（選択後から取り込み完了まで保持。送信前の元画像を表示）── */}
+      {files.length > 0 && (
+        <EstimateSourceViewer
+          pages={files.map((f, i) => ({ key: fileKey(f), name: f.name, url: previews[i] }))}
+          selectedKey={selectedSourceKey}
+          onSelect={setSelectedSourceKey}
+        />
+      )}
+
       {/* ── 抽出結果（カード一覧）── */}
       {showResults && (
         <>
@@ -693,6 +708,7 @@ export function EstimateImportTab({ projectId }: Props) {
                 onAdd={confirmed => quickAdd(row, confirmed)}
                 onAck={() => acknowledge([row])}
                 onChange={patch => updateRow(row.id, patch)}
+                onShowSource={() => setSelectedSourceKey(row.fileKey)}
               />
             ))}
           </div>
@@ -710,7 +726,7 @@ export function EstimateImportTab({ projectId }: Props) {
 
 // ── ItemCard ──────────────────────────────────────────────
 
-function ItemCard({ row, removing, adding, pending, onAdd, onAck, onChange }: {
+function ItemCard({ row, removing, adding, pending, onAdd, onAck, onChange, onShowSource }: {
   row: CandidateRow
   removing: boolean
   adding: boolean
@@ -720,6 +736,7 @@ function ItemCard({ row, removing, adding, pending, onAdd, onAck, onChange }: {
   /** 確認済みにする（その後はドラッグで見積エディタの好きな位置に入れられる） */
   onAck: () => void
   onChange: (patch: Partial<Pick<CandidateRow, 'name' | 'quantity' | 'unit' | 'cost_price'>>) => void
+  onShowSource: () => void
 }) {
   const [dragOver, setDragOver] = useState(false)
   const [editing, setEditing] = useState(false)
@@ -792,6 +809,7 @@ function ItemCard({ row, removing, adding, pending, onAdd, onAck, onChange }: {
           }}>
             {row.name || '（品名なし）'}
           </div>
+          <button type="button" style={s.editBtn} onClick={onShowSource} title="この明細の原本画像を表示">原本を見る</button>
           <button
             style={s.editBtn}
             onClick={() => setEditing(v => !v)}
