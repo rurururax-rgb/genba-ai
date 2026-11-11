@@ -374,3 +374,37 @@ describe('複数画像: 確認する警告は、その行の取り込み元の�
     expect(groups.find(g => g.includes('b.jpg'))).toContain('照合で見つけられません')
   })
 })
+
+describe('原本と読み取り候補を見比べる', () => {
+  it('選択した画像は元画像のblob URLで表示され、追加後も表示されたまま', async () => {
+    extractReply = name => json({ files: [fileResult(name, [GOOD])], items: [GOOD], failures: [] })
+    await readImages([img('original.jpg')])
+    const viewer = container.querySelector('[data-testid=estimate-source-viewer]') as HTMLElement
+    expect(viewer).not.toBeNull()
+    const originalSrc = (viewer.querySelector('img') as HTMLImageElement).getAttribute('src')
+    expect(originalSrc).toBe('blob:preview')
+    click(addBtnOf(cards()[0]))
+    await flush()
+    expect(imports).toHaveLength(1)
+    expect(container.querySelector('[data-testid=estimate-source-viewer] img')?.getAttribute('src')).toBe(originalSrc)
+  })
+
+  it('候補の「原本を見る」で対応するページを表示し、候補・確認状態は消えない', async () => {
+    const b = { ...GOOD, name: '追加の見積明細' }
+    extractReply = name => json({ files: [fileResult(name, [name === 'a.jpg' ? GOOD : b])], items: [], failures: [] })
+    await readImages([img('a.jpg'), img('b.jpg')])
+    expect(cards()).toHaveLength(2)
+    click(btnIn(cards()[1], '原本を見る'))
+    expect(container.querySelector('[data-testid=estimate-source-viewer]')?.textContent).toContain('b.jpg（2/2）')
+    expect(cards()).toHaveLength(2)
+    expect(imports).toHaveLength(0)
+  })
+
+  it('画像選び直しで前のblobを解放し、取り込み候補は残さない', async () => {
+    await readImages([img('a.jpg')])
+    click(button('画像を変更'))
+    expect(container.querySelector('[data-testid=estimate-source-viewer]')).toBeNull()
+    expect(cards()).toHaveLength(0)
+    expect(URL.revokeObjectURL).toHaveBeenCalled()
+  })
+})
