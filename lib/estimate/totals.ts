@@ -28,9 +28,24 @@ export type EstimateTotals = {
   totalIncludingTax: number
 }
 
-/** 明細1行の金額。売価があれば数量×売価（四捨五入）、なければ DB の amount */
+/**
+ * 円未満の四捨五入。0.5 円は 0 から遠い方へ丸める（値引きの -0.5 円は -1 円。Math.round だと -0 になる）。
+ * 12.5 × 2,755 のような小数の掛け算の誤差（例: 4.35 × 100 = 434.99999999999994）を 6 桁で吸収してから丸める。
+ */
+export function roundYen(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  const rounded = Math.round(Number(Math.abs(value).toFixed(6)))
+  return rounded === 0 ? 0 : Math.sign(value) * rounded
+}
+
+/**
+ * 明細1行の金額（円）。売価があれば 数量×売価 を四捨五入、なければ DB の amount を四捨五入。
+ * 見積の合計は、この行ごとの金額を足して作る（合計だけを丸めない）。数量・売価そのものは丸めない。
+ * DB の estimate_items.amount（GENERATED: quantity × selling_price）は円未満を含みうるので、合計・出力に直接使わない。
+ */
 export function liveAmount(item: EstimateTotalItem): number {
-  return item.selling_price != null ? Math.round(item.quantity * item.selling_price) : (item.amount ?? 0)
+  if (item.selling_price != null) return roundYen(item.quantity * item.selling_price)
+  return item.amount == null ? 0 : roundYen(item.amount)
 }
 
 export function calculateEstimateTotals(

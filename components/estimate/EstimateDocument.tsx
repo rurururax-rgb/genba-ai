@@ -41,6 +41,12 @@ function n(v: number | null | undefined): string {
   return Math.round(Math.abs(v)).toLocaleString('ja-JP')
 }
 
+/** 単価は丸めずに表示する（見積エディタと同じ表記。2,755.5 は 2,755.5 のまま） */
+function unitPrice(v: number | null | undefined): string {
+  if (v == null) return ''
+  return Math.abs(v).toLocaleString('ja-JP')
+}
+
 function isSection(s: string | null)  { return /^【.*】/.test((s ?? '').trim()) }
 function isWarning(s: string | null)  { return /^※/.test((s ?? '').trim()) }
 function isBlank(s: string | null)    { return !(s ?? '').trim() }
@@ -653,7 +659,7 @@ export function EstimateDocument({ projectId, project, company, groups, items }:
                           {item.unit}
                         </td>
                         <td style={{ ...td0, textAlign: 'right', color: red }}>
-                          {showPrice ? n(item.selling_price) : ''}
+                          {showPrice ? unitPrice(item.selling_price) : ''}
                         </td>
                         <td style={{ ...td0, textAlign: 'right', color: red }}>
                           {item.amount != null

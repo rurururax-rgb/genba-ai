@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
+import { liveAmount } from '@/lib/estimate/totals'
 import { isActiveProject } from '@/lib/estimate/ownership'
 
 // ──────────────────────────────────────────────────────────
@@ -55,7 +56,8 @@ export async function GET(req: NextRequest) {
     .eq('id', projectId)
     .single()
 
-  const estimateRevenue = (estimateItems ?? []).reduce((s, i) => s + (i.amount ?? 0), 0)
+  // 受注金額（見積明細の合計）は見積エディタと同じく、行ごとに四捨五入した金額を足す
+  const estimateRevenue = (estimateItems ?? []).reduce((s, i) => s + liveAmount(i), 0)
   const estimateCostTotal = (estimateItems ?? []).reduce((s, i) => {
     if (i.cost_price == null) return s
     return s + i.cost_price * (i.quantity ?? 1)
@@ -79,9 +81,7 @@ export async function GET(req: NextRequest) {
   const vendorSelling: Record<string, number> = {}
   for (const item of estimateItems ?? []) {
     const key = (item.vendor_name as string | null)?.trim() || '（業者未設定）'
-    const selling = item.selling_price != null
-      ? (item.selling_price as number) * ((item.quantity as number) ?? 1)
-      : 0
+    const selling = item.selling_price != null ? liveAmount(item) : 0
     vendorSelling[key] = (vendorSelling[key] ?? 0) + selling
   }
 
