@@ -132,6 +132,7 @@ describe('toAmount / toPrintedAmounts（AI の出力の形は信用しない）'
         { rate: null, taxable_amount: null, tax_amount: null },
         { rate: null, taxable_amount: null, tax_amount: null },
       ],
+      adjustments: [],
     })
     expect(toPrintedAmounts(null).tax_treatment).toBe('unknown')
   })
@@ -180,5 +181,91 @@ describe('税率ごとの内訳は金額の判定に影響しない（合計欄�
     const r = reviewInvoiceAmounts(printed({ subtotal_excl_tax: 98765, tax_amount: 9877, total_incl_tax: 108641, tax_treatment: 'exclusive' }))
     expect(r).toMatchObject({ suggested_excl_tax: 98765, status: 'needs_review' })
     expect(warns(r)[0]).toContain('差 ¥1')
+  })
+})
+
+describe('値引き・源泉徴収・税率混在：根拠がなければ照合 OK にしない（トライアル前の修正）', () => {
+  const discount = (amount: number) => ({ kind: 'discount' as const, amount })
+  const withholding = (amount: number) => ({ kind: 'withholding' as const, amount })
+
+  it('値引き後の税抜合計が印字されていない（小計 100,000・値引き 1,000・税 9,900・税込 108,900）→ 要確認、候補は税込 − 税 = 99,000', () => {
+    const r = reviewInvoiceAmounts(printed({
+      subtotal_excl_tax: 100000, tax_amount: 9900, total_incl_tax: 108900, tax_treatment: 'exclusive', adjustments: [discount(1000)],
+    }))
+    expect(r).toMatchObject({ suggested_excl_tax: 99000, suggested_from: 'printed_total_minus_tax', status: 'needs_review' })
+    expect(warns(r).join()).toContain('値引きの記載があります')
+  })
+
+  it('AI が値引き後の税抜 99,000 を計算して返しても（印字どうしは一致）、値引きの記載があれば照合 OK にしない', () => {
+    const r = reviewInvoiceAmounts(printed({
+      subtotal_excl_tax: 99000, tax_amount: 9900, total_incl_tax: 108900, tax_treatment: 'exclusive', adjustments: [discount(1000)],
+    }))
+    expect(r).toMatchObject({ suggested_excl_tax: 99000, status: 'needs_review' })
+  })
+
+  it('源泉徴収あり（税抜 100,000・税 10,000・税込計 110,000・源泉 10,210）→ 源泉徴収前の税抜 100,000 を候補にするが要確認', () => {
+    const r = reviewInvoiceAmounts(printed({
+      subtotal_excl_tax: 100000, tax_amount: 10000, total_incl_tax: 110000, tax_treatment: 'exclusive', adjustments: [withholding(10210)],
+    }))
+    expect(r).toMatchObject({ suggested_excl_tax: 100000, status: 'needs_review' })
+    expect(warns(r).join()).toContain('源泉徴収前の税抜金額')
+  })
+
+  it('源泉徴収あり・差引請求額を税込合計として読んだ（税込 99,790・税 10,000）→ 税込 − 税 を候補にしない', () => {
+    const r = reviewInvoiceAmounts(printed({
+      tax_amount: 10000, total_incl_tax: 99790, tax_treatment: 'exclusive', adjustments: [withholding(10210)],
+    }))
+    expect(r).toMatchObject({ suggested_excl_tax: null, suggested_from: null, status: 'needs_review' })
+  })
+
+  it('源泉徴収と値引きの混在（小計 100,000・値引き 1,000・税 9,900・税込 108,900・源泉 10,107）→ 候補なし・要確認', () => {
+    const r = reviewInvoiceAmounts(printed({
+      subtotal_excl_tax: 100000, tax_amount: 9900, total_incl_tax: 108900, tax_treatment: 'exclusive',
+      adjustments: [discount(1000), withholding(10107)],
+    }))
+    expect(r).toMatchObject({ suggested_excl_tax: null, status: 'needs_review' })
+    expect(warns(r).join()).toContain('値引きの記載があります')
+    expect(warns(r).join()).toContain('源泉徴収')
+  })
+
+  it('値引き・源泉徴収以外の増減（相殺など）→ 要確認', () => {
+    const r = reviewInvoiceAmounts(printed({
+      subtotal_excl_tax: 100000, tax_amount: 10000, total_incl_tax: 110000, tax_treatment: 'exclusive', adjustments: [{ kind: 'other', amount: 5000 }],
+    }))
+    expect(r.status).toBe('needs_review')
+  })
+
+  it('税率混在で税率ごとの対象額が読めていない → 要確認（合計が一致していても）', () => {
+    const r = reviewInvoiceAmounts(printed({
+      subtotal_excl_tax: 60000, tax_amount: 5800, total_incl_tax: 65800, tax_treatment: 'exclusive',
+      tax_breakdown: [{ rate: 10, taxable_amount: null, tax_amount: 5000 }, { rate: 8, taxable_amount: null, tax_amount: 800 }],
+    }))
+    expect(r).toMatchObject({ suggested_excl_tax: 60000, status: 'needs_review' })
+    expect(warns(r).join()).toContain('読み取りきれませんでした')
+  })
+
+  it('税率混在で税抜金額がない（税込・税だけ）→ 要確認', () => {
+    const r = reviewInvoiceAmounts(printed({
+      tax_amount: 5800, total_incl_tax: 65800, tax_treatment: 'exclusive',
+      tax_breakdown: [{ rate: 10, taxable_amount: 50000, tax_amount: 5000 }, { rate: 8, taxable_amount: 10000, tax_amount: 800 }],
+    }))
+    expect(r.status).toBe('needs_review')
+  })
+
+  it('税抜と税込だけで、差額が消費税（10%・8%）として説明できない → 要確認', () => {
+    const r = reviewInvoiceAmounts(printed({ subtotal_excl_tax: 100000, total_incl_tax: 120000 }))
+    expect(r).toMatchObject({ suggested_excl_tax: 100000, status: 'needs_review' })
+    // 8% は OK のまま
+    expect(reviewInvoiceAmounts(printed({ subtotal_excl_tax: 100000, total_incl_tax: 108000 })).status).toBe('ok')
+  })
+
+  it('増減の正規化：マイナス記号・▲ は絶対値、種類が不明なら other、読めない金額は null', () => {
+    expect(toPrintedAmounts({ adjustments: [
+      { kind: 'discount', amount: '-1,000' }, { kind: 'withholding', amount: '▲10,210' },
+      { kind: 'rebate', amount: -500 }, { kind: 'discount', amount: 'x' }, 'junk',
+    ] }).adjustments).toEqual([
+      { kind: 'discount', amount: 1000 }, { kind: 'withholding', amount: 10210 },
+      { kind: 'other', amount: 500 }, { kind: 'discount', amount: null }, { kind: 'other', amount: null },
+    ])
   })
 })

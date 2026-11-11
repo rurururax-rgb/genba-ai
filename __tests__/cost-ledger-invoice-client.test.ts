@@ -216,7 +216,7 @@ describe('VendorInvoiceImportTab', () => {
     expect(clear).toContain('attempt.reset()')
     expect(clear).toContain('setExtracted(null)')
     const extract = importTab.slice(importTab.indexOf('const extract = async'), importTab.indexOf('// 台帳に登録'))
-    expect(extract).toMatch(/if \(genRef\.current !== gen\) return\n\s+if \(!res\.ok\)/)
+    expect(extract).toMatch(/if \(genRef\.current !== gen\) return\n\s+if \(!res\.ok \|\| !data\)/)
   })
 
   it('送信中は画像を変えられない', () => {
@@ -290,7 +290,8 @@ describe('読み取り API', () => {
   it('画像の SHA-256 はサーバーが元のバイト列から計算する', () => {
     expect(extractRoute).toContain("createHash('sha256').update(Buffer.from(arrayBuffer)).digest('hex')")
     // AI の出力は normalizeExtraction で決まった項目だけにし、ハッシュはサーバーの値で最後に付ける（AI の値は使わない）
-    expect(extractRoute).toContain('const extracted = normalizeExtraction(JSON.parse(jsonMatch[0]))')
+    expect(extractRoute).toContain('parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : null')
+    expect(extractRoute).toContain('const extracted = normalizeExtraction(parsed)')
     expect(extractRoute).toMatch(/\{ \.\.\.extracted, document_sha256 \}/)
   })
 })
