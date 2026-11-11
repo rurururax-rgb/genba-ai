@@ -142,6 +142,8 @@ export function EstimateImportTab({ projectId }: Props) {
   const [ackedFiles,   setAckedFiles]  = useState<Set<string>>(new Set())
   /** 原本ビューアの表示中画像。明細ごとの登録・確認状態とは独立 */
   const [selectedSourceKey, setSelectedSourceKey] = useState<string | null>(null)
+  /** 同じ画像を再度選んでも原本を表示できるよう、クリック回数を通知する */
+  const [openSourceRequest, setOpenSourceRequest] = useState(0)
 
   // ドラッグ成功の通知（一度だけ登録するリスナー）から最新の行・画像を参照するため
   const rowsRef = useRef<CandidateRow[]>([])
@@ -605,6 +607,7 @@ export function EstimateImportTab({ projectId }: Props) {
           pages={files.map((f, i) => ({ key: fileKey(f), name: f.name, url: previews[i] }))}
           selectedKey={selectedSourceKey}
           onSelect={setSelectedSourceKey}
+          openRequest={openSourceRequest}
         />
       )}
 
@@ -708,7 +711,10 @@ export function EstimateImportTab({ projectId }: Props) {
                 onAdd={confirmed => quickAdd(row, confirmed)}
                 onAck={() => acknowledge([row])}
                 onChange={patch => updateRow(row.id, patch)}
-                onShowSource={() => setSelectedSourceKey(row.fileKey)}
+                onShowSource={() => {
+                  setSelectedSourceKey(row.fileKey)
+                  setOpenSourceRequest(n => n + 1)
+                }}
               />
             ))}
           </div>
