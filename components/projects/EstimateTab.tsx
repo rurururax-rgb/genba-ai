@@ -25,7 +25,7 @@ import { MoveGap, MoveModeBar, MoveTargetBlock, moveTargetLabel, useEstimateMove
 import { ItemPricingPopover, MarginCell, fmtMarginPct, fmtMarkup } from './ItemPricingPopover'
 import { ProjectMarkupDialog } from './ProjectMarkupDialog'
 import { ItemMemoPopover, LockIcon } from './ItemMemoPopover'
-import { EstimateImportTab } from './EstimateImportTab'
+import { DetachableEstimateImportPanel } from './DetachableEstimateImportPanel'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -3638,35 +3638,9 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
 
       </div>
 
-      {/* ── 取込パネル（右サイドパネル）── */}
+      {/* ── 取込パネル。単一Reactコンポーネントを右モニターへ移動できる ── */}
       {showImportModal && (
-        <div style={{
-          width: 380, flexShrink: 0, display: 'flex', flexDirection: 'column',
-          borderRadius: 10, border: `1px solid ${C.divider}`,
-          boxShadow: '0 1px 4px rgba(26,35,50,0.06)',
-          background: C.bg, overflow: 'hidden',
-          // スクロール追従: 見積エディタを下にスクロールしても右パネルが追従
-          position: 'sticky', top: 12, alignSelf: 'flex-start',
-          maxHeight: 'calc(100dvh - 24px)',
-        }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 16px', height: 52, borderBottom: HDIV, flexShrink: 0 }}>
-            <span style={{ fontSize: 14, fontWeight: 700, color: '#1A2E24', fontFamily: FONT }}>見積書を取り込む</span>
-            <Button
-              type="button"
-              variant="tertiary"
-              size="icon"
-              aria-label="取込パネルを閉じる"
-              onClick={() => setShowImportModal(false)}
-            >
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
-              </svg>
-            </Button>
-          </div>
-          <div style={{ flex: 1, overflow: 'auto' }}>
-            <EstimateImportTab projectId={projectId} />
-          </div>
-        </div>
+        <DetachableEstimateImportPanel projectId={projectId} onClose={() => setShowImportModal(false)} />
       )}
     </div>
 
