@@ -10,6 +10,8 @@ export function buildEstimateExcelInput(
   groups:  ReadonlyArray<{ id: string; label: string | null; display_mode: string | null; sort_order: number }>,
   items:   ReadonlyArray<CustomerEstimateItem>,
   taxRate: number,
+  /** 案件の諸経費の手動上書き・端数値引（見積書と同じ合計にするため） */
+  project: { misc_expense_override?: number | null; rounding_discount?: number | null } = {},
 ): FillInputV2 {
   const toFill = (i: CustomerEstimateItem) => ({
     name:          i.name ?? '',
@@ -34,5 +36,9 @@ export function buildEstimateExcelInput(
     .filter(i => !i.group_id)
     .map(i => ({ ...toFill(i), sort_order: i.sort_order }))
 
-  return { groups: fillGroups, ungrouped, tax_rate: taxRate }
+  return {
+    groups: fillGroups, ungrouped, tax_rate: taxRate,
+    misc_expense_override: project.misc_expense_override ?? null,
+    rounding_discount:     project.rounding_discount ?? 0,
+  }
 }
