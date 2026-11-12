@@ -408,3 +408,47 @@ describe('原本と読み取り候補を見比べる', () => {
     expect(URL.revokeObjectURL).toHaveBeenCalled()
   })
 })
+
+describe('別モニターの幅広い原本照合', () => {
+  it('見積エディタに似た数量・単位・原価・原本金額の整列表示でも登録値を変えない', async () => {
+    extractReply = name => json({ files: [fileResult(name, [GOOD])], items: [GOOD], failures: [] })
+    await readImages([img('a.jpg')])
+    act(() => root.render(<EstimateImportTab projectId="p1" wide />))
+    const row = cards()[0]
+    const fields = row.querySelector('[data-testid=ocr-wide-fields]') as HTMLElement
+    expect(fields).not.toBeNull()
+    expect(fields.textContent).toContain('数量')
+    expect(fields.textContent).toContain('原価単価')
+    expect(fields.textContent).toContain('¥60,000')
+    expect(fields.textContent).toContain('原本の金額')
+    expect(container.querySelector('[data-testid=estimate-wide-review-layout]')).not.toBeNull()
+    click(addBtnOf(row))
+    await flush()
+    expect(imports).toHaveLength(1)
+    expect((imports[0].items as Array<Record<string, unknown>>)[0]).toMatchObject({
+      name: '洗面化粧台 LX-750', quantity: 1, cost_price: 60000,
+    })
+  })
+
+  it('狭い表示に戻しても同じ未追加候補・警告が維持される', async () => {
+    await readImages([img('a.jpg')])
+    expect(cards()).toHaveLength(2)
+    act(() => root.render(<EstimateImportTab projectId="p1" wide />))
+    expect(cards()).toHaveLength(2)
+    expect(cards()[1].dataset.needsReview).toBe('true')
+    act(() => root.render(<EstimateImportTab projectId="p1" />))
+    expect(cards()).toHaveLength(2)
+    expect(cards()[1].dataset.needsReview).toBe('true')
+    expect(container.querySelector('[data-testid=ocr-wide-fields]')).toBeNull()
+    expect(imports).toHaveLength(0)
+  })
+
+  it('幅広い表示中も要確認は登録をブロックし、確認済みにならない限り送らない', async () => {
+    await readImages([img('a.jpg')])
+    act(() => root.render(<EstimateImportTab projectId="p1" wide />))
+    click(addBtnOf(cards()[1]))
+    await flush()
+    expect(imports).toHaveLength(0)
+    expect(cards()[1].querySelector('[data-testid=row-confirm]')).not.toBeNull()
+  })
+})
