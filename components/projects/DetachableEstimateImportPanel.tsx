@@ -49,7 +49,7 @@ export function DetachableEstimateImportPanel({ projectId, onClose }: Props) {
 
   function detach() {
     if (!host || popupRef.current) return
-    const popup = window.open('', '', 'popup=yes,width=740,height=900,resizable=yes,scrollbars=yes')
+    const popup = window.open('', '', 'popup=yes,width=1440,height=920,resizable=yes,scrollbars=yes')
     if (!popup) {
       setNotice('別ウィンドウを開けませんでした。ポップアップ設定を確認してください。1画面モードはそのまま使えます。')
       return
@@ -127,7 +127,7 @@ export function DetachableEstimateImportPanel({ projectId, onClose }: Props) {
             </div>
           </div>
           <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
-            <EstimateImportTab projectId={projectId} />
+            <EstimateImportTab projectId={projectId} wide={detached} />
           </div>
         </>,
         host,
