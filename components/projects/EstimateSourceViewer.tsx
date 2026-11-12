@@ -14,6 +14,8 @@ type Props = {
   pages: EstimateSourcePage[]
   selectedKey: string | null
   onSelect: (key: string) => void
+  wide?: boolean
+  openRequest?: number
 }
 
 const ZOOMS = [1, 1.5, 2, 3] as const
@@ -29,12 +31,12 @@ const toolbarButton: CSSProperties = {
   minHeight: 30,
 }
 
-function ImageViewport({ page, zoom, expanded }: { page: EstimateSourcePage; zoom: number; expanded: boolean }) {
+function ImageViewport({ page, zoom, expanded, wide }: { page: EstimateSourcePage; zoom: number; expanded: boolean; wide: boolean }) {
   return (
     <div
       data-testid={expanded ? 'source-image-large' : 'source-image-inline'}
       style={{
-        height: expanded ? 'calc(100dvh - 160px)' : 'clamp(210px, 34dvh, 380px)',
+        height: expanded ? 'calc(100dvh - 160px)' : wide ? 'clamp(360px, 68dvh, 920px)' : 'clamp(210px, 34dvh, 380px)',
         overflow: 'auto',
         background: '#F2F5F3',
         borderRadius: 6,
@@ -58,13 +60,16 @@ function ImageViewport({ page, zoom, expanded }: { page: EstimateSourcePage; zoo
  * 見積OCRの原本表示。読み取り・登録・確認状態は持たず、表示だけを担当する。
  * モーダルでも同じ画像 URL を使い、画像を Storage / DB に送らない。
  */
-export function EstimateSourceViewer({ pages, selectedKey, onSelect }: Props) {
+export function EstimateSourceViewer({ pages, selectedKey, onSelect, wide = false, openRequest = 0 }: Props) {
   const wrapperRef = useRef<HTMLElement>(null)
   const [zoomIndex, setZoomIndex] = useState(0)
   const [expanded, setExpanded] = useState(false)
   const active = pages.find(p => p.key === selectedKey) ?? pages[0]
 
   useEffect(() => { setZoomIndex(0) }, [active?.key])
+
+  // A source button must visibly open the original even if the same page was selected.
+  useEffect(() => { if (openRequest > 0) setExpanded(true) }, [openRequest])
 
   useEffect(() => {
     if (!expanded) return
@@ -122,7 +127,7 @@ export function EstimateSourceViewer({ pages, selectedKey, onSelect }: Props) {
       <div title={active.name} style={{ fontSize: 11, color: '#4E6557', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 6 }}>
         {active.name}（{pages.findIndex(p => p.key === active.key) + 1}/{pages.length}）
       </div>
-      <ImageViewport page={active} zoom={ZOOMS[zoomIndex]} expanded={false} />
+      <ImageViewport page={active} zoom={ZOOMS[zoomIndex]} expanded={false} wide={wide} />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, paddingTop: 7 }}>
         <span style={{ fontSize: 11, color: '#4E6557' }}>画像を拡大して金額を照合してください</span>
         {tools}
@@ -141,7 +146,7 @@ export function EstimateSourceViewer({ pages, selectedKey, onSelect }: Props) {
               </div>
             </div>
             {pageTabs}
-            <ImageViewport page={active} zoom={ZOOMS[zoomIndex]} expanded />
+            <ImageViewport page={active} zoom={ZOOMS[zoomIndex]} expanded wide={wide} />
           </section>
         </div>,
         wrapperRef.current?.ownerDocument.body ?? document.body,
