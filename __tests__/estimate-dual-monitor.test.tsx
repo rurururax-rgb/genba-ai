@@ -4,7 +4,7 @@ import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 
 vi.mock('@/components/projects/EstimateImportTab', () => ({
-  EstimateImportTab: () => <div data-testid="single-ocr-panel">取り込み候補</div>,
+  EstimateImportTab: ({ wide }: { wide?: boolean }) => <div data-testid="single-ocr-panel" data-wide={String(Boolean(wide))}>取り込み候補</div>,
 }))
 import { DetachableEstimateImportPanel } from '@/components/projects/DetachableEstimateImportPanel'
 
@@ -35,6 +35,7 @@ describe('別ウィンドウの取り込みパネル', () => {
     const panel = mountNode.querySelector('[data-testid=single-ocr-panel]')
     const host = mountNode.querySelector('[data-testid=estimate-import-portal-host]')
     expect(panel).not.toBeNull()
+    expect(panel?.getAttribute('data-wide')).toBe('false')
     vi.stubGlobal('open', vi.fn(() => null))
     click(mountNode, '別ウィンドウで開く')
     expect(mountNode.querySelector('[data-testid=single-ocr-panel]')).toBe(panel)
@@ -57,9 +58,11 @@ describe('別ウィンドウの取り込みパネル', () => {
     click(mountNode, '別ウィンドウで開く')
     expect(popup.body.contains(host)).toBe(true)
     expect(popup.body.querySelector('[data-testid=single-ocr-panel]')).toBe(panel)
+    expect(panel?.getAttribute('data-wide')).toBe('true')
     click(popup.body, '1画面に戻す')
     expect(mountNode.querySelector('[data-testid=estimate-import-portal-host]')).toBe(host)
     expect(mountNode.querySelector('[data-testid=single-ocr-panel]')).toBe(panel)
+    expect(panel?.getAttribute('data-wide')).toBe('false')
     expect(popupWindow.close).toHaveBeenCalled()
   })
 })
