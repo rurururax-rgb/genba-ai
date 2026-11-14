@@ -1,18 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
 import { isActiveProject } from '@/lib/estimate/ownership'
+import { countInvoicesByItem } from '@/lib/cost-ledger/ledger-protection'
 
 // ──────────────────────────────────────────────────────────
 // GET /api/cost-ledger?project_id=xxx
 // 原価台帳アイテム一覧（各項目の業者請求書の件数 invoice_count つき）+ 粗利サマリを返す
 // ──────────────────────────────────────────────────────────
-
-const INVOICE_COUNT_CHUNK = 100
-// 1回に読む請求書の行数。PostgREST の max-rows（Supabase の既定は 1000）がこれより小さくても、
-// 「0行が返るまで」読み進めるので数え落とさない
-const INVOICE_PAGE_SIZE = 1000
-// 読み進める回数の上限（無限ループ防止）。超えたら件数不明として一覧ごと失敗にする
-const INVOICE_MAX_PAGES = 1000
 
 export async function GET(req: NextRequest) {
   const projectId = req.nextUrl.searchParams.get('project_id')
@@ -37,7 +31,15 @@ export async function GET(req: NextRequest) {
   // 読み取りに失敗したら一覧ごと失敗にする（件数不明のまま直接編集できる状態にしない）
   const invoiceCounts = await countInvoicesByItem(supabase, (items ?? []).map(i => i.id as string))
   if (!invoiceCounts) return NextResponse.json({ error: '原価台帳を読み込めませんでした' }, { status: 500 })
-  const itemsWithCounts = (items ?? []).map(i => ({ ...i, invoice_count: invoiceCounts.get(i.id as string) ?? 0 }))
+  // 見積から削除された見積行を指す項目（請求・実績・予算があるため見積同期で残したもの。KI-005）。
+  // 画面で「見積から削除済み」と表示する。読めなければ一覧ごと失敗にする（表示を黙って欠かさない）
+  const removedEstimateIds = await readRemovedEstimateIds(supabase, (items ?? []).map(i => i.estimate_item_id as string | null))
+  if (!removedEstimateIds) return NextResponse.json({ error: '原価台帳を読み込めませんでした' }, { status: 500 })
+  const itemsWithCounts = (items ?? []).map(i => ({
+    ...i,
+    invoice_count: invoiceCounts.get(i.id as string) ?? 0,
+    estimate_removed: i.estimate_item_id != null && removedEstimateIds.has(i.estimate_item_id as string),
+  }))
 
   // 見積サマリ（粗利ウィジェット用 + 業者別売上額計算用）
   const { data: estimateItems, error: estErr } = await supabase
@@ -106,38 +108,24 @@ export async function GET(req: NextRequest) {
   })
 }
 
-/**
- * 台帳項目ごとの請求書の件数。読み取りに失敗したら null（呼び出し側は一覧ごと失敗にする）。
- * PostgREST は1回の応答の行数に上限（max-rows）があり、上限で切られても応答はエラーにならない。
- * そのため id の昇順に「前回の最後の id より後」を読み（keyset ページング）、0行が返るまで続ける。
- * 上限が何行でも数え落とさない（1ページが上限で切られても、次のページがその続きから始まる）。
- */
-async function countInvoicesByItem(
+
+/** 指定した見積行のうち、論理削除されているものの id。読み取りに失敗したら null */
+async function readRemovedEstimateIds(
   supabase: Awaited<ReturnType<typeof getServerClient>>,
-  itemIds: string[],
-): Promise<Map<string, number> | null> {
-  const counts = new Map<string, number>()
-  for (let i = 0; i < itemIds.length; i += INVOICE_COUNT_CHUNK) {
-    const chunk = itemIds.slice(i, i + INVOICE_COUNT_CHUNK)
-    let after: string | null = null
-    for (let page = 0; ; page++) {
-      if (page >= INVOICE_MAX_PAGES) return null
-      let query = supabase
-        .from('cost_ledger_invoices')
-        .select('id, cost_ledger_item_id')
-        .in('cost_ledger_item_id', chunk)
-      if (after) query = query.gt('id', after)
-      const { data: rows, error } = await query.order('id').limit(INVOICE_PAGE_SIZE)
-      if (error || !Array.isArray(rows)) return null
-      if (rows.length === 0) break
-      for (const r of rows) {
-        const key = r.cost_ledger_item_id as string
-        counts.set(key, (counts.get(key) ?? 0) + 1)
-      }
-      after = rows[rows.length - 1].id as string
-    }
+  estimateItemIds: Array<string | null>,
+): Promise<Set<string> | null> {
+  const ids = [...new Set(estimateItemIds.filter((v): v is string => v != null))]
+  const removed = new Set<string>()
+  for (let i = 0; i < ids.length; i += 100) {
+    const { data, error } = await supabase
+      .from('estimate_items')
+      .select('id')
+      .in('id', ids.slice(i, i + 100))
+      .not('deleted_at', 'is', null)
+    if (error || !Array.isArray(data)) return null
+    for (const r of data) removed.add(r.id as string)
   }
-  return counts
+  return removed
 }
 
 // ──────────────────────────────────────────────────────────
