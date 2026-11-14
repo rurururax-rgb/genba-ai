@@ -5,8 +5,8 @@ export default defineConfig({
   test: {
     environment: 'node',
     globals: true,
-    // 隔離 PostgreSQL を起動する DB 検証は npm run test:db で別に実行する
-    exclude: [...configDefaults.exclude, '__tests__/db/**'],
+    // 隔離 PostgreSQL を起動する DB 検証は npm run test:db で、本物の AI を呼ぶ検証は vitest.live.config.ts で別に実行する
+    exclude: [...configDefaults.exclude, '__tests__/db/**', '__tests__/live/**'],
   },
   resolve: {
     alias: {

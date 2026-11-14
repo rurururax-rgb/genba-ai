@@ -1,0 +1,82 @@
+{
+  "id": "case4-traps",
+  "supplier": "架空外装",
+  "subtotal": 174800,
+  "adjustments": [],
+  "excludedNames": [
+    "運搬費",
+    "現場管理費",
+    "電気配線工事"
+  ],
+  "separateNames": [
+    "電気配線工事"
+  ],
+  "rows": [
+    {
+      "name": "外壁シーリング打替",
+      "unit": "m",
+      "quantity": 3,
+      "list_price": null,
+      "rate": null,
+      "unit_price": null,
+      "amount": 45000,
+      "cost_price": null,
+      "review": true
+    },
+    {
+      "name": "足場架設 一式",
+      "unit": "式",
+      "quantity": 1,
+      "list_price": null,
+      "rate": null,
+      "unit_price": null,
+      "amount": 30000,
+      "cost_price": 30000,
+      "review": false
+    },
+    {
+      "name": "雨樋交換 KT-60",
+      "unit": "m",
+      "quantity": 2,
+      "list_price": null,
+      "rate": null,
+      "unit_price": 8000,
+      "amount": 15000,
+      "cost_price": 8000,
+      "review": true
+    },
+    {
+      "name": "換気扇 VF-25",
+      "unit": "台",
+      "quantity": 1,
+      "list_price": 50000,
+      "rate": 0.6,
+      "unit_price": null,
+      "amount": 30000,
+      "cost_price": 30000,
+      "review": false
+    },
+    {
+      "name": "照明器具 LED-D10",
+      "unit": "台",
+      "quantity": 4,
+      "list_price": 24000,
+      "rate": 0.5,
+      "unit_price": 12000,
+      "amount": 48000,
+      "cost_price": 12000,
+      "review": false
+    },
+    {
+      "name": "コーキング材 CK-1",
+      "unit": "本",
+      "quantity": 10,
+      "list_price": null,
+      "rate": null,
+      "unit_price": 680,
+      "amount": 6800,
+      "cost_price": 680,
+      "review": false
+    }
+  ]
+}
