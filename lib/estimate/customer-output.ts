@@ -9,7 +9,10 @@
  *     （select('*') や列追加があっても、社内メモ・原価・業者名などが漏れない）
  *   - estimate_items.internal_memo（社内メモ）は絶対に含めない
  *   - memo（お客様向け備考）は既存どおり出力する（既存見積の表示を変えない）
+ *   - amount は見積エディタと同じ行の金額（liveAmount: 数量×売価を行ごとに四捨五入）にする
  */
+
+import { liveAmount } from '@/lib/estimate/totals'
 
 /** お客様向け出力で DB から取得してよい estimate_items の列（internal_memo / cost_price / vendor_name は含めない） */
 export const CUSTOMER_ESTIMATE_ITEM_COLUMNS =
@@ -39,15 +42,19 @@ export type CustomerEstimateItem = {
 export function toCustomerEstimateItem(row: Record<string, unknown>): CustomerEstimateItem {
   const str = (v: unknown) => (typeof v === 'string' ? v : null)
   const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+  const quantity     = num(row.quantity) ?? 0
+  const sellingPrice = num(row.selling_price)
+  const dbAmount     = num(row.amount)
   return {
     id:            String(row.id ?? ''),
     name:          str(row.name),
     category:      str(row.category),
-    quantity:      num(row.quantity) ?? 0,
+    quantity,
     unit:          str(row.unit),
-    selling_price: num(row.selling_price),
+    selling_price: sellingPrice,
     retail_price:  num(row.retail_price),
-    amount:        num(row.amount),
+    // 見積エディタと同じ行の金額（数量×売価を行ごとに四捨五入）。見積書・Excel の小計・合計はこれを足す
+    amount:        sellingPrice == null && dbAmount == null ? null : liveAmount({ quantity, selling_price: sellingPrice, amount: dbAmount }),
     group_id:      str(row.group_id),
     sort_order:    num(row.sort_order) ?? 0,
     memo:          str(row.memo),

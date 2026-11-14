@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useState, type CSSProperties } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 
 export type EstimateSourcePage = {
@@ -14,7 +14,7 @@ type Props = {
   pages: EstimateSourcePage[]
   selectedKey: string | null
   onSelect: (key: string) => void
-  /** 明細の「原本を見る」クリックごとに変わる値。選択済みの画像でも開ける。 */
+  wide?: boolean
   openRequest?: number
 }
 
@@ -31,12 +31,12 @@ const toolbarButton: CSSProperties = {
   minHeight: 30,
 }
 
-function ImageViewport({ page, zoom, expanded }: { page: EstimateSourcePage; zoom: number; expanded: boolean }) {
+function ImageViewport({ page, zoom, expanded, wide }: { page: EstimateSourcePage; zoom: number; expanded: boolean; wide: boolean }) {
   return (
     <div
       data-testid={expanded ? 'source-image-large' : 'source-image-inline'}
       style={{
-        height: expanded ? 'calc(100dvh - 160px)' : 'clamp(210px, 34dvh, 380px)',
+        height: expanded ? 'calc(100dvh - 160px)' : wide ? 'clamp(220px, 36dvh, 560px)' : 'clamp(210px, 34dvh, 380px)',
         overflow: 'auto',
         background: '#F2F5F3',
         borderRadius: 6,
@@ -60,25 +60,40 @@ function ImageViewport({ page, zoom, expanded }: { page: EstimateSourcePage; zoo
  * 見積OCRの原本表示。読み取り・登録・確認状態は持たず、表示だけを担当する。
  * モーダルでも同じ画像 URL を使い、画像を Storage / DB に送らない。
  */
-export function EstimateSourceViewer({ pages, selectedKey, onSelect, openRequest = 0 }: Props) {
-  const [zoomIndex, setZoomIndex] = useState(0)
+export function EstimateSourceViewer({ pages, selectedKey, onSelect, wide = false, openRequest = 0 }: Props) {
+  const wrapperRef = useRef<HTMLElement>(null)
+  const [zoom, setZoom] = useState<{ key: string | undefined; index: number }>({ key: undefined, index: 0 })
   const [expanded, setExpanded] = useState(false)
+  const [seenOpenRequest, setSeenOpenRequest] = useState(openRequest)
+  /** 拡大表示を出す文書（別ウィンドウへ移したときは、その別ウィンドウの文書） */
+  const [portalDoc, setPortalDoc] = useState<Document | null>(null)
   const active = pages.find(p => p.key === selectedKey) ?? pages[0]
 
-  useEffect(() => { setZoomIndex(0) }, [active?.key])
+  // 画像を切り替えたら拡大率を 100% に戻す（state を画像ごとに持つ）
+  const zoomIndex = zoom.key === active?.key ? zoom.index : 0
+  const setZoomIndex = (f: (i: number) => number) => setZoom({ key: active?.key, index: f(zoomIndex) })
 
-  // 画像の選択だけでは見た目が変わらない場合があるため、明細からの操作では
-  // 原本を大きく開く。openRequest=0 の初期表示では自動で開かない。
-  useEffect(() => { if (openRequest > 0) setExpanded(true) }, [openRequest])
+  // 明細の「原本を見る」は、同じ画像が選ばれていても拡大表示を開く
+  if (openRequest !== seenOpenRequest) {
+    setSeenOpenRequest(openRequest)
+    if (openRequest > 0) setExpanded(true)
+  }
+
+  // 拡大表示は、このビューアが今置かれている文書（1 画面 or 別ウィンドウ）に出す
+  useLayoutEffect(() => {
+    if (expanded) setPortalDoc(wrapperRef.current?.ownerDocument ?? document)
+  }, [expanded])
 
   useEffect(() => {
-    if (!expanded) return
+    if (!expanded || !portalDoc) return
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setExpanded(false)
     }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [expanded])
+    // フォーカスが文書のどこにあっても受け取れるよう、その文書のウィンドウで待つ
+    const target = portalDoc.defaultView ?? window
+    target.addEventListener('keydown', onKeyDown)
+    return () => target.removeEventListener('keydown', onKeyDown)
+  }, [expanded, portalDoc])
 
   if (!active) return null
 
@@ -116,7 +131,7 @@ export function EstimateSourceViewer({ pages, selectedKey, onSelect, openRequest
   )
 
   return (
-    <section aria-label="見積書の原本" data-testid="estimate-source-viewer"
+    <section ref={wrapperRef} aria-label="見積書の原本" data-testid="estimate-source-viewer"
       style={{ background: '#fff', borderBottom: '1px solid #BDD1C3', padding: '10px 12px', position: 'sticky', top: 0, zIndex: 5 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 6 }}>
         <strong style={{ fontSize: 13, color: '#192C1F' }}>原本を見ながら確認</strong>
@@ -126,13 +141,13 @@ export function EstimateSourceViewer({ pages, selectedKey, onSelect, openRequest
       <div title={active.name} style={{ fontSize: 11, color: '#4E6557', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginBottom: 6 }}>
         {active.name}（{pages.findIndex(p => p.key === active.key) + 1}/{pages.length}）
       </div>
-      <ImageViewport page={active} zoom={ZOOMS[zoomIndex]} expanded={false} />
+      <ImageViewport page={active} zoom={ZOOMS[zoomIndex]} expanded={false} wide={wide} />
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, paddingTop: 7 }}>
         <span style={{ fontSize: 11, color: '#4E6557' }}>画像を拡大して金額を照合してください</span>
         {tools}
       </div>
 
-      {expanded && createPortal(
+      {expanded && portalDoc && createPortal(
         <div role="presentation" onClick={e => { if (e.target === e.currentTarget) setExpanded(false) }}
           style={{ position: 'fixed', inset: 0, zIndex: 10000, background: 'rgba(15, 28, 20, .8)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}>
           <section role="dialog" aria-modal="true" aria-label="見積書原本の拡大表示"
@@ -145,10 +160,10 @@ export function EstimateSourceViewer({ pages, selectedKey, onSelect, openRequest
               </div>
             </div>
             {pageTabs}
-            <ImageViewport page={active} zoom={ZOOMS[zoomIndex]} expanded />
+            <ImageViewport page={active} zoom={ZOOMS[zoomIndex]} expanded wide={wide} />
           </section>
         </div>,
-        document.body,
+        portalDoc.body,
       )}
     </section>
   )

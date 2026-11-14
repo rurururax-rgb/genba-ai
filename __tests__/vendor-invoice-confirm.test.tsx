@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { VendorInvoiceImportTab } from '@/components/projects/VendorInvoiceImportTab'
+import { SOURCE_MAX_BYTES } from '@/lib/cost-ledger/invoice-image'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -16,6 +17,10 @@ const ITEM_ID = 'item-1'
 const EXCLUSIVE = { subtotal_excl_tax: 100000, tax_amount: 10000, total_incl_tax: 110000, tax_treatment: 'exclusive', tax_breakdown: [] as unknown[] }
 /** 次の読み取りで返す原本の金額（既定は外税：税抜 100,000 / 税 10,000 / 税込 110,000・内訳なし） */
 let nextAmounts: Record<string, unknown> = EXCLUSIVE
+/** 次の読み取りでサーバーが返す登録金額の候補（模擬） */
+let nextSuggested: number | null = 100000
+/** 次の読み取りの応答を差し替える（失敗・途中終了など）。null なら正常な読み取り結果 */
+let nextExtractResponse: (() => Response | Promise<Response>) | null = null
 
 /** 架空の請求書の読み取り結果 */
 function extraction(sha: string) {
@@ -26,8 +31,9 @@ function extraction(sha: string) {
     payment_due_date: '2026-10-31',
     amounts: nextAmounts,
     // 画面は原本の金額から照合し直すので、ここは形だけ
-    review: { suggested_excl_tax: 100000, suggested_from: 'printed_subtotal', status: 'ok', messages: [] },
+    review: { suggested_excl_tax: nextSuggested, suggested_from: nextSuggested == null ? null : 'printed_subtotal', status: 'ok', messages: [] },
     items: [],
+    items_total: 0,
     warnings: [],
     document_sha256: sha,
   }
@@ -43,6 +49,8 @@ const json = (body: unknown, status = 200) =>
 
 beforeEach(() => {
   nextAmounts = EXCLUSIVE
+  nextSuggested = 100000
+  nextExtractResponse = null
   posted = []
   extractCount = 0
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
@@ -51,7 +59,7 @@ beforeEach(() => {
     }
     if (url === '/api/ai/extract-vendor-invoice') {
       extractCount += 1
-      return json(extraction(`sha-${extractCount}`))
+      return nextExtractResponse ? nextExtractResponse() : json(extraction(`sha-${extractCount}`))
     }
     if (url === `/api/cost-ledger/${ITEM_ID}/invoices`) {
       posted.push(JSON.parse(String(init?.body)))
@@ -241,5 +249,363 @@ describe('VendorInvoiceImportTab：税率ごとの内訳の表示', () => {
     expect(text()).toContain(HEADING)
     expect(text()).toContain('8% 対象 — ／ 税 ¥8,000')
     expect(field<HTMLInputElement>('登録金額（税抜）').value).toBe('100000')
+  })
+})
+
+describe('VendorInvoiceImportTab：トライアル前の修正（金額不明・値引き・画像・AI の途中終了）', () => {
+  const text = () => container.textContent ?? ''
+
+  async function mount() {
+    await act(async () => { root.render(<VendorInvoiceImportTab projectId="p1" />) })
+    await flush()
+  }
+
+  /** ファイルを選ぶ（読み取りボタンは押さない） */
+  async function pick(file: File) {
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!
+    Object.defineProperty(input, 'files', { value: [file], configurable: true })
+    await act(async () => { input.dispatchEvent(new Event('change', { bubbles: true })) })
+    await flush()
+  }
+
+  it('金額不明（すべて読み取れない）→ 登録金額は空欄。チェックも登録もできず、押しても送信しない。入力すればチェックできる', async () => {
+    nextAmounts = { subtotal_excl_tax: null, tax_amount: null, total_incl_tax: null, tax_treatment: 'unknown', tax_breakdown: [] }
+    nextSuggested = null
+    await mount()
+    await loadInvoice()
+    expect(field<HTMLInputElement>('登録金額（税抜）').value).toBe('')
+    expect(text()).toContain('要確認')
+    expect(checkbox().disabled).toBe(true)
+    expect(registerButton().disabled).toBe(true)
+    await click(registerButton())
+    expect(posted).toHaveLength(0)
+
+    await type(field<HTMLInputElement>('登録金額（税抜）'), '50000')
+    expect(checkbox().disabled).toBe(false)
+    expect(registerButton().disabled).toBe(true)
+    await click(checkbox())
+    expect(registerButton().disabled).toBe(false)
+  })
+
+  it('税込しかない → 登録金額は空欄・要確認で、税込の金額は入れない', async () => {
+    nextAmounts = { subtotal_excl_tax: null, tax_amount: null, total_incl_tax: 110000, tax_treatment: 'inclusive', tax_breakdown: [] }
+    nextSuggested = null
+    await mount()
+    await loadInvoice()
+    expect(field<HTMLInputElement>('登録金額（税抜）').value).toBe('')
+    expect(registerButton().disabled).toBe(true)
+  })
+
+  it('値引きの記載がある → 印字どうしが合っていても「要確認」。値引きの行を表示する', async () => {
+    nextAmounts = { ...EXCLUSIVE, subtotal_excl_tax: 99000, tax_amount: 9900, total_incl_tax: 108900, adjustments: [{ kind: 'discount', amount: 1000 }] }
+    await mount()
+    await loadInvoice()
+    expect(text()).toContain('要確認')
+    expect(text()).not.toContain('金額の整合OK')
+    expect(text()).toContain('値引き ¥1,000')
+    expect(text()).toContain('値引きの記載があります')
+  })
+
+  it('ファイル選択前の案内：対応形式・元画像の上限（SOURCE_MAX_BYTES と同じ 40MB）・自動縮小・HEIC と PDF 非対応を示し、古い「最大8MB」は出さない', async () => {
+    await mount()
+    expect(SOURCE_MAX_BYTES).toBe(40 * 1024 * 1024)
+    expect(text()).toContain('JPEG・PNG・WebPに対応（元画像40MBまで）')
+    expect(text()).toContain('大きな画像は送信前に自動縮小します')
+    // 40MB 以内なら必ず読み取れる、とは読めないようにする
+    expect(text()).toContain('縮小できない画像は読み取れないことがあります')
+    expect(text()).toContain('HEIC・PDFには対応していません。')
+    expect(text()).not.toContain('8MB')
+  })
+
+  it('HEIC を選ぶ → 理由と対処を案内し、読み取らない', async () => {
+    await mount()
+    await pick(new File([new Uint8Array(10)], 'IMG_0001.HEIC', { type: 'image/heic' }))
+    expect(text()).toContain('HEIC 形式の写真には対応していません')
+    expect(text()).not.toContain('請求書を読み取る')
+    expect(extractCount).toBe(0)
+  })
+
+  it('大容量の画像を縮小できない（このブラウザで画像を読み込めない）→ 案内し、AI に送らない', async () => {
+    await mount()
+    await pick(new File([new Uint8Array(4 * 1024 * 1024)], 'big.jpg', { type: 'image/jpeg' }))
+    await click(button('請求書を読み取る'))
+    expect(text()).toContain('画像を読み込めませんでした')
+    expect(extractCount).toBe(0)
+  })
+
+  it('サーバーに届く前に容量で断られた（JSON でない 413）→ 撮り直しを案内する', async () => {
+    nextExtractResponse = () => new Response('Request Entity Too Large', { status: 413 })
+    await mount()
+    await loadInvoice()
+    expect(text()).toContain('画像が大きすぎて送れませんでした')
+    expect(text()).not.toContain('原本の金額')
+  })
+
+  it('AI 応答が途中で終わった（502 ai_truncated）→ サーバーの案内を出し、読み取り結果は表示しない', async () => {
+    nextExtractResponse = () => json({ error: '請求書の内容が多く、読み取りが途中で終わりました。', code: 'ai_truncated' }, 502)
+    await mount()
+    await loadInvoice()
+    expect(text()).toContain('読み取りが途中で終わりました')
+    expect(text()).not.toContain('原本の金額')
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull()
+  })
+
+  it('明細が 20 行を超える → 表示した行数と原本の行数を示す', async () => {
+    nextExtractResponse = () => json({
+      ...extraction('sha-many'),
+      items: Array.from({ length: 20 }, (_, i) => ({ name: `部材${i + 1}`, amount: 1000 })),
+      items_total: 45,
+    })
+    await mount()
+    await loadInvoice()
+    expect(text()).toContain('20 件')
+    expect(text()).toContain('原本は 45 行')
+  })
+})
+
+describe('VendorInvoiceImportTab：使えないファイルを選んだら、前の請求書の選択・読み取り結果・登録候補を残さない', () => {
+  const text = () => container.textContent ?? ''
+  const hasButton = (label: string) => [...container.querySelectorAll('button')].some(b => b.textContent?.includes(label))
+
+  async function mount() {
+    await act(async () => { root.render(<VendorInvoiceImportTab projectId="p1" />) })
+    await flush()
+  }
+
+  async function pick(file: File) {
+    const input = container.querySelector<HTMLInputElement>('input[type="file"]')!
+    Object.defineProperty(input, 'files', { value: [file], configurable: true })
+    await act(async () => { input.dispatchEvent(new Event('change', { bubbles: true })) })
+    await flush()
+  }
+
+  const heic = () => new File([new Uint8Array(10)], 'IMG_0002.HEIC', { type: 'image/heic' })
+  const pdf = () => new File([new Uint8Array(10)], 'invoice-2.pdf', { type: 'application/pdf' })
+  /** 40MB を超える JPEG（中身は小さく、大きさだけ偽る） */
+  const oversized = () => {
+    const f = new File([new Uint8Array(10)], 'huge.jpg', { type: 'image/jpeg' })
+    Object.defineProperty(f, 'size', { value: 41 * 1024 * 1024 })
+    return f
+  }
+
+  /** 前の請求書の画像・読み取り結果・登録候補・登録ボタンが一つも残っていないこと */
+  function expectNothingLeft() {
+    expect(container.querySelector('img[alt="請求書の原本"]')).toBeNull()
+    expect(text()).not.toContain('原本の金額')
+    expect(text()).not.toContain('架空設備テスト')
+    expect(container.querySelector('input[type="checkbox"]')).toBeNull()
+    expect(hasButton('原価台帳に登録')).toBe(false)
+    expect(hasButton('請求書を読み取る')).toBe(false)
+  }
+
+  const cases: Array<[string, () => File, string]> = [
+    ['HEIC', heic, 'HEIC 形式の写真には対応していません'],
+    ['PDF', pdf, 'PDF には対応していません'],
+    ['40MB 超', oversized, '画像が大きすぎます（40MB まで）'],
+  ]
+
+  for (const [name, make, message] of cases) {
+    it(`読み取り・確認済みの請求書がある状態で ${name} を選ぶ → 案内だけを出し、前の請求書を登録できない`, async () => {
+      await mount()
+      await loadInvoice()
+      expect(field<HTMLInputElement>('登録金額（税抜）').value).toBe('100000')
+      await click(checkbox())
+      expect(registerButton().disabled).toBe(false)
+
+      await pick(make())
+      expect(text()).toContain(message)
+      expectNothingLeft()
+      expect(extractCount).toBe(1)
+      expect(posted).toHaveLength(0)
+    })
+  }
+
+  it('読み取り前の画像を選んだ状態で PDF を選ぶ → 前の画像を読み取れない', async () => {
+    await mount()
+    await pick(new File([new Uint8Array([1, 2, 3])], 'invoice-1.png', { type: 'image/png' }))
+    expect(hasButton('請求書を読み取る')).toBe(true)
+    await pick(pdf())
+    expect(text()).toContain('PDF には対応していません')
+    expectNothingLeft()
+    expect(extractCount).toBe(0)
+  })
+
+  it('読み取り中に HEIC を選ぶ → 遅れて届いた前の請求書の読み取り結果は表示せず、登録候補も出ない', async () => {
+    let release!: () => void
+    nextExtractResponse = () => new Promise<Response>(resolve => {
+      release = () => resolve(json(extraction('sha-old')))
+    })
+    await mount()
+    await pick(new File([new Uint8Array([1, 2, 3])], 'invoice-1.png', { type: 'image/png' }))
+    await click(button('請求書を読み取る'))
+    expect(extractCount).toBe(1)
+
+    await pick(heic())
+    await act(async () => { release() })
+    await flush()
+    expect(text()).toContain('HEIC 形式の写真には対応していません')
+    expectNothingLeft()
+    expect(posted).toHaveLength(0)
+  })
+
+  it('使えないファイルのあとに正しい画像を選べば、新しい請求書として読み取り・登録できる（前の確認は引き継がない）', async () => {
+    await mount()
+    await loadInvoice()
+    await click(checkbox())
+    await pick(heic())
+    await loadInvoice('invoice-3.png')
+    expect(extractCount).toBe(2)
+    expect(text()).not.toContain('HEIC 形式の写真には対応していません')
+    expect(checkbox().checked).toBe(false)
+    await click(checkbox())
+    await click(registerButton())
+    expect(posted).toHaveLength(1)
+    expect(posted[0].document_sha256).toBe('sha-2')
+  })
+})
+
+// ── 実機 QA で見つかった誤登録の防止（OBS-1・OBS-2・OBS-3・メモ）────────────
+
+const QA_B = { subtotal_excl_tax: null, tax_amount: 10000, total_incl_tax: 110000, tax_treatment: 'inclusive', tax_breakdown: [] as unknown[], printed_tax_rates: [10] }
+const deviationBox = () => container.querySelector<HTMLInputElement>('input[aria-label="原本の税抜と異なる登録金額の確認"]')
+const alertText = () => [...container.querySelectorAll('[role="alert"]')].map(e => e.textContent).join(' ')
+const chip = () => [...container.querySelectorAll('span')].map(s => s.textContent).find(t => t === '金額の整合OK' || t === '税抜は計算値' || t === '要確認')
+
+describe('VendorInvoiceImportTab：登録金額が原本の税抜と違うときは追加の確認が必要（OBS-1）', () => {
+  beforeEach(() => { nextAmounts = QA_B; nextSuggested = 100000 })
+
+  it('QA-B：税込 110,000 を登録金額に入れる → 税込と同じ旨の警告。確認チェックだけでは登録できない', async () => {
+    await mountAndConfirm()
+    expect(deviationBox()).toBeNull()
+    await type(field<HTMLInputElement>('登録金額（税抜）'), '110000')
+    expect(alertText()).toContain('登録金額 ¥110,000 は税込合計と同じです。原価台帳は税抜で集計します（原本の税抜は ¥100,000）')
+    await click(checkbox())
+    expect(checkbox().checked).toBe(true)
+    expect(registerButton().disabled).toBe(true)
+    expect(container.textContent).toContain('原本の税抜と異なる金額の確認にチェックを入れてください')
+    await click(registerButton())
+    expect(posted).toHaveLength(0)
+  })
+
+  it('正当な例外：追加の確認にもチェックを入れれば、その金額で登録できる', async () => {
+    await mountAndConfirm()
+    await type(field<HTMLInputElement>('登録金額（税抜）'), '95000')
+    expect(alertText()).toContain('登録金額 ¥95,000 は原本の税抜 ¥100,000 と異なります')
+    await click(checkbox())
+    await click(deviationBox()!)
+    expect(registerButton().disabled).toBe(false)
+    await click(registerButton())
+    expect(posted).toHaveLength(1)
+    expect(posted[0].amount).toBe(95000)
+  })
+
+  it('「原本の税抜を使う」で候補に戻すと、警告と追加の確認は消える', async () => {
+    await mountAndConfirm()
+    await type(field<HTMLInputElement>('登録金額（税抜）'), '110000')
+    await click(button('原本の税抜 ¥100,000 を使う'))
+    expect(deviationBox()).toBeNull()
+    expect(alertText()).not.toContain('税込合計と同じ')
+    await click(checkbox())
+    expect(registerButton().disabled).toBe(false)
+  })
+
+  it('追加の確認のあとで原本の金額を直す → 2 つのチェックとも外れる', async () => {
+    await mountAndConfirm()
+    await type(field<HTMLInputElement>('登録金額（税抜）'), '95000')
+    await click(checkbox())
+    await click(deviationBox()!)
+    await type(field<HTMLInputElement>('消費税額'), '9000')
+    expect(checkbox().checked).toBe(false)
+    expect(deviationBox()!.checked).toBe(false)
+    expect(registerButton().disabled).toBe(true)
+  })
+
+  it('再描画（親の再レンダリング）しても、警告とチェックの状態は保たれる', async () => {
+    await mountAndConfirm()
+    await type(field<HTMLInputElement>('登録金額（税抜）'), '110000')
+    await click(checkbox())
+    await click(deviationBox()!)
+    await act(async () => { root.render(<VendorInvoiceImportTab projectId="p1" onRegistered={() => {}} />) })
+    await flush()
+    expect(alertText()).toContain('税込合計と同じです')
+    expect(checkbox().checked).toBe(true)
+    expect(deviationBox()!.checked).toBe(true)
+    expect(registerButton().disabled).toBe(false)
+  })
+
+  it('新しい請求書を読み取ると、追加の確認も未確認に戻る', async () => {
+    await mountAndConfirm()
+    await type(field<HTMLInputElement>('登録金額（税抜）'), '110000')
+    await click(checkbox())
+    await click(deviationBox()!)
+    await loadInvoice('invoice-2.png')
+    expect(deviationBox()).toBeNull()
+    expect(field<HTMLInputElement>('登録金額（税抜）').value).toBe('100000')
+    expect(checkbox().checked).toBe(false)
+  })
+})
+
+describe('VendorInvoiceImportTab：税区分・税率と金額の照合表示（OBS-2・OBS-3）', () => {
+  it('QA-A（外税・10%）・QA-B（内税・うち消費税 10%）→ 金額の整合OK', async () => {
+    nextAmounts = { ...EXCLUSIVE, printed_tax_rates: [10] }
+    await mountAndConfirm()
+    expect(chip()).toBe('金額の整合OK')
+    nextAmounts = QA_B
+    await loadInvoice('qa-b.png')
+    expect(chip()).toBe('金額の整合OK')
+  })
+
+  it('QA-B を外税に切り替える → 整合OK ではなく要確認。理由を表示し、確認はやり直し', async () => {
+    nextAmounts = QA_B
+    await mountAndConfirm()
+    await choose(field<HTMLSelectElement>('税区分', 'select'), 'exclusive')
+    expect(chip()).toBe('要確認')
+    expect(container.textContent).toContain('外税になっていますが、原本に税抜金額の記載がありません')
+    expect(checkbox().checked).toBe(false)
+    // 内税に戻せば整合OK に戻る
+    await choose(field<HTMLSelectElement>('税区分', 'select'), 'inclusive')
+    expect(chip()).toBe('金額の整合OK')
+  })
+
+  it('QA-B の税額を 9,000 に直す（原本は 10%）→ 要確認と税率の警告。登録金額 100,000 は候補 101,000 と違うので追加の確認も必要', async () => {
+    nextAmounts = QA_B
+    await mountAndConfirm()
+    await type(field<HTMLInputElement>('消費税額'), '9000')
+    expect(chip()).toBe('要確認')
+    expect(container.textContent).toContain('消費税額 ¥9,000 が、原本の税率 10% で計算した額と合いません')
+    await click(checkbox())
+    expect(alertText()).toContain('原本の税抜 ¥101,000 と異なります')
+    expect(registerButton().disabled).toBe(true)
+  })
+
+  it('税率の印字がない内税（税込と消費税だけ）→ 「税抜は計算値」（10% と決めつけず、登録はできる）', async () => {
+    nextAmounts = { ...QA_B, printed_tax_rates: [] }
+    await mountAndConfirm()
+    expect(chip()).toBe('税抜は計算値')
+    expect(registerButton().disabled).toBe(false)
+  })
+})
+
+describe('VendorInvoiceImportTab：メモが空欄なら note は null（担当者の入力だけを保存）', () => {
+  it('メモ空欄 → note は null（「業者名からの請求」を自動で入れない）', async () => {
+    await mountAndConfirm()
+    await click(registerButton())
+    expect(posted).toHaveLength(1)
+    expect(posted[0].note).toBeNull()
+    expect(posted[0].vendor_name).toBe('架空設備テスト')
+  })
+
+  it('空白だけのメモ → null。入力したメモはそのまま保存', async () => {
+    await mountAndConfirm()
+    await type(field<HTMLInputElement>('メモ（任意）'), '   ')
+    await click(registerButton())
+    expect(posted[0].note).toBeNull()
+  })
+
+  it('入力したメモ → その内容を保存', async () => {
+    await mountAndConfirm()
+    await type(field<HTMLInputElement>('メモ（任意）'), '7月分材料費')
+    await click(registerButton())
+    expect(posted[0].note).toBe('7月分材料費')
   })
 })
