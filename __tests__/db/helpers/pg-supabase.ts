@@ -5,7 +5,7 @@
  *   user を省くと superuser のまま実行する（service_role / admin クライアント相当。RLS を通らない）。
  * - 対応するのはテスト対象のルート・サービスが使う範囲だけ：
  *     select（列・`*`・`projects!<外部キー名>!inner ( ... )` の埋め込み・count/head）、insert / update / delete、
- *     eq / neq / is / in / not(col,'is',null) / lt / lte / gt / gte（埋め込み列 `projects.xxx` も可）、
+ *     eq / neq / is / in / ilike / not(col,'is',null) / lt / lte / gt / gte（埋め込み列 `projects.xxx` も可）、
  *     order / limit / single / maybeSingle、auth.getUser()
  * - 埋め込みは PostgREST と同じく外部キーで解決する。2 テーブル間に外部キーが複数あってヒントが無いと
  *   PGRST201（あいまい）、ヒントの外部キーが無いと PGRST200 を返す（KI-003 を再現できるように）。
@@ -127,6 +127,7 @@ class Query implements PromiseLike<Result> {
   gt(col: string, value: unknown) { this.filters.push({ col, op: '>', value }); return this }
   gte(col: string, value: unknown) { this.filters.push({ col, op: '>=', value }); return this }
   is(col: string, value: null) { this.filters.push({ col, op: 'IS NULL', value }); return this }
+  ilike(col: string, pattern: string) { this.filters.push({ col, op: 'ILIKE', value: pattern }); return this }
   in(col: string, values: unknown[]) { this.filters.push({ col, op: 'IN', value: values }); return this }
   not(col: string, op: string, value: unknown) {
     if (op !== 'is' || value !== null) throw new Error(`unsupported not(${op})`)
