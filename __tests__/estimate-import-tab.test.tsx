@@ -11,6 +11,23 @@ import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { EstimateImportTab } from '@/components/projects/EstimateImportTab'
 
+// 画像の縮小処理は本物を使い、同時に何件走ったかを数える（gate を置くと、その間は縮小が終わらない）
+const prep = vi.hoisted(() => ({ active: 0, max: 0, started: [] as string[], gate: null as null | Promise<void>, failOn: '' }))
+vi.mock('@/lib/estimate/ocr-image', async importOriginal => {
+  const real = await importOriginal<typeof import('@/lib/estimate/ocr-image')>()
+  return {
+    ...real,
+    prepareEstimateImage: async (f: File) => {
+      prep.started.push(f.name); prep.active++; prep.max = Math.max(prep.max, prep.active)
+      try {
+        if (prep.gate) await prep.gate
+        if (prep.failOn === f.name) throw new Error('decode crashed')
+        return await real.prepareEstimateImage(f)
+      } finally { prep.active-- }
+    },
+  }
+})
+
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 const GOOD = { name: '洗面化粧台 LX-750', quantity: 1, unit: '台', cost_price: 60000, cost_from: 'printed_unit_price', list_price: 100000, rate: 0.6, amount: 60000, vendor_name: '架空設備', note: null }
@@ -32,6 +49,7 @@ const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 
 beforeEach(() => {
+  Object.assign(prep, { active: 0, max: 0, started: [], gate: null, failOn: '' })
   extractCalls = []
   imports = []
   extractReply = name => json({ files: [fileResult(name, [GOOD, BAD])], items: [GOOD, BAD], failures: [] })
@@ -451,5 +469,192 @@ describe('別モニターの幅広い原本照合', () => {
     await flush()
     expect(imports).toHaveLength(0)
     expect(cards()[1].querySelector('[data-testid=row-confirm]')).not.toBeNull()
+  })
+})
+
+// ── 画像の前処理は 1 枚ずつ・画面終了と画像変更の後片付け（PR #52 残る安全対策） ──────────
+describe('画像の前処理は 1 枚ずつ、送信は最大 2 件', () => {
+  let inflight = 0, maxInflight = 0
+  let sendGate: null | Promise<void> = null
+  let signals: AbortSignal[] = []
+  beforeEach(() => {
+    inflight = 0; maxInflight = 0; sendGate = null; signals = []
+    const base = globalThis.fetch as unknown as (u: string, i?: RequestInit) => Promise<Response>
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
+      if (url !== '/api/ai/extract-estimate') return base(url, init)
+      signals.push(init!.signal!)
+      inflight++; maxInflight = Math.max(maxInflight, inflight)
+      try {
+        if (sendGate) await sendGate
+        if (init?.signal?.aborted) throw new DOMException('aborted', 'AbortError')
+        await new Promise(r => setTimeout(r, 8))
+        return await base(url, init)
+      } finally { inflight-- }
+    }))
+  })
+  const ten = () => Array.from({ length: 10 }, (_, i) => img(`p${i + 1}.jpg`))
+  const settle = async (ms = 400) => { await act(async () => { await new Promise(r => setTimeout(r, ms)) }) }
+
+  it('10 枚を読み取っても、画像の縮小は同時に 1 件だけ。全画像を順番どおりに処理する', async () => {
+    choose(ten()); click(button('AIで読み取る')); await settle()
+    expect(prep.max).toBe(1)
+    expect(prep.started).toEqual(ten().map(f => f.name))
+    expect(extractCalls.map(c => c.name)).toHaveLength(10)
+    // 結果の並びは画像の順番どおり（各画像 GOOD・BAD の 2 行）
+    expect(cards()).toHaveLength(20)
+  })
+
+  it('API への送信は最大 2 件まで並列（1 枚 1 リクエスト）', async () => {
+    choose(ten()); click(button('AIで読み取る')); await settle()
+    expect(maxInflight).toBe(2)
+    expect(extractCalls.every(c => c.count === 1)).toBe(true)
+  })
+
+  it('途中でキャンセルすると、待っている画像の縮小・送信を始めない', async () => {
+    let release!: () => void
+    prep.gate = new Promise(r => { release = r })
+    choose(ten()); click(button('AIで読み取る')); await settle(30)
+    expect(prep.started).toEqual(['p1.jpg'])
+    click(button('キャンセル'))
+    release(); await settle(100)
+    expect(prep.started).toEqual(['p1.jpg'])
+    expect(extractCalls).toHaveLength(0)
+    expect(cards()).toHaveLength(0)
+  })
+
+  it('1 枚の縮小が想定外に失敗しても、ほかの画像は処理する', async () => {
+    prep.failOn = 'p2.jpg'
+    choose([img('p1.jpg'), img('p2.jpg'), img('p3.jpg')]); click(button('AIで読み取る')); await settle(200)
+    expect(extractCalls.map(c => c.name)).toEqual(['p1.jpg', 'p3.jpg'])
+    expect(cards()).toHaveLength(4)
+    expect(container.textContent).toContain('「p2.jpg」を読み込めませんでした')
+  })
+
+  it('画面を閉じると読み取りの通信を中断し、待っている画像の縮小を始めない', async () => {
+    let release!: () => void
+    sendGate = new Promise(r => { release = r })
+    choose(ten()); click(button('AIで読み取る')); await settle(60)
+    const startedBefore = prep.started.length
+    expect(signals.length).toBeGreaterThan(0)
+    act(() => root.unmount())
+    expect(signals.every(sg => sg.aborted)).toBe(true)
+    release(); await settle(100)
+    expect(prep.started.length).toBe(startedBefore)
+    root = createRoot(container) // afterEach の unmount 用
+  })
+})
+
+describe('画像変更・画面終了の後に古い結果が戻らない', () => {
+  const settle = async (ms = 400) => { await act(async () => { await new Promise(r => setTimeout(r, ms)) }) }
+  const OK = (name: string) => json({ files: [fileResult(name, [GOOD])], items: [GOOD], failures: [] })
+
+  it('追加のアニメーション中に「画像を変更」しても、追加完了の画面が戻らない', async () => {
+    extractReply = OK
+    await readImages([img('p1.jpg')])
+    click(button('残り全件を追加')); await flush()
+    click(button('画像を変更'))
+    expect(container.querySelector('input[type=file]')).not.toBeNull()
+    await settle()
+    expect(container.querySelector('input[type=file]')).not.toBeNull()
+    expect(container.textContent).not.toContain('すべてを見積に追加しました')
+  })
+
+  it('追加の通信中に「画像を変更」→ 後から届いた追加完了で、結果画面・件数が戻らない', async () => {
+    extractReply = OK
+    let release!: () => void
+    importReply = () => new Promise(r => { release = () => r(json({ created: 1 })) })
+    await readImages([img('p1.jpg')])
+    click(button('残り全件を追加')); await flush()
+    click(button('画像を変更'))
+    release(); await settle()
+    expect(imports).toHaveLength(1) // 登録そのものは中断しない
+    expect(container.querySelector('input[type=file]')).not.toBeNull()
+    expect(container.textContent).not.toContain('すべてを見積に追加しました')
+  })
+
+  it('画像変更の後に届いたドラッグの追加完了通知でも、件数・結果画面が戻らない', async () => {
+    extractReply = OK
+    await readImages([img('p1.jpg')])
+    const id: { _importId?: string } = {}
+    const ev = new Event('dragstart', { bubbles: true, cancelable: true }) as Event & { dataTransfer: unknown }
+    ev.dataTransfer = { setData: (_t: string, v: string) => Object.assign(id, JSON.parse(v)), effectAllowed: '' }
+    act(() => { (cards()[0].querySelector('[draggable]') as HTMLElement).dispatchEvent(ev) })
+    click(button('画像を変更'))
+    act(() => { window.dispatchEvent(new CustomEvent('genba:import-item-moved', { detail: { importId: id._importId } })) })
+    await settle()
+    expect(container.querySelector('input[type=file]')).not.toBeNull()
+    expect(container.textContent).not.toContain('すべてを見積に追加しました')
+  })
+
+  it('読み取り中に画面を閉じても、エラーや警告を出さず、閉じた後に状態を更新しない', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let release!: () => void
+    const gate = new Promise<void>(r => { release = r })
+    extractReply = name => { void gate; return OK(name) }
+    const base = globalThis.fetch as unknown as (u: string, i?: RequestInit) => Promise<Response>
+    vi.stubGlobal('fetch', vi.fn(async (u: string, i?: RequestInit) => { await gate; if (i?.signal?.aborted) throw new DOMException('a', 'AbortError'); return base(u, i) }))
+    choose([img('p1.jpg')]); click(button('AIで読み取る')); await flush()
+    act(() => root.unmount())
+    release(); await settle(100)
+    expect(errors).not.toHaveBeenCalled()
+    errors.mockRestore()
+    root = createRoot(container)
+  })
+})
+
+describe('Object URL の解放', () => {
+  let created: string[] = [], revoked: string[] = []
+  beforeEach(() => {
+    created = []; revoked = []
+    let n = 0
+    URL.createObjectURL = vi.fn(() => { const u = `blob:preview-${++n}`; created.push(u); return u })
+    URL.revokeObjectURL = vi.fn((u: string) => { revoked.push(u) })
+  })
+  const live = () => created.filter(u => !revoked.includes(u))
+
+  it('画像の削除・追加選択・画像変更で古い URL を解放し、画面を閉じると残りをすべて解放する', async () => {
+    choose([img('a.jpg'), img('b.jpg')])
+    expect(live()).toHaveLength(2)
+    choose([img('c.jpg')]) // 追加選択: 作り直した分だけが残る
+    expect(live()).toHaveLength(3)
+    click(container.querySelector('button[aria-label="削除"]') as HTMLButtonElement) // 1 枚削除
+    expect(live()).toHaveLength(2)
+    click(button('AIで読み取る')); await flush()
+    click(button('画像を変更'))
+    expect(live()).toHaveLength(0)
+    choose([img('d.jpg'), img('e.jpg')])
+    expect(live()).toHaveLength(2)
+    act(() => root.unmount())
+    expect(live()).toHaveLength(0)
+    expect(new Set(revoked).size).toBe(revoked.length) // 二重に解放しない
+    root = createRoot(container)
+  })
+})
+
+describe('エラー・再試行で候補が重複しない', () => {
+  const OK = (name: string) => json({ files: [fileResult(name, [GOOD])], items: [GOOD], failures: [] })
+  const settle = async (ms = 300) => { await act(async () => { await new Promise(r => setTimeout(r, ms)) }) }
+
+  it('1 枚失敗 → 画像を選び直して再読み取り → 候補は画像の数だけ（前回分と重ならない）', async () => {
+    extractReply = name => (name === 'p2.jpg' ? json({ error: '読み取りに失敗しました', code: 'ai_failed' }, 500) : OK(name))
+    await readImages([img('p1.jpg'), img('p2.jpg')])
+    expect(cards()).toHaveLength(1)
+    extractReply = OK
+    click(button('画像を変更'))
+    await readImages([img('p1.jpg'), img('p2.jpg')]); await settle()
+    expect(cards()).toHaveLength(2)
+  })
+
+  it('読み取り途中でキャンセル → すぐ再読み取りしても、候補は 1 回分だけ', async () => {
+    extractReply = OK
+    let release!: () => void
+    prep.gate = new Promise(r => { release = r })
+    choose([img('p1.jpg'), img('p2.jpg'), img('p3.jpg')]); click(button('AIで読み取る')); await flush()
+    click(button('キャンセル'))
+    prep.gate = null
+    click(button('AIで読み取る'))
+    release(); await settle()
+    expect(cards()).toHaveLength(3)
+    expect(prep.max).toBe(1)
   })
 })
