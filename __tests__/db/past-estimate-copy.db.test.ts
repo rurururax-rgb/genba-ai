@@ -325,9 +325,12 @@ describe('プレビュー後の変更（fingerprint）', () => {
     const body = { project_id: P_TARGET, group_id: G_TARGET, items: [S_MANUAL0, S_AUTO].map(id => ({ source_item_id: id, fingerprint: fps.get(id)! })) }
     const res = await request(body)
     expect(res.status).toBe(409)
-    const changed = res.body.changed as Array<{ source_item_id: string; copy_preview: Json }>
+    const changed = res.body.changed as Array<{ source_item_id: string; copy_preview: Json; item: Json }>
     expect(changed.map(c => c.source_item_id)).toEqual([S_AUTO])
     expect(changed[0].copy_preview).toMatchObject({ basis: 'auto_recalculated', new_selling_price: 156000 })
+    // 確認画面用に、いまのコピー元の値を返す（備考・社内メモは含めない）
+    expect(changed[0].item).toEqual({ name: 'コピー元 システムキッチン', quantity: 2, unit: '台', cost_price: 120000, selling_price: 145000, selling_price_mode: 'auto' })
+    expect(JSON.stringify(res.body)).not.toMatch(/他のお客様向け備考|仕入見積/)
     expect(await snapshot()).toBe(before)
 
     // 利用者が新しい金額を確認した → 新しい fingerprint で送り直す

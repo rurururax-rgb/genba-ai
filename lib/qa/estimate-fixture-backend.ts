@@ -18,6 +18,7 @@
  */
 
 import { MAX_MARKUP_RATE, MIN_MARKUP_RATE } from '@/lib/estimate/pricing'
+import { handlePastEstimateFixture } from './past-estimate-fixture'
 
 export const FIXTURE_PROJECT_ID = '00000000-0000-4000-8000-000000000a01'
 // v2: internal_memo（社内メモ）を追加。v1 のデータは破棄して再シードする
@@ -263,6 +264,17 @@ async function handle(url: URL, method: string, init: RequestInit | undefined, a
     save(s); return json({ ok: true })
   }
   if (p === '/api/estimate-revisions' && method === 'GET') return json([])
+  // 過去見積から追加（search-past / copy-from-past）。架空の過去明細は lib/qa/past-estimate-fixture.ts
+  const past = handlePastEstimateFixture(url, method, body, s, row => {
+    const n = Math.max(0, ...s.items.map(i => Number(i.id.slice(-12)))) + 1
+    s.items.push(item(n, {
+      name: row.name, quantity: row.quantity, unit: row.unit, cost_price: row.cost_price, selling_price: row.selling_price,
+      selling_price_mode: row.selling_price_mode, markup_rate_override: null, vendor_name: row.vendor_name, category: row.category,
+      row_type: row.row_type, memo: row.memo, internal_memo: row.internal_memo, group_id: row.group_id, sort_order: row.sort_order,
+      source: row.source,
+    }))
+  }, () => save(s))
+  if (past) return past
   return null
 }
 
