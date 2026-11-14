@@ -6,6 +6,7 @@
  * - 対応するのはテスト対象のルート・サービスが使う範囲だけ：
  *     select（列・`*`・`projects!<外部キー名>!inner ( ... )` の埋め込み・count/head）、insert / update / delete、
  *     eq / neq / is / in / ilike / not(col,'is',null) / lt / lte / gt / gte（埋め込み列 `projects.xxx` も可）、
+ *     or('a.is.null,a.eq.値')（本体の列の is.null / eq だけ。値にカンマ・括弧は使えない）、
  *     order / limit / single / maybeSingle、auth.getUser()
  * - 埋め込みは PostgREST と同じく外部キーで解決する。2 テーブル間に外部キーが複数あってヒントが無いと
  *   PGRST201（あいまい）、ヒントの外部キーが無いと PGRST200 を返す（KI-003 を再現できるように）。
@@ -128,6 +129,16 @@ class Query implements PromiseLike<Result> {
   gte(col: string, value: unknown) { this.filters.push({ col, op: '>=', value }); return this }
   is(col: string, value: null) { this.filters.push({ col, op: 'IS NULL', value }); return this }
   ilike(col: string, pattern: string) { this.filters.push({ col, op: 'ILIKE', value: pattern }); return this }
+  or(expr: string) {
+    const parts = expr.split(',').map(part => {
+      const m = /^([a-z_][a-z0-9_]*)\.(is|eq)\.([^,()]*)$/.exec(part.trim())
+      if (!m) throw new Error(`unsupported or(): ${expr}`)
+      if (m[2] === 'is' && m[3] !== 'null') throw new Error(`unsupported or(): ${expr}`)
+      return { col: m[1], op: m[2] === 'is' ? 'IS NULL' : '=', value: m[3] }
+    })
+    this.filters.push({ col: '', op: 'OR', value: parts })
+    return this
+  }
   in(col: string, values: unknown[]) { this.filters.push({ col, op: 'IN', value: values }); return this }
   not(col: string, op: string, value: unknown) {
     if (op !== 'is' || value !== null) throw new Error(`unsupported not(${op})`)
@@ -147,6 +158,13 @@ class Query implements PromiseLike<Result> {
   private where(params: unknown[]): string {
     if (this.filters.length === 0) return ''
     return ' WHERE ' + this.filters.map(f => {
+      if (f.op === 'OR') {
+        return '(' + (f.value as Filter[]).map(o => {
+          if (o.op === 'IS NULL') return `t.${ident(o.col)} IS NULL`
+          params.push(o.value)
+          return `t.${ident(o.col)} = $${params.length}`
+        }).join(' OR ') + ')'
+      }
       const ref = this.colRef(f.col)
       if (f.op === 'IS NULL' || f.op === 'IS NOT NULL') return `${ref} ${f.op}`
       if (f.op === 'IN') { params.push(f.value); return `${ref} = ANY($${params.length})` }

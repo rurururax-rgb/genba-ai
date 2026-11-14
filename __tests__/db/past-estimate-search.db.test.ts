@@ -59,6 +59,12 @@ const I_PLAIN100 = randomUUID()
 
 const SECRET_B = 'B社の秘密キッチン'
 
+// 「奥にある有効な明細」の検証用（品名に「防水タイル」を含む）
+const I_DEEP_ITEM = randomUUID()     // 古い有効な明細（row_type = 'item'）
+const I_DEEP_NULLTYPE = randomUUID() // さらに古い有効な明細（row_type = NULL）
+/** 有効な明細より新しい「検索対象外」の行の数（旧実装の多めに読む上限 90 件を超える数） */
+const NOISE = { deletedItems: 60, headers: 40, notes: 40, deletedProject: 60, otherCompany: 60 }
+
 async function snapshotAll(): Promise<string> {
   const out: string[] = []
   for (const t of ['estimate_items', 'estimate_groups', 'projects']) {
@@ -125,6 +131,21 @@ beforeAll(async () => {
   await item(I_B, COMPANY_B, PB, GB, SECRET_B)
   await item(I_PERCENT, COMPANY_A, PA_PAST, null, '値引き10%_特別')
   await item(I_PLAIN100, COMPANY_A, PA_PAST, null, '値引き10x特別')
+
+  // 有効な明細 2 件は 2025 年。それより新しい（2026 年）検索対象外の行を大量に置く
+  await item(I_DEEP_ITEM, COMPANY_A, PA_PAST2, null, '防水タイル張り（有効）', { createdAt: '2025-06-01T00:00:00Z' })
+  await item(I_DEEP_NULLTYPE, COMPANY_A, PA_PAST2, null, '防水タイル下地（旧データ）', { rowType: null, createdAt: '2025-05-01T00:00:00Z' })
+  const noise = (n: number, company: string, project: string, rowType: string, deleted: boolean, label: string) => admin.query(
+    `INSERT INTO estimate_items (company_id, project_id, name, quantity, unit, cost_price, selling_price, selling_price_mode, row_type, deleted_at, created_at)
+     SELECT $1, $2, $3 || g, 1, '式', 1000, 1450, 'auto', $4, CASE WHEN $5 THEN now() END, '2026-06-01T00:00:00Z'::timestamptz + g * interval '1 minute'
+       FROM generate_series(1, $6) g`,
+    [company, project, `防水タイル${label}`, rowType, deleted, n],
+  )
+  await noise(NOISE.deletedItems, COMPANY_A, PA_PAST, 'item', true, '削除済み明細')
+  await noise(NOISE.headers, COMPANY_A, PA_PAST, 'header', false, '見出し')
+  await noise(NOISE.notes, COMPANY_A, PA_PAST, 'note', false, 'メモ行')
+  await noise(NOISE.deletedProject, COMPANY_A, PA_DEL, 'item', false, '削除済み案件')
+  await noise(NOISE.otherCompany, COMPANY_B, PB, 'item', false, 'B社')
 })
 
 afterAll(async () => {
@@ -237,6 +258,40 @@ describe('GET /api/estimate-items/search-past', () => {
   it('未ログインは 401、会社に属さない利用者は 403', async () => {
     expect((await search({ q: 'キッチン' }, null)).status).toBe(401)
     expect((await search({ q: 'キッチン' }, USER_NONE)).status).toBe(403)
+  })
+
+  describe('検索対象外の行が新しい側に大量にあっても、奥の有効な明細を取りこぼさない', () => {
+    it('limit 30: 有効な 2 件だけを新しい順に返し、has_more = false', async () => {
+      const { status, body } = await search({ q: '防水タイル', limit: '30' })
+      expect(status).toBe(200)
+      expect(body.items.map((i: { id: string }) => i.id)).toEqual([I_DEEP_ITEM, I_DEEP_NULLTYPE])
+      expect(body.has_more).toBe(false)
+      expect(JSON.stringify(body)).not.toMatch(/削除済み明細|見出し|メモ行|削除済み案件|B社/)
+    })
+
+    it('limit 1: 一番新しい有効な明細を返し、残りがあるので has_more = true', async () => {
+      const { body } = await search({ q: '防水タイル', limit: '1' })
+      expect(body.items.map((i: { id: string }) => i.id)).toEqual([I_DEEP_ITEM])
+      expect(body.has_more).toBe(true)
+    })
+
+    it('limit = 有効な件数ちょうど: 全件を返し、has_more = false', async () => {
+      const { body } = await search({ q: '防水タイル', limit: '2' })
+      expect(body.items.map((i: { id: string }) => i.id)).toEqual([I_DEEP_ITEM, I_DEEP_NULLTYPE])
+      expect(body.has_more).toBe(false)
+    })
+
+    it('検索対象外の行しか一致しないときは 0 件・has_more = false（他の語との AND）', async () => {
+      const { body } = await search({ q: '防水タイル 見出し', limit: '30' })
+      expect(body).toEqual({ items: [], has_more: false })
+    })
+
+    it('B社の利用者には B社の行だけが返る（件数の上限は B社の有効な明細に対してかかる）', async () => {
+      const { body } = await search({ q: '防水タイル', limit: '30' }, USER_B)
+      expect(body.items).toHaveLength(30)
+      expect(body.has_more).toBe(true)
+      for (const i of body.items) expect(i.project.id).toBe(PB)
+    })
   })
 
   it('検索しても DB を 1 行も書き換えない', async () => {
