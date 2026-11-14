@@ -39,6 +39,7 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js'
 import { getCompanyBillingStatus } from './billing-status'
+import { liveAmount, type EstimateTotalItem } from '@/lib/estimate/totals'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -182,7 +183,7 @@ export async function getProjectSummaryDetail(
 
     supabase
       .from('estimate_items')
-      .select('amount')
+      .select('quantity, selling_price, amount')
       .eq('project_id', projectId)
       .is('deleted_at', null),
 
@@ -207,8 +208,9 @@ export async function getProjectSummaryDetail(
 
   if (!member || member.company_id !== companyId) return null
 
+  // 見積エディタと同じく、行ごとに四捨五入した金額を足す（DB の amount は円未満を含みうる）
   const estimate_total = (estimateRes.data ?? []).reduce(
-    (s: number, i: { amount: number | null }) => s + (i.amount ?? 0), 0
+    (s: number, i: EstimateTotalItem) => s + liveAmount(i), 0
   )
   const milestones = (milestonesRes.data ?? []) as Array<{
     type: string

@@ -1184,9 +1184,7 @@ function ItemRow({
     e.stopPropagation()
   }
 
-  const liveAmt = item.selling_price != null
-    ? Math.round(item.quantity * item.selling_price)
-    : item.amount
+  const liveAmt = item.selling_price != null || item.amount != null ? liveAmount(item) : null
 
   const amtSelected = sumSelKeys?.has(item.id) ?? false
   const spSelected  = sumSelKeys?.has(item.id + ':sp') ?? false
@@ -1840,7 +1838,7 @@ function RevDiffModal({ rev, currentItems, fmt, onClose, fontFamily }: {
                 <div>
                   <div style={{ fontSize: 10, color: C.textMuted, marginBottom: 2 }}>現在 合計</div>
                   <div style={{ fontSize: 15, fontWeight: 700, color: C.green, fontVariantNumeric: 'tabular-nums' }}>
-                    ¥{fmt(currentItems.reduce((acc, i) => acc + (i.selling_price != null ? Math.round(i.quantity * i.selling_price) : (i.amount ?? 0)), 0))}
+                    ¥{fmt(currentItems.reduce((acc, i) => acc + liveAmount(i), 0))}
                   </div>
                 </div>
               </div>

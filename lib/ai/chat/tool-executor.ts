@@ -56,6 +56,7 @@ import {
 } from '@/lib/services/company-summary'
 import { BillingFetchError, getCompanyBillingStatus } from '@/lib/services/billing-status'
 import { executeGetEstimateTotal } from './estimate-total'
+import { liveAmount } from '@/lib/estimate/totals'
 
 // ─────────────────────────────────────────────────────────
 // 実行コンテキスト（route.ts から渡される認証済み情報）
@@ -282,7 +283,7 @@ export async function executeEditEstimateItem(
       quantity:      current.quantity,
       unit:          current.unit,
       selling_price: current.selling_price,
-      amount:        current.amount,
+      amount:        liveAmount(current),
       memo:          current.memo,
       cost_price:    current.cost_price,
       vendor_name:   current.vendor_name,
@@ -326,7 +327,7 @@ export async function executeDeleteEstimateItem(
       quantity:      current.quantity,
       unit:          current.unit,
       selling_price: current.selling_price,
-      amount:        current.amount,
+      amount:        liveAmount(current),
     },
   }
 }
