@@ -83,8 +83,11 @@ export function PastEstimatePicker({
 
   /** 選んだ順 */
   const [selected, setSelected] = useState<Hit[]>([])
-  /** 409 で金額が変わり、利用者の確認待ちの明細 */
-  const [needsReview, setNeedsReview] = useState<Set<string>>(new Set())
+  /**
+   * 409 で内容が変わり、利用者の確認待ちの明細（id → 変わる前の内容）。
+   * 検索語に関係なく選択欄の上に 1 件ずつ出し、それぞれ確認するまで追加させない
+   */
+  const [needsReview, setNeedsReview] = useState<Map<string, Hit>>(new Map())
   // 追加先の工種（null = その他）。消えたときの案内に名前を出すため、選んだ時点の名前も持つ。
   // 開いた時点で既定の工種が無ければ「その他」から始める
   const [target, setTarget] = useState<{ id: string; label: string } | null>(() => {
@@ -161,14 +164,21 @@ export function PastEstimatePicker({
     setSelected(prev => (prev.some(s => s.id === hit.id)
       ? prev.filter(s => s.id !== hit.id)
       : prev.length >= PAST_COPY_MAX_ITEMS ? prev : [...prev, hit]))
-    setNeedsReview(prev => { if (!prev.has(hit.id)) return prev; const n = new Set(prev); n.delete(hit.id); return n })
+    setNeedsReview(prev => { if (!prev.has(hit.id)) return prev; const n = new Map(prev); n.delete(hit.id); return n })
   }
 
   function remove(id: string) {
     if (busy) return
     setNotice(null)
     setSelected(prev => prev.filter(s => s.id !== id))
-    setNeedsReview(prev => { if (!prev.has(id)) return prev; const n = new Set(prev); n.delete(id); return n })
+    setNeedsReview(prev => { if (!prev.has(id)) return prev; const n = new Map(prev); n.delete(id); return n })
+  }
+
+  /** 変更された明細を 1 件確認する（最新の内容・fingerprint は 409 の時点で選択に反映済み） */
+  function confirmReview(id: string) {
+    if (busy) return
+    setNeedsReview(prev => { if (!prev.has(id)) return prev; const n = new Map(prev); n.delete(id); return n })
+    if (needsReview.size <= 1) setNotice(null)
   }
 
   const targetLabel = target
@@ -218,10 +228,12 @@ export function PastEstimatePicker({
             const c = byId.get(h.id)
             return c ? { ...h, ...(c.item ?? {}), copy_preview: c.copy_preview } : h
           }
+          // 変わる前の内容を覚えておき、確認欄で「前 → 後」を見せる（検索結果に出ていない明細も対象）
+          const before = new Map(selected.filter(h => byId.has(h.id)).map(h => [h.id, h]))
           setSelected(prev => prev.map(apply))
           setResults(prev => prev.map(apply))
-          setNeedsReview(new Set(byId.keys()))
-          setNotice({ tone: 'warn', text: `確認したあとに ${byId.size} 件の金額または内容が変わりました。新しい金額を確認してから追加してください（まだ追加していません）。` })
+          setNeedsReview(before)
+          setNotice({ tone: 'warn', text: `確認したあとに ${before.size} 件の内容が変わりました。選択中の欄の「確認が必要な明細」を 1 件ずつ確認してから追加してください（まだ追加していません）。` })
           return
         }
         case 'missing': {
@@ -340,7 +352,17 @@ export function PastEstimatePicker({
             {atLimit && (
               <p className="m-0 px-4 pb-1 text-[11px] font-semibold text-[#92400E]">上限の {PAST_COPY_MAX_ITEMS} 件に達しました。外すと別の明細を選べます。</p>
             )}
-            <ol className="m-0 min-h-[56px] list-none space-y-1.5 px-3 pb-2 md:flex-1 md:overflow-auto">
+            {/* 確認欄と選択中の一覧はまとめて 1 つのスクロールにする（確認ボタンが内側のスクロールに隠れないように） */}
+            <div className="min-h-0 md:flex-1 md:overflow-auto">
+            {needsReview.size > 0 && (
+              <div role="region" aria-label="確認が必要な明細" className="mx-3 mb-2 space-y-2 rounded-lg border border-[#FDE68A] bg-[#FFFBEB] p-2">
+                <div className="px-1 text-[12px] font-bold text-[#92400E]">確認が必要な明細 {needsReview.size} 件</div>
+                {selected.filter(s => needsReview.has(s.id)).map(s => (
+                  <ReviewCard key={s.id} before={needsReview.get(s.id)!} after={s} disabled={busy} onConfirm={() => confirmReview(s.id)} />
+                ))}
+              </div>
+            )}
+            <ol className="m-0 min-h-[56px] list-none space-y-1.5 px-3 pb-2">
               {selected.length === 0 && (
                 <li className="px-1 py-3 text-xs text-[#7A9185]">左の検索結果から追加したい明細を選んでください。</li>
               )}
@@ -352,7 +374,7 @@ export function PastEstimatePicker({
                     <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-xs">
                       <span className="tabular-nums">{formatYen(s.copy_preview.new_selling_price)}</span>
                       <PriceBadge preview={s.copy_preview} />
-                      {needsReview.has(s.id) && <span className="rounded bg-[#FFFBEB] px-1.5 py-0.5 text-[11px] font-bold text-[#92400E]">金額が変わりました</span>}
+                      {needsReview.has(s.id) && <span className="rounded bg-[#FFFBEB] px-1.5 py-0.5 text-[11px] font-bold text-[#92400E]">要確認</span>}
                     </div>
                   </div>
                   <Button type="button" variant="tertiary" size="icon" className="shrink-0" aria-label={`${s.name} を選択から外す`} disabled={busy} onClick={() => remove(s.id)}>
@@ -363,6 +385,7 @@ export function PastEstimatePicker({
                 </li>
               ))}
             </ol>
+            </div>
 
             <div className="space-y-2 border-t border-[#E4E8E5] px-4 py-3">
               <label className="block text-[11px] font-semibold uppercase tracking-[0.04em] text-[#47564E]" htmlFor="past-estimate-target">追加先の工種</label>
@@ -425,16 +448,12 @@ export function PastEstimatePicker({
                 <Button type="button" variant="secondary" className="w-full sm:w-auto" onClick={requestClose} disabled={phase === 'copying' || phase === 'reloading'}>
                   キャンセル
                 </Button>
-                {needsReview.size > 0 && phase === 'editing' && (
-                  <Button type="button" variant="secondary" className="w-full sm:w-auto" onClick={() => { setNeedsReview(new Set()); setNotice(null) }}>
-                    新しい金額を確認しました
-                  </Button>
-                )}
                 <Button type="button" variant="primary" className="w-full sm:w-auto" disabled={!canCopy} onClick={() => void submit()}>
                   {phase === 'copying' ? '追加しています…'
                     : phase === 'reloading' ? '読み込み直しています…'
                     : selected.length === 0 ? '明細を選んでください'
                     : groupMissing ? '追加先の工種を選び直してください'
+                    : needsReview.size > 0 ? `変更された ${needsReview.size} 件を確認してください`
                     : `選んだ ${selected.length} 件を「${targetLabel}」に追加`}
                 </Button>
               </>
@@ -456,6 +475,42 @@ function PriceBadge({ preview }: { preview: PastCopyPreview }) {
   )
 }
 
+/** 409 で変わった明細 1 件の「前 → 後」。変わった項目だけ前の値を併記し、確認ボタンで承認する */
+function ReviewCard({ before, after, disabled, onConfirm }: { before: Hit; after: Hit; disabled: boolean; onConfirm: () => void }) {
+  const qty = (h: Hit) => `${h.quantity ?? 1} ${h.unit ?? '式'}`
+  const rows: Array<[string, string, string]> = [
+    ['品名', before.name, after.name],
+    ['数量', qty(before), qty(after)],
+    ['原価', formatYen(before.cost_price), formatYen(after.cost_price)],
+    ['過去の売価', formatYen(before.copy_preview.past_selling_price), formatYen(after.copy_preview.past_selling_price)],
+    ['追加後の売価', formatYen(before.copy_preview.new_selling_price), formatYen(after.copy_preview.new_selling_price)],
+    ['業者', before.vendor_name || '—', after.vendor_name || '—'],
+    ['分類', before.category || '—', after.category || '—'],
+  ]
+  return (
+    <div className="rounded-md border border-[#FDE68A] bg-white px-2.5 py-2" data-testid="past-review-card">
+      <dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-2 gap-y-0.5 text-xs tabular-nums">
+        {rows.map(([label, b, a]) => (
+          <React.Fragment key={label}>
+            <dt className="text-[#7A9185]">{label}</dt>
+            <dd className="m-0 min-w-0 break-words" data-changed={b !== a ? 'true' : undefined}>
+              {b !== a
+                ? <><span className="text-[#9CA3AF] line-through">{b}</span><span className="mx-1 text-[#9CA3AF]">→</span><strong className="text-[#9A3412]">{a}</strong></>
+                : a}
+            </dd>
+          </React.Fragment>
+        ))}
+      </dl>
+      <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2">
+        <PriceBadge preview={after.copy_preview} />
+        <Button type="button" variant="secondary" disabled={disabled} onClick={onConfirm} aria-label={`${after.name} の変更内容を確認しました`}>
+          この内容で確認しました
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 function SearchResults({
   results, searching, searchError, searchedQuery, hasMore, selectedIds, needsReview, disabled, atLimit, onToggle,
 }: {
@@ -465,7 +520,7 @@ function SearchResults({
   searchedQuery: string | null
   hasMore: boolean
   selectedIds: Set<string>
-  needsReview: Set<string>
+  needsReview: { has(id: string): boolean }
   disabled: boolean
   /** 選択が上限に達している（未選択の明細は選べない。選択済みは外せる） */
   atLimit: boolean

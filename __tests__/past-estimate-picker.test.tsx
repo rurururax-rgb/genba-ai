@@ -119,7 +119,7 @@ function buttonByText(label: string | RegExp): HTMLButtonElement {
 }
 const checkbox = (name: string) => document.querySelector(`input[type="checkbox"][aria-label^="${name}"]`) as HTMLInputElement
 const click = (el: Element) => act(async () => { (el as HTMLElement).click() })
-const copyButton = () => buttonByText(/件を「|明細を選んでください|追加しています|読み込み直しています|工種を選び直してください/)
+const copyButton = () => buttonByText(/件を「|明細を選んでください|追加しています|読み込み直しています|工種を選び直してください|件を確認してください/)
 const selectedNames = () => [...document.querySelectorAll('section[aria-label="選択中の明細"] li .truncate')].map(e => e.textContent)
 
 describe('検索', () => {
@@ -363,7 +363,7 @@ describe('追加', () => {
     await selectThree()
     await click(copyButton())
     await flush()
-    expect(text()).toContain('新しい金額を確認してから追加してください')
+    expect(text()).toContain('「確認が必要な明細」を 1 件ずつ確認してから追加してください')
     expect(text()).toContain('金額が変わりました')
     expect(text()).toContain('¥156,000')
     // 新しい売価と一緒に、いまの原価も表示する（古い原価 ¥100,000 を並べない）
@@ -376,7 +376,11 @@ describe('追加', () => {
     expect(onReload).not.toHaveBeenCalled()
     expect(copyButton().disabled).toBe(true)
 
-    await click(buttonByText('新しい金額を確認しました'))
+    // 一括で承認するボタンは無い。変更された明細を 1 件ずつ確認する
+    expect([...document.querySelectorAll('button')].some(b => b.textContent?.includes('新しい金額を確認しました'))).toBe(false)
+    expect(copyButton().textContent).toBe('変更された 1 件を確認してください')
+    await click(document.querySelector(`button[aria-label="${AUTO.name} の変更内容を確認しました"]`)!)
+    expect(document.querySelector('[role="region"][aria-label="確認が必要な明細"]')).toBeNull()
     expect(copyButton().disabled).toBe(false)
     await click(copyButton())
     await flush()
@@ -560,5 +564,94 @@ describe('読み込み直しの失敗', () => {
     await flush()
     expect(onClose).toHaveBeenCalledTimes(1)
     expect(posts).toHaveLength(1)
+  })
+})
+
+describe('409 の再確認（検索をまたいだ選択）', () => {
+  const reviewCards = () => [...document.querySelectorAll('[data-testid="past-review-card"]')] as HTMLElement[]
+  const field = (card: HTMLElement, label: string) => {
+    const dt = [...card.querySelectorAll('dt')].find(d => d.textContent === label)!
+    return dt.nextElementSibling as HTMLElement
+  }
+
+  it('いまの検索結果に無い明細の変更も、品名〜分類まで「前 → 後」で確認でき、1 件ずつ確認するまで追加できない。確認後は最新の fingerprint で送る', async () => {
+    const newPreview = { ...AUTO.copy_preview, past_selling_price: 150000, new_selling_price: 156000, difference: 6000, fingerprint: 'v1-aaaaaaaaaaaaaa' }
+    const newFloorPreview = { ...FLOOR.copy_preview, fingerprint: 'v1-bbbbbbbbbbbbbb' }
+    copyReply = async () => (posts.length === 1
+      ? json({ error: 'changed', changed: [
+          { source_item_id: AUTO.id, copy_preview: newPreview,
+            item: { name: 'システムキッチン交換（型番変更）', quantity: 3, unit: '式', cost_price: 120000, selling_price: 150000, selling_price_mode: 'auto', vendor_name: '新しい架空業者', category: '住宅設備機器' } },
+          { source_item_id: FLOOR.id, copy_preview: newFloorPreview,
+            item: { name: FLOOR.name, quantity: 2, unit: '台', cost_price: 100000, selling_price: 130000, selling_price_mode: 'auto', vendor_name: '架空床業者', category: null } },
+        ] }, 409)
+      : json({ inserted_count: 2 }, 201))
+    await render()
+    await typeAndSearch('キッチン')
+    await click(checkbox('システムキッチン交換'))
+    await typeAndSearch('床')                                   // A はいまの検索結果に無い
+    await click(checkbox('床フローリング張替'))
+    expect(document.querySelector('[role="region"][aria-label="確認が必要な明細"]')).toBeNull()   // 通常時は出さない
+    await click(copyButton())
+    await flush()
+    expect(text()).not.toContain('システムキッチン交換（型番変更）（')   // A は検索結果には出ていない（確認欄にだけ出る）
+
+    const cards = reviewCards()
+    expect(cards).toHaveLength(2)
+    const a = cards.find(c => c.textContent!.includes('型番変更'))!
+    // 品名・数量・単位・原価・過去売価・追加後売価・業者・分類（前 → 後）
+    expect(field(a, '品名').textContent).toBe('システムキッチン交換→システムキッチン交換（型番変更）')
+    expect(field(a, '数量').textContent).toBe('2 台→3 式')
+    expect(field(a, '原価').textContent).toBe('¥100,000→¥120,000')
+    expect(field(a, '過去の売価').textContent).toBe('¥145,000→¥150,000')
+    expect(field(a, '追加後の売価').textContent).toBe('¥130,000→¥156,000')
+    expect(field(a, '業者').textContent).toBe('架空設備→新しい架空業者')
+    expect(field(a, '分類').textContent).toBe('—→住宅設備機器')
+    for (const l of ['品名', '数量', '原価', '過去の売価', '追加後の売価', '業者', '分類']) expect(field(a, l).dataset.changed).toBe('true')
+    // 変わっていない項目は前の値を併記しない
+    const b = cards.find(c => c.textContent!.includes('床フローリング張替'))!
+    expect(field(b, '品名').dataset.changed).toBeUndefined()
+    expect(field(b, '業者').textContent).toBe('架空設備→架空床業者')
+
+    // 一括承認は無い。1 件確認しただけでは追加できない
+    expect([...document.querySelectorAll('button')].some(x => x.textContent?.includes('新しい金額を確認しました'))).toBe(false)
+    expect(copyButton().disabled).toBe(true)
+    await click(a.querySelector('button')!)
+    expect(reviewCards()).toHaveLength(1)
+    expect(copyButton().disabled).toBe(true)
+    expect(copyButton().textContent).toBe('変更された 1 件を確認してください')
+    await click(reviewCards()[0].querySelector('button')!)
+    expect(reviewCards()).toHaveLength(0)
+    expect(copyButton().disabled).toBe(false)
+
+    // 選択欄の表示も最新（古い値と混ざらない）
+    expect(selectedNames()).toEqual(['システムキッチン交換（型番変更）', '床フローリング張替'])
+
+    await click(copyButton())
+    await flush()
+    expect(posts).toHaveLength(2)
+    expect(posts[1].items).toEqual([
+      { source_item_id: AUTO.id, fingerprint: 'v1-aaaaaaaaaaaaaa' },
+      { source_item_id: FLOOR.id, fingerprint: 'v1-bbbbbbbbbbbbbb' },
+    ])
+  })
+
+  it('確認待ちの明細を選択から外すと、確認欄からも消え、残りだけで追加できる', async () => {
+    copyReply = async () => (posts.length === 1
+      ? json({ error: 'changed', changed: [{ source_item_id: AUTO.id, copy_preview: { ...AUTO.copy_preview, fingerprint: 'v1-cccccccccccccc' } }] }, 409)
+      : json({ inserted_count: 1 }, 201))
+    await render()
+    await typeAndSearch('キッチン')
+    await click(checkbox('システムキッチン交換'))
+    await typeAndSearch('床')
+    await click(checkbox('床フローリング張替'))
+    await click(copyButton())
+    await flush()
+    expect(reviewCards()).toHaveLength(1)
+    await click(document.querySelector('button[aria-label="システムキッチン交換 を選択から外す"]')!)
+    expect(reviewCards()).toHaveLength(0)
+    expect(copyButton().disabled).toBe(false)
+    await click(copyButton())
+    await flush()
+    expect(posts[1].items).toEqual([{ source_item_id: FLOOR.id, fingerprint: FLOOR.copy_preview.fingerprint }])
   })
 })
