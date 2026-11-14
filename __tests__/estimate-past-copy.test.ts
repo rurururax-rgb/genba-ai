@@ -5,6 +5,10 @@ import {
   parsePastSearchInput,
   planPastItemPrice,
   resolveTargetMarkupRate,
+  pastItemFingerprint,
+  parsePastCopyRequest,
+  planAppendSortOrders,
+  PAST_COPY_MAX_ITEMS,
   PAST_SEARCH_MAX_LIMIT,
   type PastItemSource,
   type PastCopyTarget,
@@ -227,5 +231,110 @@ describe('escapeLikePattern', () => {
   it('% _ \\ をエスケープし、それ以外は変えない', () => {
     expect(escapeLikePattern('100%_a\\b')).toBe('100\\%\\_a\\\\b')
     expect(escapeLikePattern('キッチン')).toBe('キッチン')
+  })
+})
+
+describe('pastItemFingerprint：プレビュー後の変更検知', () => {
+  const fp = (s: Partial<PastItemSource> = {}, rate: number | null = 1.3) => pastItemFingerprint({ ...base, ...s }, rate)
+
+  it('同じ内容・同じ掛け率なら同じ値（形式 v1-16進）', () => {
+    expect(fp()).toBe(fp())
+    expect(fp()).toMatch(/^v1-[0-9a-f]{14}$/)
+  })
+
+  it('品名・数量・単位・原価・売価・売価モード・業者名・分類・行の種類・掛け率のどれが変わっても変わる', () => {
+    const changes: Array<[Partial<PastItemSource>, number | null]> = [
+      [{ name: 'システムキッチン交換２' }, 1.3], [{ quantity: 3 }, 1.3], [{ unit: '式' }, 1.3],
+      [{ cost_price: 100001 }, 1.3], [{ selling_price: 150001 }, 1.3], [{ selling_price_mode: 'manual' }, 1.3],
+      [{ vendor_name: '別業者' }, 1.3], [{ category: '内装' }, 1.3], [{ row_type: 'header' }, 1.3], [{}, 1.4],
+    ]
+    const all = new Set(changes.map(([s, r]) => fp(s, r)))
+    expect(all.size).toBe(changes.length)
+    expect(all.has(fp())).toBe(false)
+  })
+
+  it('0 円と null（未登録）は区別する', () => {
+    expect(fp({ selling_price: 0 })).not.toBe(fp({ selling_price: null }))
+    expect(fp({ cost_price: 0 })).not.toBe(fp({ cost_price: null }))
+  })
+
+  it('個別掛け率・備考・社内メモは含めない（コピーしない・プレビューに出さない）', () => {
+    expect(fp({ markup_rate_override: 2.0, memo: '別', internal_memo: '別' })).toBe(fp())
+  })
+
+  it('売価モード null と auto、row_type null と item、掛け率 null と既定値は同じ扱い', () => {
+    expect(fp({ selling_price_mode: null })).toBe(fp({ selling_price_mode: 'auto' }))
+    expect(fp({ row_type: null })).toBe(fp({ row_type: 'item' }))
+    expect(fp({}, null)).toBe(fp({}, DEFAULT_MARKUP_RATE))
+  })
+})
+
+describe('parsePastCopyRequest：コピー API の入力', () => {
+  const S1 = '00000000-0000-4000-8000-000000000101'
+  const S2 = '00000000-0000-4000-8000-000000000102'
+  const FP = 'v1-0123456789abcd'
+  const ok = { project_id: P, group_id: G, items: [{ source_item_id: S1, fingerprint: FP }, { source_item_id: S2, fingerprint: FP }] }
+
+  it('正しい入力を受け付け、順番を保ち、オプションの既定は false', () => {
+    expect(parsePastCopyRequest(ok)).toEqual({
+      ok: true,
+      value: {
+        projectId: P, groupId: G, includeMemo: false, includeInternalMemo: false,
+        items: [{ sourceItemId: S1, fingerprint: FP }, { sourceItemId: S2, fingerprint: FP }],
+      },
+    })
+  })
+
+  it('group_id = null（未分類）とオプション true を受け付ける。UUID の大文字は小文字にそろえる', () => {
+    const r = parsePastCopyRequest({ ...ok, group_id: null, include_memo: true, include_internal_memo: true, project_id: P.toUpperCase() })
+    expect(r).toMatchObject({ ok: true, value: { groupId: null, includeMemo: true, includeInternalMemo: true, projectId: P } })
+  })
+
+  it('登録内容を決める値（売価・原価・会社・並び順など）を含むと拒否する', () => {
+    for (const extra of [{ company_id: C }, { selling_price: 1 }, { sort_order: 0 }, { markup_rate: 2 }]) {
+      expect(parsePastCopyRequest({ ...ok, ...extra }).ok).toBe(false)
+    }
+    for (const extra of [{ selling_price: 1 }, { cost_price: 1 }, { name: 'x' }, { group_id: G }]) {
+      expect(parsePastCopyRequest({ ...ok, items: [{ source_item_id: S1, fingerprint: FP, ...extra }] }).ok).toBe(false)
+    }
+  })
+
+  it('形式の不正を拒否する', () => {
+    const cases: unknown[] = [
+      null, [], 'x',
+      { ...ok, project_id: 'x' }, { ...ok, project_id: undefined },
+      { project_id: P, items: ok.items },                       // group_id の指定なし
+      { ...ok, group_id: 'x' }, { ...ok, group_id: 1 },
+      { ...ok, include_memo: 'true' }, { ...ok, include_internal_memo: 1 },
+      { ...ok, items: [] }, { ...ok, items: 'x' },
+      { ...ok, items: [S1] },
+      { ...ok, items: [{ source_item_id: 'x', fingerprint: FP }] },
+      { ...ok, items: [{ source_item_id: S1 }] },
+      { ...ok, items: [{ source_item_id: S1, fingerprint: 'abc' }] },
+      { ...ok, items: [{ source_item_id: S1, fingerprint: FP }, { source_item_id: S1.toUpperCase(), fingerprint: FP }] }, // 重複
+    ]
+    for (const c of cases) expect(parsePastCopyRequest(c).ok, JSON.stringify(c)).toBe(false)
+  })
+
+  it(`件数は ${PAST_COPY_MAX_ITEMS} 件まで`, () => {
+    const make = (n: number) => Array.from({ length: n }, (_, i) => ({
+      source_item_id: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}`, fingerprint: FP,
+    }))
+    expect(parsePastCopyRequest({ ...ok, items: make(PAST_COPY_MAX_ITEMS) }).ok).toBe(true)
+    expect(parsePastCopyRequest({ ...ok, items: make(PAST_COPY_MAX_ITEMS + 1) }).ok).toBe(false)
+  })
+})
+
+describe('planAppendSortOrders：工種の末尾', () => {
+  it('空の工種は 0 から 1000 刻み', () => {
+    expect(planAppendSortOrders(null, 3)).toEqual([0, 1000, 2000])
+  })
+  it('既存の最大値 + 1000 から（負の値も可）', () => {
+    expect(planAppendSortOrders(2500, 2)).toEqual([3500, 4500])
+    expect(planAppendSortOrders(-3000, 1)).toEqual([-2000])
+  })
+  it('INT の範囲を超えるなら null', () => {
+    expect(planAppendSortOrders(2147483647 - 1500, 2)).toBeNull()
+    expect(planAppendSortOrders(2147483647 - 2000, 2)).toEqual([2147482647, 2147483647])
   })
 })

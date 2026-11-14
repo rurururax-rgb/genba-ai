@@ -8,7 +8,7 @@
  *   （件数の上限は、有効な明細だけが残った後にかかる。row_type が NULL の古い行は明細として扱う）
  * - 削除済み・別案件の工種の名前は返さない（その場合は未分類として返す。行そのものは除かない）
  * - project_id（開いている案件）を渡すと、その案件の明細は除き、その案件の標準掛け率で計算した
- *   コピー後の売価（copy_preview）を付ける。他社・削除済み・存在しない案件は区別せず 404
+ *   コピー後の売価と変更検知用の fingerprint（copy_preview）を付ける。他社・削除済み・存在しない案件は区別せず 404
  * - お客様向け備考・社内メモは返さない（コピーするかどうかは後続の PR で利用者が選ぶ）
  * - DB のエラー文は返さない（サーバーログのみ）
  */
@@ -19,6 +19,7 @@ import { isActiveProject, isUuid } from '@/lib/estimate/ownership'
 import {
   escapeLikePattern,
   parsePastSearchInput,
+  pastItemFingerprint,
   planPastItemPrice,
   type PastCopyPricePreview,
 } from '@/lib/estimate/past-copy'
@@ -60,8 +61,11 @@ export type PastEstimateHit = {
   created_at: string
   project: { id: string; name: string; status: string | null; created_at: string | null }
   group: { id: string; label: string } | null
-  /** project_id を渡したときだけ。コピー先案件の標準掛け率で計算したコピー後の売価 */
-  copy_preview?: PastCopyPricePreview
+  /**
+   * project_id を渡したときだけ。コピー先案件の標準掛け率で計算したコピー後の売価と、
+   * コピー API（POST /api/estimate-items/copy-from-past）に送り返す変更検知用の fingerprint
+   */
+  copy_preview?: PastCopyPricePreview & { fingerprint: string }
 }
 
 const serverError = (tag: string, error: { code?: string | null; message?: string } | null) => {
@@ -162,7 +166,12 @@ export async function GET(req: NextRequest) {
       project:            { id: p.id, name: p.name, status: p.status, created_at: p.created_at },
       group:              g && g.project_id === i.project_id ? { id: g.id, label: g.label } : null,
       ...(targetProjectId
-        ? { copy_preview: planPastItemPrice({ ...i, selling_price_mode: mode, row_type: 'item' }, targetMarkupRate) }
+        ? {
+            copy_preview: {
+              ...planPastItemPrice({ ...i, selling_price_mode: mode, row_type: 'item' }, targetMarkupRate),
+              fingerprint: pastItemFingerprint({ ...i, selling_price_mode: mode, row_type: 'item' }, targetMarkupRate),
+            },
+          }
         : {}),
     })
   }

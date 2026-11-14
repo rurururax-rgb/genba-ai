@@ -214,3 +214,127 @@ export function parsePastSearchInput(rawQuery: string | null, rawLimit: string |
   }
   return { ok: true, terms, limit }
 }
+
+// ── コピー前のプレビューからの変更検知 ─────────────────────────────────────
+
+/**
+ * コピー元の明細とコピー先の掛け率から作る「指紋」。検索（プレビュー）時に返し、コピー時に送り返してもらう。
+ * サーバーで読み直した値から作り直して一致しなければ、プレビュー後にコピー元の明細またはコピー先の掛け率が
+ * 変わったとみなし、登録せずに 409 を返す（利用者が確認していない金額で登録しないため）。
+ *
+ * 変更検知のためのもので、認可・改ざん防止には使わない（会社・案件の確認は API が DB で行う）。
+ * 対象: 品名・数量・単位・原価・売価・売価モード・業者名・分類・行の種類・コピー先の掛け率。
+ * 備考・社内メモは含めない（検索結果に出さないため、プレビューで確認できる値ではない）。
+ */
+export function pastItemFingerprint(
+  source: Pick<PastItemSource, 'name' | 'quantity' | 'unit' | 'cost_price' | 'selling_price' | 'selling_price_mode' | 'vendor_name' | 'category' | 'row_type'>,
+  projectMarkupRate: number | null | undefined,
+): string {
+  const canonical = JSON.stringify([
+    1, // 指紋の形式（対象の項目を変えたら上げる）
+    source.name ?? '',
+    finiteOrNull(source.quantity),
+    source.unit ?? null,
+    finiteOrNull(source.cost_price),
+    finiteOrNull(source.selling_price),
+    source.selling_price_mode === 'manual' ? 'manual' : 'auto',
+    source.vendor_name ?? null,
+    source.category ?? null,
+    normalizeRowType(source.row_type),
+    resolveTargetMarkupRate(projectMarkupRate),
+  ])
+  return `v1-${cyrb53(canonical).toString(16).padStart(14, '0')}`
+}
+
+/** 53 bit の文字列ハッシュ（cyrb53。依存なし・ブラウザでも動く）。変更検知用で暗号用途ではない */
+function cyrb53(str: string): number {
+  let h1 = 0xdeadbeef
+  let h2 = 0x41c6ce57
+  for (let i = 0; i < str.length; i++) {
+    const ch = str.charCodeAt(i)
+    h1 = Math.imul(h1 ^ ch, 2654435761)
+    h2 = Math.imul(h2 ^ ch, 1597334677)
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909)
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909)
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0)
+}
+
+// ── コピー API の入力検証（POST /api/estimate-items/copy-from-past） ─────────────
+
+export const PAST_COPY_MAX_ITEMS = 50
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const FINGERPRINT_RE = /^v1-[0-9a-f]{1,32}$/
+
+export type PastCopyRequest = {
+  projectId:           string
+  groupId:             string | null
+  /** 利用者が指定した順（この順で末尾に追加する） */
+  items:               Array<{ sourceItemId: string; fingerprint: string }>
+  includeMemo:         boolean
+  includeInternalMemo: boolean
+}
+
+const BODY_KEYS = new Set(['project_id', 'group_id', 'items', 'include_memo', 'include_internal_memo'])
+const ITEM_KEYS = new Set(['source_item_id', 'fingerprint'])
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v != null && typeof v === 'object' && !Array.isArray(v)
+}
+
+/**
+ * コピー API の入力を検証する。登録内容を決める値（売価・原価・会社・並び順など）は受け付けない。
+ * 想定外のキーがあれば拒否する（クライアントから送られた金額を黙って無視するより、送らせない）。
+ * - project_id: UUID（必須）／ group_id: UUID または null（必須。null は未分類「その他」）
+ * - items: 1〜50 件。各要素は { source_item_id: UUID, fingerprint: 検索結果の copy_preview.fingerprint }。重複 ID は拒否
+ * - include_memo / include_internal_memo: 省略可。指定するなら boolean
+ */
+export function parsePastCopyRequest(body: unknown): { ok: true; value: PastCopyRequest } | { ok: false; error: string } {
+  const bad = (error: string) => ({ ok: false as const, error })
+  if (!isPlainObject(body)) return bad('リクエストの形式が正しくありません')
+  for (const k of Object.keys(body)) if (!BODY_KEYS.has(k)) return bad(`受け付けない項目があります: ${k}`)
+
+  const { project_id, group_id, items, include_memo, include_internal_memo } = body
+  if (typeof project_id !== 'string' || !UUID_RE.test(project_id)) return bad('コピー先の案件の指定が正しくありません')
+  if (!('group_id' in body)) return bad('コピー先の工種を指定してください（未分類は null）')
+  if (group_id !== null && (typeof group_id !== 'string' || !UUID_RE.test(group_id))) return bad('コピー先の工種の指定が正しくありません')
+  if (include_memo !== undefined && typeof include_memo !== 'boolean') return bad('include_memo は true / false で指定してください')
+  if (include_internal_memo !== undefined && typeof include_internal_memo !== 'boolean') return bad('include_internal_memo は true / false で指定してください')
+
+  if (!Array.isArray(items) || items.length === 0) return bad('コピーする明細を選んでください')
+  if (items.length > PAST_COPY_MAX_ITEMS) return bad(`一度にコピーできるのは${PAST_COPY_MAX_ITEMS}件までです`)
+  const seen = new Set<string>()
+  const parsed: PastCopyRequest['items'] = []
+  for (const it of items) {
+    if (!isPlainObject(it)) return bad('明細の指定が正しくありません')
+    for (const k of Object.keys(it)) if (!ITEM_KEYS.has(k)) return bad(`受け付けない項目があります: items.${k}`)
+    const { source_item_id, fingerprint } = it
+    if (typeof source_item_id !== 'string' || !UUID_RE.test(source_item_id)) return bad('明細の指定が正しくありません')
+    if (typeof fingerprint !== 'string' || !FINGERPRINT_RE.test(fingerprint)) return bad('確認用の値（fingerprint）が正しくありません。検索し直してください')
+    const id = source_item_id.toLowerCase()
+    if (seen.has(id)) return bad('同じ明細が重複して指定されています')
+    seen.add(id)
+    parsed.push({ sourceItemId: id, fingerprint })
+  }
+  return {
+    ok: true,
+    value: {
+      projectId: project_id.toLowerCase(),
+      groupId: group_id === null ? null : (group_id as string).toLowerCase(),
+      items: parsed,
+      includeMemo: include_memo === true,
+      includeInternalMemo: include_internal_memo === true,
+    },
+  }
+}
+
+/**
+ * 工種の末尾に n 行を追加するときの sort_order（既存行の最大値 + 1000 から 1000 刻み）。
+ * 既存行の並べ替えはしない。INT の範囲を超えるなら null（呼び出し側で登録を止める）。
+ */
+export function planAppendSortOrders(currentMax: number | null, count: number, step = 1000): number[] | null {
+  const start = currentMax == null ? 0 : currentMax + step
+  const orders = Array.from({ length: count }, (_, i) => start + i * step)
+  return orders.every(o => Number.isSafeInteger(o) && o >= -2147483648 && o <= 2147483647) ? orders : null
+}
