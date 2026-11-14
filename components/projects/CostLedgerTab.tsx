@@ -918,6 +918,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
           estGross={estGross} estRate={estRate}
           completionGross={completionGross} completionRate={completionRate}
           actualGross={actualGross} actualRate={actualRate}
+          actualItemCount={items.filter(i => i.actual_cost != null).length} itemCount={items.length}
           additionalAmounts={additionalAmounts}
           onEditAdditional={idx => setEditingAdditional({ idx, value: String(additionalAmounts[idx] ?? '') })}
         />
@@ -2115,12 +2116,15 @@ function SummaryCards({
   smry, estGross, estRate,
   completionGross, completionRate,
   actualGross, actualRate,
+  actualItemCount, itemCount,
   additionalAmounts, onEditAdditional,
 }: {
   smry: Summary
   estGross: number; estRate: number
   completionGross: number; completionRate: number
   actualGross: number; actualRate: number
+  /** 実績原価が入っている台帳項目の数（NULL は未集計。0 円は入力済みとして数える） */
+  actualItemCount: number; itemCount: number
   additionalAmounts: [number|null, number|null, number|null]
   onEditAdditional: (idx: number) => void
 }) {
@@ -2210,23 +2214,26 @@ function SummaryCards({
           rate={actualRate}
           gross={actualGross}
           revenue={smry.contract_amount}
-          costLabel="業者請求"
+          costLabel={actualItemCount < itemCount ? `業者請求（${itemCount} 項目中 ${actualItemCount} 項目）` : '業者請求'}
           costValue={smry.actual_cost_total}
           variant="light"
-          noDataMsg="業者請求額を入力すると表示"
+          noDataMsg="未集計（業者請求書を登録すると表示）"
           hasData={smry.has_actual_data}
+          provisionalNote={actualItemCount < itemCount ? '暫定・請求登録分のみ' : undefined}
         />
       </div>
     </div>
   )
 }
 
-function GrossCard({ label, rate, gross, revenue, costLabel, costValue, variant, noDataMsg, hasData }: {
+function GrossCard({ label, rate, gross, revenue, costLabel, costValue, variant, noDataMsg, hasData, provisionalNote }: {
   label: string; rate: number; gross: number; revenue: number
   costLabel: string; costValue: number
   variant: 'blue' | 'green' | 'light'
   noDataMsg: string | null
   hasData?: boolean
+  /** 確定していない数字のときの注記（例: 実績原価が一部の項目にしか無い）。率の横に出す */
+  provisionalNote?: string
 }) {
   const show = noDataMsg === null || hasData
   const bg =
@@ -2253,8 +2260,15 @@ function GrossCard({ label, rate, gross, revenue, costLabel, costValue, variant,
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span style={{ fontSize: 10, fontWeight: 700, color: labelColor, letterSpacing: '0.06em' }}>{label}</span>
         {show ? (
-          <span style={{ fontSize: 20, fontWeight: 900, color: rateColor, letterSpacing: '-0.5px', fontVariantNumeric: 'tabular-nums' }}>
-            {(rate * 100).toFixed(1)}%
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {provisionalNote && (
+              <span style={{ fontSize: 10, fontWeight: 700, color: '#92400E', background: '#FFFBEB', border: '1px solid #FCD34D', borderRadius: 4, padding: '1px 6px' }}>
+                {provisionalNote}
+              </span>
+            )}
+            <span style={{ fontSize: 20, fontWeight: 900, color: rateColor, letterSpacing: '-0.5px', fontVariantNumeric: 'tabular-nums' }}>
+              {(rate * 100).toFixed(1)}%
+            </span>
           </span>
         ) : (
           <span style={{ fontSize: 11, color: isDark ? 'rgba(255,255,255,0.6)' : C.textMuted }}>{noDataMsg}</span>
