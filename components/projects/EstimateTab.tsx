@@ -17,6 +17,7 @@ import {
 import { getClient } from '@/lib/supabase/client'
 import { resolveNumericCommit } from '@/lib/input/numeric-input'
 import { jsonInit, writeRequest } from '@/lib/api/write-request'
+import { PastEstimatePicker } from './PastEstimatePicker'
 import { calculateSellingPrice, DEFAULT_MARKUP_RATE, getEffectiveMarkupRate, getItemPricingState, markupToMarginRate, normalizeMarkupOverride, resolveSellingPrice, type SellingPriceMode } from '@/lib/estimate/pricing'
 import { calculateEstimateTotals, liveAmount } from '@/lib/estimate/totals'
 import { planInsert } from '@/lib/estimate/insert-plan'
@@ -1910,6 +1911,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   const [revDiff,       setRevDiff]       = useState<RevisionFull | null>(null)
   const [showRevConfirm, setShowRevConfirm] = useState(false)
   const [revLabel,      setRevLabel]      = useState('')
+  const [showPastPicker, setShowPastPicker] = useState(false)
   const [showImportModal, setShowImportModal] = useState(false)
   const [activeGroupTab, setActiveGroupTab] = useState<string | null>(null)
   const [dragOverGroupId, setDragOverGroupId] = useState<string | null>(null)
@@ -1999,7 +2001,9 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       .eq('project_id', projectId).is('deleted_at', null).order('sort_order')
   }, [projectId, supabase])
 
-  const reload = useCallback(() => {
+  // 明細を DB から読み直す。明細が取れたら true、取れなければ（エラー・例外）false で解決する（reject しない）。
+  // 既存の呼び出し元は戻り値を使わない。過去見積から追加は false を「画面更新の失敗」として扱う
+  const reload = useCallback((): Promise<boolean> => {
     if (!hasLoadedRef.current) setLoading(true)
     return Promise.all([
       supabase.from('estimate_groups').select('id,label,display_mode,sort_order')
@@ -2014,7 +2018,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
         console.error('[EstimateTab] items query failed:', iErr.message)
         hasLoadedRef.current = true
         setLoading(false)
-        return
+        return false
       }
       if (gErr) console.error('[EstimateTab] groups query failed:', gErr.message)
       // 案件標準（projects.markup_rate）の取得失敗を握りつぶさない。失敗時は直前の値を保持する
@@ -2030,6 +2034,13 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       setItemsLoaded(true)
       hasLoadedRef.current = true
       setLoading(false)
+      return true
+    }).catch((err: unknown) => {
+      // 通信例外など。データは消さず、読み込み中の表示だけ解除する（明細取得エラーと同じ扱い）
+      console.error('[EstimateTab] reload failed:', err)
+      hasLoadedRef.current = true
+      setLoading(false)
+      return false
     })
   }, [projectId, supabase]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -2926,6 +2937,28 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
             </svg>
             {showImportModal ? '取込パネルを閉じる' : '見積書を取り込む'}
           </button>
+          <button
+            onClick={() => setShowPastPicker(true)}
+            className="est-tb-btn"
+            style={{ ...st.tbBtn, display: 'inline-flex', alignItems: 'center', gap: 5 }}
+            disabled={moving}
+            title="自社の過去案件の明細を検索して、この見積に追加する"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            過去見積から追加
+          </button>
+          {showPastPicker && (
+            <PastEstimatePicker
+              key={projectId}
+              projectId={projectId}
+              groups={visibleGroups.map(g => ({ id: g.id, label: g.label }))}
+              defaultGroupId={activeGroupTab}
+              onReload={reload}
+              onClose={() => setShowPastPicker(false)}
+            />
+          )}
           <div style={{ width: 1, height: 18, background: C.divider }} />
           <a href={`/projects/${projectId}/estimate`} target="_blank" rel="noreferrer"
             className="est-tb-accent"

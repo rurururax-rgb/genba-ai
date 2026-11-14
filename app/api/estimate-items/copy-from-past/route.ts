@@ -14,7 +14,7 @@
  * - コピー元は自社・未削除の明細・未削除の案件・明細行（row_type が NULL / item）・コピー先以外の案件に限る。
  *   1 件でも該当しなければ 1 行も登録せず 404（他社・削除済み・存在しないは区別しない）
  * - プレビュー後にコピー元の明細やコピー先の掛け率が変わっていたら（fingerprint 不一致）、1 行も登録せず 409。
- *   最新の copy_preview を返すので、利用者が確認し直してから送り直す
+ *   最新の copy_preview といまのコピー元の値（item）を返すので、利用者が確認し直してから送り直す
  * - コピー先の案件・工種は lib/estimate/ownership.ts で確かめる
  * - 工種の末尾に、指定された順で追加する。既存行の並べ替え・工種の作成はしない
  * - 複数行は 1 回の INSERT で登録する（全件成功か全件失敗）
@@ -126,6 +126,12 @@ export async function POST(req: NextRequest) {
     return [{
       source_item_id: sourceItemId,
       copy_preview: { ...planPastItemPrice(s, markupRate), fingerprint: current },
+      // 確認画面で新しい金額と一緒に最新の原価・数量などを見せるための、いまのコピー元の値（備考・社内メモは含めない）
+      item: {
+        name: s.name, quantity: s.quantity, unit: s.unit, cost_price: s.cost_price,
+        selling_price: s.selling_price, selling_price_mode: s.selling_price_mode === 'manual' ? 'manual' : 'auto',
+        vendor_name: s.vendor_name ?? null, category: s.category ?? null,
+      },
     }]
   })
   if (changed.length > 0) {
