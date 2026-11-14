@@ -6,8 +6,9 @@ import {
   createRegisterAttempt, postInvoice,
   type ExistingDocument, type RegisterAttempt, type SimilarInvoiceSummary,
 } from '@/lib/cost-ledger/invoice-client'
-import { reviewInvoiceAmounts, toAmount, type TaxTreatment } from '@/lib/cost-ledger/ocr-amounts'
+import { registerAmountRisk, reviewInvoiceAmounts, toAmount, type AdjustmentKind, type AmountReview, type TaxTreatment } from '@/lib/cost-ledger/ocr-amounts'
 import type { ExtractedVendorInvoice } from '@/lib/cost-ledger/ocr-extraction'
+import { checkInvoiceImageFile, formatMegabytes, prepareInvoiceImage } from '@/lib/cost-ledger/invoice-image'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -51,6 +52,12 @@ const TREATMENT_LABEL: Record<TaxTreatment, string> = {
   unknown:     '不明',
 }
 
+const ADJUSTMENT_LABEL: Record<AdjustmentKind, string> = {
+  discount:    '値引き',
+  withholding: '源泉徴収',
+  other:       'その他の増減',
+}
+
 const ZOOMS = [1, 1.5, 2, 3] as const
 
 type Props = {
@@ -79,6 +86,8 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
   const [dragging, setDragging]     = useState(false)
   const [loading, setLoading]       = useState(false)
   const [error, setError]           = useState<string | null>(null)
+  // 送信前に画像を縮小したときの案内（元の大きさ → 送った大きさ）
+  const [uploadNote, setUploadNote] = useState<string | null>(null)
 
   const [extracted, setExtracted]   = useState<ExtractedVendorInvoice | null>(null)
   const [vendorName, setVendorName] = useState('')
@@ -96,6 +105,8 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
   // 原価台帳に登録する金額（税抜）と、その金額を担当者が原本で確認したか
   const [registerAmount, setRegisterAmount] = useState('')
   const [confirmed, setConfirmed]   = useState(false)
+  // 登録金額が原本の税抜（候補）と違う・税込合計と同じときの追加の確認
+  const [deviationConfirmed, setDeviationConfirmed] = useState(false)
 
   const [ledgerItems, setLedgerItems] = useState<CostLedgerItem[]>([])
   const [selectedItemId, setSelectedItemId] = useState<string>('')
@@ -144,29 +155,31 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
     setTreatment('unknown')
     setRegisterAmount('')
     setConfirmed(false)
+    setDeviationConfirmed(false)
     setSelectedItemId('')
     setSaved(null)
     setBlocker(null)
     setError(null)
+    setUploadNote(null)
   }, [attempt])
 
   // ファイルセット
   const handleFile = useCallback((f: File) => {
     // 登録の送信中は画像を変えない（どの画像の登録か分からなくなる）
     if (attempt.busy) return
-    const allowed = ['image/jpeg', 'image/png', 'image/webp']
-    if (!allowed.includes(f.type)) {
-      setError('JPEG / PNG / WebP の画像ファイルを選択してください')
-      return
-    }
-    if (f.size > 8 * 1024 * 1024) {
-      setError('8MB 以下のファイルを選択してください')
-      return
-    }
+    // 前の画像の選択・プレビュー・読み取り結果・登録候補は、新しいファイルが使えるかどうかに関係なく捨てる
+    // （使えないファイルを選んだあとに、前の請求書を読み取ったり登録したりできないようにする）
     clearDocument()
-    setFile(f)
+    setFile(null)
     setPreview(null)
     setZoom(1)
+    // HEIC・PDF など対応していない形式は理由と対処を案内する。大きい画像は読み取り時に縮小して送る
+    const check = checkInvoiceImageFile(f)
+    if (!check.ok) {
+      setError(check.message)
+      return
+    }
+    setFile(f)
     const gen = genRef.current
     const reader = new FileReader()
     reader.onload = e => { if (genRef.current === gen) setPreview(e.target?.result as string) }
@@ -190,14 +203,27 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
     extractAbortRef.current = ctrl
     setLoading(true)
     setError(null)
+    setUploadNote(null)
     try {
+      // 送信前に 3.5MB 以下へ縮小する（Vercel の 4.5MB 制限）。縮小できなければ送らずに案内する
+      const prepared = await prepareInvoiceImage(file)
+      if (genRef.current !== gen) return
+      if (!prepared.ok) throw new Error(prepared.message)
+      if (prepared.resized) {
+        setUploadNote(`送信用に画像を縮小しました（${formatMegabytes(prepared.originalBytes)} → ${formatMegabytes(prepared.file.size)}）。数字が読みにくければ撮り直してください`)
+      }
       const fd = new FormData()
-      fd.append('file', file)
+      fd.append('file', prepared.file)
       const res = await fetch('/api/ai/extract-vendor-invoice', { method: 'POST', body: fd, signal: ctrl.signal })
-      const data = await res.json()
+      // サーバーに届く前に断られた場合（Vercel の容量制限など）は JSON ではない
+      const data = await res.json().catch(() => null)
       // 読み取り中に画像が変わった。古い結果は使わない
       if (genRef.current !== gen) return
-      if (!res.ok) throw new Error(data.error ?? 'AI抽出に失敗しました')
+      if (!res.ok || !data) {
+        throw new Error(data?.error ?? (res.status === 413
+          ? '画像が大きすぎて送れませんでした。請求書の部分だけが写るように撮り直してください'
+          : '読み取りに失敗しました。時間をおいてもう一度お試しください'))
+      }
       const result = data as ExtractedVendorInvoice
       if (typeof result.document_sha256 !== 'string' || !result.amounts || !result.review) throw new Error('AI抽出に失敗しました')
       // 新しい画像の読み取り結果 = 新しい登録操作
@@ -213,6 +239,7 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
       // 登録金額の初期値は、原本の印字から決まる税抜の候補だけ（なければ空欄。担当者が入力する）
       setRegisterAmount(amountText(result.review.suggested_excl_tax))
       setConfirmed(false)
+      setDeviationConfirmed(false)
 
       // 業者名でledger itemを自動選択
       if (result.vendor_name) {
@@ -245,14 +272,19 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
     total_incl_tax:    toAmount(printedInc),
     tax_treatment:     treatment,
     tax_breakdown:     extracted?.amounts.tax_breakdown ?? [],
+    adjustments:       extracted?.amounts.adjustments ?? [],
+    printed_tax_rates: extracted?.amounts.printed_tax_rates ?? [],
   }), [printedEx, printedTax, printedInc, treatment, extracted])
 
   // 原本の金額・税区分や登録金額を変えたら、確認はやり直す（確認したときの内容と登録する内容を一致させる）。
   // 登録金額は書き換えない（原本の税抜を使うかは担当者が選ぶ）
-  const editedAmount = <T,>(set: (v: T) => void) => (v: T) => { edited(set)(v); setConfirmed(false) }
+  const editedAmount = <T,>(set: (v: T) => void) => (v: T) => { edited(set)(v); setConfirmed(false); setDeviationConfirmed(false) }
 
   const parsedRegister = parseAmount(registerAmount)
   const changeRegisterAmount = editedAmount(setRegisterAmount)
+  const risk = registerAmountRisk(parsedRegister, review, {
+    excl: toAmount(printedEx), incl: toAmount(printedInc), treatment,
+  })
 
   // 台帳に登録。confirmSimilar = 「以前の請求書と似ています」を確認したうえで登録する
   const register = async (confirmSimilar = false) => {
@@ -261,6 +293,7 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
     const parsedAmount = parseAmount(registerAmount)
     if (parsedAmount === null) { setError('登録金額（税抜）を正しく入力してください'); return }
     if (!confirmed) { setError('登録金額が税抜であることを原本で確認し、チェックを入れてください'); return }
+    if (risk && !deviationConfirmed) { setError(risk.confirmLabel + '場合は、チェックを入れてください'); return }
     const gen = genRef.current
     const itemId = selectedItemId
     setSaving(true)
@@ -271,7 +304,8 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
         amount:          parsedAmount,
         invoice_date:    invoiceDate || null,
         payment_date:    paymentDate || null,
-        note:            note || (vendorName ? `${vendorName}からの請求` : null),
+        // メモ欄が空なら null（担当者が入力した内容だけを保存する）
+        note:            note.trim() || null,
         vendor_name:     vendorName || null,
         invoice_number:  invoiceNumber || null,
         document_sha256: extracted.document_sha256,
@@ -317,7 +351,7 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
   }
 
   const selectedItem = ledgerItems.find(i => i.id === selectedItemId)
-  const canRegister = !!extracted && !!selectedItemId && parsedRegister !== null && confirmed && !saving
+  const canRegister = !!extracted && !!selectedItemId && parsedRegister !== null && confirmed && (!risk || deviationConfirmed) && !saving
   const reviewSuggestion = review.suggested_excl_tax
   const showUseSuggestion = reviewSuggestion != null && parsedRegister !== reviewSuggestion
 
@@ -379,8 +413,14 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
           <p style={{ fontSize: 14, fontWeight: 600, color: G.textSec, marginBottom: 4 }}>
             請求書画像をドラッグ＆ドロップ
           </p>
+          <p style={{ fontSize: 12, color: G.textTer, marginBottom: 2 }}>
+            またはクリックしてファイルを選択
+          </p>
+          <p style={{ fontSize: 12, color: G.textTer, marginBottom: 2 }}>
+            JPEG・PNG・WebPに対応（元画像40MBまで）
+          </p>
           <p style={{ fontSize: 12, color: G.textTer }}>
-            またはクリックしてファイルを選択（JPEG / PNG / WebP・最大8MB）
+            大きな画像は送信前に自動縮小します（縮小できない画像は読み取れないことがあります）。HEIC・PDFには対応していません。
           </p>
         </div>
       )}
@@ -436,6 +476,7 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
           {/* ── 右: 読み取り結果と登録 ── */}
           <section aria-label="読み取り結果と登録" style={{ minWidth: 0 }}>
             {error && <ErrorBox message={error} />}
+            {uploadNote && <div style={{ ...NOTICE_INFO, marginBottom: 12 }}>{uploadNote}</div>}
 
             {!extracted && (
               <div style={{ ...CARD, textAlign: 'center' }}>
@@ -495,7 +536,7 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
                 <div style={CARD}>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 12 }}>
                     <CardTitle noMargin>原本の金額</CardTitle>
-                    <StatusChip ok={review.status === 'ok'} />
+                    <StatusChip review={review} />
                   </div>
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(140px, 1fr))', gap: 12 }}>
                     <AmountField label="税抜金額" value={printedEx} onChange={editedAmount(setPrintedEx)} />
@@ -520,6 +561,16 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
                       {extracted.amounts.tax_breakdown.map((b, i) => (
                         <span key={i} style={{ marginLeft: 8 }}>
                           {b.rate != null ? `${b.rate}%` : '税率不明'} 対象 {b.taxable_amount != null ? `¥${fmt(b.taxable_amount)}` : '—'} ／ 税 {b.tax_amount != null ? `¥${fmt(b.tax_amount)}` : '—'}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  {(extracted.amounts.adjustments ?? []).length > 0 && (
+                    <div style={{ marginTop: 10, fontSize: 12, color: G.textSec }}>
+                      値引き・源泉徴収など（AIの読み取り・原本で確認）：
+                      {(extracted.amounts.adjustments ?? []).map((a, i) => (
+                        <span key={i} style={{ marginLeft: 8 }}>
+                          {ADJUSTMENT_LABEL[a.kind]} {a.amount != null ? `¥${fmt(a.amount)}` : '—'}
                         </span>
                       ))}
                     </div>
@@ -619,6 +670,23 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
                     </span>
                   </label>
 
+                  {risk && (
+                    <div role="alert" style={{ ...NOTICE_ALERT, marginTop: 10 }}>
+                      <div>⚠ {risk.message}</div>
+                      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginTop: 8, minHeight: 32, cursor: 'pointer', fontWeight: 600 }}>
+                        <input
+                          type="checkbox"
+                          aria-label="原本の税抜と異なる登録金額の確認"
+                          checked={deviationConfirmed}
+                          disabled={!!saved}
+                          onChange={e => setDeviationConfirmed(e.target.checked)}
+                          style={{ width: 18, height: 18, marginTop: 1, accentColor: '#92400E' }}
+                        />
+                        <span>{risk.confirmLabel}</span>
+                      </label>
+                    </div>
+                  )}
+
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 12, marginTop: 14 }}>
                     <Field label="支払日（支払済みの場合のみ）">
                       <Input type="date" inputSize="compact" value={paymentDate} onChange={e => edited(setPaymentDate)(e.target.value)} />
@@ -633,7 +701,8 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
                 {extracted.items.length > 0 && (
                   <details style={{ ...CARD, padding: '12px 16px' }}>
                     <summary style={{ fontSize: 12, color: G.textSec, cursor: 'pointer', fontWeight: 600 }}>
-                      読み取った明細（参考・{extracted.items.length} 件）
+                      読み取った明細（参考・{extracted.items.length} 件
+                      {extracted.items_total > extracted.items.length ? ` ／ 原本は ${extracted.items_total} 行。残りは原本で確認` : ''}）
                     </summary>
                     <div style={{ border: `1px solid ${G.borderLight}`, borderRadius: 8, overflow: 'hidden', marginTop: 8 }}>
                       {extracted.items.slice(0, 20).map((item, i) => (
@@ -709,7 +778,8 @@ export function VendorInvoiceImportTab({ projectId, onRegistered }: Props) {
                         <p style={{ fontSize: 11, color: G.textTer, marginTop: 6 }}>
                           {!selectedItemId ? '登録先の台帳項目を選んでください'
                             : parsedRegister === null ? '登録金額（税抜）を入力してください'
-                            : '登録金額を原本で確認し、チェックを入れてください'}
+                            : !confirmed ? '登録金額を原本で確認し、チェックを入れてください'
+                            : '原本の税抜と異なる金額の確認にチェックを入れてください'}
                         </p>
                       )}
                     </>
@@ -773,17 +843,25 @@ function CardTitle({ children, noMargin }: { children: React.ReactNode; noMargin
 }
 
 /** 原本の金額の照合結果（AI の判定ではなく、画面の値で照合した結果） */
-function StatusChip({ ok }: { ok: boolean }) {
+/**
+ * 原本の金額の照合結果。「金額の整合OK」は、要確認の点がなく、印字どうしの計算か印字された税率での検算が合ったときだけ。
+ * 税込 − 消費税 で税抜を出しただけで検算できなければ「税抜は計算値」（登録はできる。原本で確認する）
+ */
+function StatusChip({ review }: { review: AmountReview }) {
+  const verified = review.checks.arithmetic === 'consistent' || review.checks.tax_rate === 'consistent'
+  const kind = review.status !== 'ok' ? 'review' : verified ? 'ok' : 'derived'
+  const ok = kind === 'ok'
   return (
     <span style={{
       fontSize: 11, fontWeight: 700, borderRadius: 4, padding: '3px 8px',
       background: ok ? G.light : '#FFFBEB', color: ok ? G.dark : '#92400E',
       border: `1px solid ${ok ? G.border : '#FDE68A'}`,
     }}>
-      {ok ? '金額の整合OK' : '要確認'}
+      {kind === 'ok' ? '金額の整合OK' : kind === 'derived' ? '税抜は計算値' : '要確認'}
     </span>
   )
 }
+
 
 function AmountField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
   const n = toAmount(value)

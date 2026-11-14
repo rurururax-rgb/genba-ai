@@ -8,6 +8,7 @@ import { parseNumericInput, resolveNumericCommit } from '@/lib/input/numeric-inp
 import { jsonInit, writeRequest } from '@/lib/api/write-request'
 import { createRegisterAttempt, postInvoice, type RegisterAttempt } from '@/lib/cost-ledger/invoice-client'
 import { actualCostLockState, staleInvoiceCaches } from '@/lib/cost-ledger/invoice-lock-state'
+import { syncResultMessage, type SyncResult } from '@/lib/cost-ledger/sync-message'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -28,6 +29,8 @@ type CostItem = {
   /** 業者請求書の件数（一覧 API が DB から数えた値）。1件以上なら実績原価は請求書の合計で、直接編集できない。
    *  null / 未設定 = 不明（実績原価は編集させない） */
   invoice_count?: number | null
+  /** 見積から削除された見積行を指す項目（請求・実績・予算があるため見積同期で残した。KI-005） */
+  estimate_removed?: boolean
 }
 
 type Invoice = {
@@ -690,17 +693,12 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
     if (!confirm('見積エディタの最新内容を原価台帳に反映します。\n※ 実行予算・実績・注意点の入力済み値は変更されません。')) return
     setSyncing(true)
     try {
-      const result = await writeRequest<{ added: number; updated: number; removed: number }>(
+      const result = await writeRequest<SyncResult>(
         '/api/cost-ledger/sync', jsonInit('POST', { project_id: projectId }), '同期に失敗しました',
       )
       if (result.ok && result.data) {
         await load()
-        const { added, updated, removed } = result.data
-        const parts = []
-        if (added)   parts.push(`追加 ${added}件`)
-        if (updated) parts.push(`更新 ${updated}件`)
-        if (removed) parts.push(`削除 ${removed}件`)
-        alert(parts.length ? `同期完了：${parts.join('・')}` : '差分なし（変更はありませんでした）')
+        alert(syncResultMessage(result.data))
       } else {
         alert(result.ok ? '同期に失敗しました' : result.message)
         void load()  // 途中まで反映された可能性があるため DB の値で再同期する
@@ -817,7 +815,20 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
         actual_cost_total: prev.actual_cost_total - (old.actual_cost ?? 0),
       } : prev)
     }
-    const result = await writeRequest(`/api/cost-ledger/${id}`, jsonInit('DELETE'), '削除に失敗しました')
+    let result = await writeRequest(`/api/cost-ledger/${id}`, jsonInit('DELETE'), '削除に失敗しました')
+    // 実績原価・予算が入った行は、合計から外れることを確認してから削除する（請求書がある行は削除できない）
+    // 確認画面を出したときの状態（state_token）を送り、OK を押すまでに変わっていたら削除しない（409 changed）
+    const stateToken = !result.ok && result.code === 'needs_confirm'
+      ? (result.body as { state_token?: unknown } | undefined)?.state_token
+      : undefined
+    if (typeof stateToken === 'string' && confirm(`${result.ok ? '' : result.message}\n削除してよろしいですか？`)) {
+      result = await writeRequest(`/api/cost-ledger/${id}?confirm=${encodeURIComponent(stateToken)}`, jsonInit('DELETE'), '削除に失敗しました')
+    } else if (!result.ok && result.code === 'needs_confirm') {
+      setItems(prevItems)
+      setSummary(prevSummary)
+      setChecked(prevChecked)
+      return
+    }
     if (!result.ok) {
       // 削除できていない行を画面から消したままにしない
       setItems(prevItems)
@@ -843,12 +854,6 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
 
   function toggleOne(id: string) {
     setChecked(p => ({ ...p, [id]: !p[id] }))
-  }
-
-  // 見積から引用（将来 copy_items_from_project ロジックと接続）
-  function handleCopyToEstimate() {
-    const selected = items.filter(i => checked[i.id])
-    window.dispatchEvent(new CustomEvent('genba:copy-to-estimate', { detail: { items: selected } }))
   }
 
   // ── ロード中 / エラー ────────────────────────────────────
@@ -913,6 +918,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
           estGross={estGross} estRate={estRate}
           completionGross={completionGross} completionRate={completionRate}
           actualGross={actualGross} actualRate={actualRate}
+          actualItemCount={items.filter(i => i.actual_cost != null).length} itemCount={items.length}
           additionalAmounts={additionalAmounts}
           onEditAdditional={idx => setEditingAdditional({ idx, value: String(additionalAmounts[idx] ?? '') })}
         />
@@ -1009,16 +1015,7 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                   業者別
                 </button>
               </div>
-              {viewMode === 'item' && checkedIds.length > 0 && (
-                <button style={st.accentBtn} onClick={handleCopyToEstimate}>
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-                    strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <rect x="9" y="9" width="13" height="13" rx="2"/>
-                    <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
-                  </svg>
-                  見積から引用
-                </button>
-              )}
+              {/* 「見積から引用」は受け手のない未完成の機能だったため出さない（用途を決めてから実装する） */}
               {viewMode === 'item' && (
                 <button style={st.addBtn} onClick={addRow}>
                   <span style={{ fontSize: 15, lineHeight: 1 }}>＋</span>
@@ -1183,6 +1180,11 @@ export function CostLedgerTab({ projectId }: { projectId: string }) {
                                 background: item.source === 'from_estimate' ? C.accent : C.textMuted,
                               }} />
                               <span style={{ color: C.text, fontWeight: 500 }}>{item.name}</span>
+                              {item.estimate_removed && (
+                                <span style={st.removedBadge} title="見積からは削除されましたが、請求・実績・予算があるため原価台帳に残しています">
+                                  見積から削除済み
+                                </span>
+                              )}
                             </div>
                           )}
                         </td>
@@ -2114,12 +2116,15 @@ function SummaryCards({
   smry, estGross, estRate,
   completionGross, completionRate,
   actualGross, actualRate,
+  actualItemCount, itemCount,
   additionalAmounts, onEditAdditional,
 }: {
   smry: Summary
   estGross: number; estRate: number
   completionGross: number; completionRate: number
   actualGross: number; actualRate: number
+  /** 実績原価が入っている台帳項目の数（NULL は未集計。0 円は入力済みとして数える） */
+  actualItemCount: number; itemCount: number
   additionalAmounts: [number|null, number|null, number|null]
   onEditAdditional: (idx: number) => void
 }) {
@@ -2209,23 +2214,26 @@ function SummaryCards({
           rate={actualRate}
           gross={actualGross}
           revenue={smry.contract_amount}
-          costLabel="業者請求"
+          costLabel={actualItemCount < itemCount ? `業者請求（${itemCount} 項目中 ${actualItemCount} 項目）` : '業者請求'}
           costValue={smry.actual_cost_total}
           variant="light"
-          noDataMsg="業者請求額を入力すると表示"
+          noDataMsg="未集計（業者請求書を登録すると表示）"
           hasData={smry.has_actual_data}
+          provisionalNote={actualItemCount < itemCount ? '暫定・請求登録分のみ' : undefined}
         />
       </div>
     </div>
   )
 }
 
-function GrossCard({ label, rate, gross, revenue, costLabel, costValue, variant, noDataMsg, hasData }: {
+function GrossCard({ label, rate, gross, revenue, costLabel, costValue, variant, noDataMsg, hasData, provisionalNote }: {
   label: string; rate: number; gross: number; revenue: number
   costLabel: string; costValue: number
   variant: 'blue' | 'green' | 'light'
   noDataMsg: string | null
   hasData?: boolean
+  /** 確定していない数字のときの注記（例: 実績原価が一部の項目にしか無い）。率の横に出す */
+  provisionalNote?: string
 }) {
   const show = noDataMsg === null || hasData
   const bg =
@@ -2252,8 +2260,15 @@ function GrossCard({ label, rate, gross, revenue, costLabel, costValue, variant,
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <span style={{ fontSize: 10, fontWeight: 700, color: labelColor, letterSpacing: '0.06em' }}>{label}</span>
         {show ? (
-          <span style={{ fontSize: 20, fontWeight: 900, color: rateColor, letterSpacing: '-0.5px', fontVariantNumeric: 'tabular-nums' }}>
-            {(rate * 100).toFixed(1)}%
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            {provisionalNote && (
+              <span style={{ fontSize: 10, fontWeight: 700, color: '#92400E', background: '#FFFBEB', border: '1px solid #FCD34D', borderRadius: 4, padding: '1px 6px' }}>
+                {provisionalNote}
+              </span>
+            )}
+            <span style={{ fontSize: 20, fontWeight: 900, color: rateColor, letterSpacing: '-0.5px', fontVariantNumeric: 'tabular-nums' }}>
+              {(rate * 100).toFixed(1)}%
+            </span>
           </span>
         ) : (
           <span style={{ fontSize: 11, color: isDark ? 'rgba(255,255,255,0.6)' : C.textMuted }}>{noDataMsg}</span>
@@ -2349,14 +2364,6 @@ const st: Record<string, React.CSSProperties> = {
     border: `1px solid ${C.border}`, cursor: 'pointer', minHeight: 34,
     fontFamily: FONT,
   },
-  accentBtn: {
-    display: 'flex', alignItems: 'center', gap: 6,
-    padding: '6px 14px', borderRadius: 7,
-    background: C.accent, color: '#fff',
-    fontSize: 13, fontWeight: 600,
-    border: `1px solid ${C.accent}`, cursor: 'pointer', minHeight: 34,
-    fontFamily: FONT,
-  },
   syncBtn: {
     display: 'flex', alignItems: 'center', gap: 6,
     padding: '6px 14px', borderRadius: 7,
@@ -2389,6 +2396,10 @@ const st: Record<string, React.CSSProperties> = {
   },
   tdNum: { textAlign: 'right', fontVariantNumeric: 'tabular-nums' } as React.CSSProperties,
   nameCell: { display: 'flex', alignItems: 'center', gap: 7, cursor: 'text', minHeight: 26 },
+  removedBadge: {
+    fontSize: 10, fontWeight: 600, color: '#9A3412', background: '#FFF7ED', border: '1px solid #FED7AA',
+    borderRadius: 4, padding: '1px 6px', whiteSpace: 'nowrap',
+  },
   dot: { display: 'inline-block', width: 6, height: 6, borderRadius: '50%', flexShrink: 0 },
   editCell: { display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 4, cursor: 'text', minHeight: 26, borderRadius: 4 },
   pen: { fontSize: 10, color: C.border, flexShrink: 0 },
