@@ -6,7 +6,7 @@ import {
   needsReview, reviewEstimateItem, toOcrNumber,
   type EstimateOcrFile, type EstimateOcrItem, type OcrMessage,
 } from '@/lib/estimate/ocr-extraction'
-import { checkEstimateImageFile, formatMegabytes, prepareEstimateImage } from '@/lib/estimate/ocr-image'
+import { checkEstimateImageFile, formatMegabytes, prepareEstimateImage, type PreparedImage } from '@/lib/estimate/ocr-image'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -46,6 +46,10 @@ const fileKey = (f: File) => `${f.name}:${f.size}:${f.lastModified}`
 
 /** 同時に送る画像の数（AI のレート制限と端末の通信量を抑える） */
 const CONCURRENCY = 2
+
+/** 中断を表すエラー（fetch の中断と同じ名前にして、同じ扱いにする） */
+const abortError = () => new DOMException('読み取りを中止しました', 'AbortError')
+const isAbort = (e: unknown) => (e as { name?: string } | null)?.name === 'AbortError'
 
 /** 行の照合をやり直す（人が数量・単価を直したときも同じ規則で検査する） */
 function withReview(r: Omit<CandidateRow, 'messages'>): CandidateRow {
@@ -143,7 +147,30 @@ export function EstimateImportTab({ projectId }: Props) {
   // ドラッグ成功の通知（一度だけ登録するリスナー）から最新の行・画像を参照するため
   const rowsRef = useRef<CandidateRow[]>([])
   const filesRef = useRef<File[]>([])
-  useEffect(() => { rowsRef.current = rows; filesRef.current = files }, [rows, files])
+  /** 画面を閉じたときに解放するプレビューの Object URL */
+  const previewsRef = useRef<string[]>([])
+  useEffect(() => { rowsRef.current = rows; filesRef.current = files; previewsRef.current = previews }, [rows, files, previews])
+  /**
+   * 画像の縮小の待ち行列（画面全体で 1 本）。キャンセル直後に読み取り直しても、
+   * 前回の途中の縮小が終わるまで次の縮小を始めない（縮小は始まると途中で止められないため）
+   */
+  const prepareTailRef = useRef<Promise<unknown>>(Promise.resolve())
+  /** 追加後に候補を消すアニメーションのタイマー（画像変更・画面終了で止める） */
+  const fadeTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set())
+
+  // 画面を閉じたら: 読み取りの通信を中断し、待機中の画像処理を始めさせず、Object URL とタイマーを解放する。
+  // 見積への追加（登録）の通信は中断しない（登録されたかどうかが分からなくなるため）
+  useEffect(() => {
+    const timers = fadeTimersRef.current
+    return () => {
+      abortRef.current?.abort()
+      runRef.current += 1
+      timers.forEach(t => clearTimeout(t))
+      timers.clear()
+      previewsRef.current.forEach(u => URL.revokeObjectURL(u))
+      previewsRef.current = []
+    }
+  }, [])
 
   function markAdding(ids: string[], on: boolean) {
     ids.forEach(id => (on ? inFlightRef.current.add(id) : inFlightRef.current.delete(id)))
@@ -179,13 +206,21 @@ export function EstimateImportTab({ projectId }: Props) {
     setAckedFiles(prev => new Set([...prev, ...targets.map(r => r.fileKey)]))
   }
 
-  function fadeRemove(id: string) {
+  /**
+   * 追加できた候補を消す。run は追加を始めたときの読み取り世代。
+   * 画像変更・再読み取り・画面終了の後に届いた追加完了では、画面（件数・結果表示）を更新しない
+   */
+  function fadeRemove(id: string, run: number) {
+    if (runRef.current !== run || !rowsRef.current.some(r => r.id === id)) return
     setRemovingIds(prev => new Set([...prev, id]))
-    setTimeout(() => {
+    const t = setTimeout(() => {
+      fadeTimersRef.current.delete(t)
+      if (runRef.current !== run) return
       setRows(prev => prev.filter(r => r.id !== id))
       setRemovingIds(prev => { const n = new Set(prev); n.delete(id); return n })
       setAddedCount(c => c + 1)
     }, 280)
+    fadeTimersRef.current.add(t)
   }
 
   // 見積エディタへのドラッグ: 送信開始・成功・失敗の通知を受ける
@@ -198,7 +233,7 @@ export function EstimateImportTab({ projectId }: Props) {
       const { importId } = (e as CustomEvent<{ importId: string }>).detail
       rememberImported([importId])
       markAdding([importId], false)
-      fadeRemove(importId)
+      fadeRemove(importId, runRef.current)
     }
     const failed = (e: Event) => {
       const { importId, error: msg } = (e as CustomEvent<{ importId: string; error?: string }>).detail
@@ -217,7 +252,9 @@ export function EstimateImportTab({ projectId }: Props) {
 
   function clearResults() {
     runRef.current += 1
-    setRows([]); setError(null); setAddedCount(0); setConfirmAll(false); setAckedFiles(new Set())
+    fadeTimersRef.current.forEach(t => clearTimeout(t))
+    fadeTimersRef.current.clear()
+    setRows([]); setRemovingIds(new Set()); setError(null); setAddedCount(0); setConfirmAll(false); setAckedFiles(new Set())
   }
 
   function addFiles(newFiles: FileList | File[]) {
@@ -267,13 +304,20 @@ export function EstimateImportTab({ projectId }: Props) {
     setFiles([]); setPreviews([]); setFileStates([]); setNotices([]); setLoading(false)
   }
 
-  /** 画像 1 枚を縮小して送り、結果を返す */
-  async function extractFile(file: File, i: number, run: number, signal: AbortSignal): Promise<CandidateRow[]> {
+  /** 画像 1 枚を縮小して送り、結果を返す。prepare は 1 枚ずつ実行する縮小処理（extract が渡す） */
+  async function extractFile(
+    file: File, i: number, run: number, signal: AbortSignal, prepare: (f: File) => Promise<PreparedImage>,
+  ): Promise<CandidateRow[]> {
     const setState = (st: FileState) => {
       if (runRef.current === run) setFileStates(prev => prev.map((x, idx) => (idx === i ? st : x)))
     }
     setState({ state: 'running' })
-    const prepared = await prepareEstimateImage(file)
+    const prepared = await prepare(file).catch((e: unknown): PreparedImage => {
+      if (isAbort(e)) throw e
+      return { ok: false, message: `「${file.name}」を読み込めませんでした。別の画像を選ぶか、撮り直してください` }
+    })
+    // 縮小中にキャンセル・画像変更・画面終了があれば送らない
+    if (signal.aborted) throw abortError()
     if (!prepared.ok) { setState({ state: 'failed', error: prepared.message }); return [] }
     const note = prepared.resized ? `送信用に縮小しました（${formatMegabytes(prepared.originalBytes)} → ${formatMegabytes(prepared.file.size)}）` : undefined
     if (note) setState({ state: 'running', note })
@@ -323,12 +367,28 @@ export function EstimateImportTab({ projectId }: Props) {
     setLoading(true); setError(null); setRows([]); setAddedCount(0); setConfirmAll(false); setAckedFiles(new Set())
     setFileStates(files.map(() => ({ state: 'selected' })))
     const results: CandidateRow[][] = files.map(() => [])
+    // 画像のデコード・縮小は 1 枚ずつ（大きな写真を 2 枚同時に展開すると、スマホのメモリを使い切るおそれがある）。
+    // API への送信は最大 CONCURRENCY 件。中断後は、待っている画像の縮小を始めない
+    const prepareOneAtATime = (f: File): Promise<PreparedImage> => {
+      const p = prepareTailRef.current.then(() => {
+        if (ac.signal.aborted) throw abortError()
+        return prepareEstimateImage(f)
+      })
+      prepareTailRef.current = p.catch(() => {})
+      return p
+    }
     try {
       let next = 0
       const worker = async () => {
-        while (next < files.length) {
+        while (next < files.length && !ac.signal.aborted) {
           const i = next++
-          results[i] = await extractFile(files[i], i, run, ac.signal)
+          try {
+            results[i] = await extractFile(files[i], i, run, ac.signal, prepareOneAtATime)
+          } catch (e) {
+            if (isAbort(e)) throw e
+            // 想定外の失敗はその画像だけにとどめ、ほかの画像の処理を続ける
+            if (runRef.current === run) setFileStates(prev => prev.map((x, idx) => (idx === i ? { state: 'failed', error: '読み取りに失敗しました。時間をおいてもう一度お試しください' } : x)))
+          }
         }
       }
       await Promise.all(Array.from({ length: Math.min(CONCURRENCY, files.length) }, worker))
@@ -337,7 +397,7 @@ export function EstimateImportTab({ projectId }: Props) {
       setRows(all)
       if (!all.length) setError('明細を読み取れませんでした。各画像の案内を確認してください')
     } catch (e) {
-      if ((e as Error).name !== 'AbortError' && runRef.current === run) setError('読み取りに失敗しました')
+      if (!isAbort(e) && runRef.current === run) setError('読み取りに失敗しました')
     } finally {
       if (runRef.current === run) { setLoading(false); abortRef.current = null }
     }
@@ -388,9 +448,10 @@ export function EstimateImportTab({ projectId }: Props) {
     if (inFlightRef.current.has(row.id) || !row.name.trim()) return
     if (pendingOf(row) && !confirmed) return
     if (confirmed) acknowledge([row])
+    const run = runRef.current
     markAdding([row.id], true)
     try {
-      if (await postImport([row])) { rememberImported([row.id]); fadeRemove(row.id) }
+      if (await postImport([row])) { rememberImported([row.id]); fadeRemove(row.id, run) }
     } finally {
       markAdding([row.id], false)
     }
@@ -405,9 +466,10 @@ export function EstimateImportTab({ projectId }: Props) {
     setConfirmAll(false)
     acknowledge(targets)
     const ids = targets.map(r => r.id)
+    const run = runRef.current
     markAdding(ids, true)
     try {
-      if (await postImport(targets)) { rememberImported(ids); ids.forEach(id => fadeRemove(id)) }
+      if (await postImport(targets)) { rememberImported(ids); ids.forEach(id => fadeRemove(id, run)) }
     } finally {
       markAdding(ids, false)
     }
