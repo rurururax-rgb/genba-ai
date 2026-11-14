@@ -17,26 +17,31 @@ type Props = {
 export function DetachableEstimateImportPanel({ projectId, onClose }: Props) {
   const inlineRef = useRef<HTMLDivElement>(null)
   const popupRef = useRef<Window | null>(null)
-  const [host, setHost] = useState<HTMLDivElement | null>(null)
-  const [detached, setDetached] = useState(false)
-  const [notice, setNotice] = useState<string | null>(null)
-
-  useEffect(() => {
+  // 1 画面と別ウィンドウを行き来する同じ入れ物（作り直さないので、読み取り・確認・送信中の状態を失わない）
+  const [host] = useState<HTMLDivElement | null>(() => {
+    if (typeof document === 'undefined') return null
     const node = document.createElement('div')
     node.dataset.testid = 'estimate-import-portal-host'
     node.style.display = 'flex'
     node.style.flexDirection = 'column'
     node.style.height = '100%'
     node.style.minWidth = '0'
+    return node
+  })
+  const [detached, setDetached] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
+
+  useEffect(() => {
+    const node = host
+    if (!node) return
     inlineRef.current?.appendChild(node)
-    setHost(node)
     return () => {
       const popup = popupRef.current
       popupRef.current = null
       if (popup && !popup.closed) popup.close()
       node.remove()
     }
-  }, [])
+  }, [host])
 
   function restore() {
     const popup = popupRef.current

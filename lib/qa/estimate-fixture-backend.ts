@@ -219,10 +219,12 @@ async function handle(url: URL, method: string, init: RequestInit | undefined, a
   // OCR / AI 読み取りの代替（Claude Vision は呼ばない）。元見積書の備考欄に社内情報が入っているケースを再現
   if (p === '/api/ai/extract-estimate' && method === 'POST') {
     const items = [
-      { name: 'QA-OCR 給湯器 GT-2460', quantity: 1, unit: '台', cost_price: 180000, vendor_name: 'QA設備商事', note: '見積No. 12345' },
-      { name: 'QA-OCR 配管工事',       quantity: 1, unit: '式', cost_price: 40000,  vendor_name: 'QA設備商事', note: '担当 佐藤 / 社内確認済' },
+      { name: 'QA-OCR 給湯器 GT-2460', quantity: 1, unit: '台', cost_price: 180000, amount: 180000, vendor_name: 'QA設備商事', note: '見積No. 12345' },
+      { name: 'QA-OCR 配管工事',       quantity: 1, unit: '式', cost_price: 40000,  amount: 40000,  vendor_name: 'QA設備商事', note: '担当 佐藤 / 社内確認済' },
+      // 要確認の行（数量 × 単価 が金額と合わない＝金額欄を単価として読んだ可能性）。確認するまでドラッグ・追加できないことの QA 用
+      { name: 'QA-OCR 保温材',         quantity: 3, unit: 'm',  cost_price: 9000,   amount: 9000,   vendor_name: 'QA設備商事', note: null },
     ]
-    return json({ files: [{ fileName: 'qa.png', supplier: 'QA設備商事', document_type: '御見積書', items, subtotal: 220000, raw_warning: null }], items })
+    return json({ files: [{ fileName: 'qa.png', supplier: 'QA設備商事', document_type: '御見積書', items, subtotal: 229000, adjustments: [], excluded: [], items_total: 3, prices_include_tax: false, messages: [] }], items, failures: [] })
   }
   // 実 API と同じ規則：取込の備考は internal_memo（社内メモ）のみ。memo（お客様向け備考）には入れない
   if (p === '/api/estimate-items/import' && method === 'POST') {

@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { EstimateImportTab } from '@/components/projects/EstimateImportTab'
+import { IMPORT_DRAG_TYPE, resolveImportDrop } from '@/lib/estimate/import-drag'
 
 // 画像の縮小処理は本物を使い、同時に何件走ったかを数える（gate を置くと、その間は縮小が終わらない）
 const prep = vi.hoisted(() => ({ active: 0, max: 0, started: [] as string[], gate: null as null | Promise<void>, failOn: '' }))
@@ -195,13 +196,8 @@ describe('二重登録の防止', () => {
 
   it('見積エディタへのドラッグで送信中の行は、追加ボタンから送れない', async () => {
     await readImages([img('p1.jpg')])
-    const dragPayload = { _importId: '' }
-    const handle = cards()[0].querySelector('[draggable]') as HTMLElement
-    // ドラッグ開始時の payload から取り込み候補の id を得る
-    const dt = { setData: (_t: string, v: string) => Object.assign(dragPayload, JSON.parse(v)), effectAllowed: '' }
-    const ev = new Event('dragstart', { bubbles: true }) as Event & { dataTransfer: unknown }
-    ev.dataTransfer = dt
-    act(() => { handle.dispatchEvent(ev) })
+    // ドラッグ開始時のトークンから取り込み候補の id を得る
+    const dragPayload = { _importId: startDrag(cards()[0]).item!._importId }
     act(() => { window.dispatchEvent(new CustomEvent('genba:import-item-adding', { detail: { importId: dragPayload._importId } })) })
     click([...cards()[0].querySelectorAll('button')].find(b => b.title === '見積に追加'))
     await flush()
@@ -229,15 +225,22 @@ describe('二重登録の防止', () => {
 // ── 警告を読み飛ばして金額を登録しない（PR #52 追加監査） ──────────────────
 const SEPARATE = { level: 'warn', text: '「電気配線工事」は原本で「別途」となっており、明細に入れていません。' }
 const NO_CHECK = { level: 'warn', text: 'この見積書には金額・定価の列がないため、単価の読み違いを照合で見つけられません。' }
-const addBtnOf = (card: HTMLElement) => [...card.querySelectorAll('button')].find(b => b.title === '見積に追加')!
+// 1 画面の「見積に追加」・別ウィンドウの「見積に追加（未分類）」のどちらも
+const addBtnOf = (card: HTMLElement) => [...card.querySelectorAll('button')].find(b => b.title.startsWith('見積に追加'))!
 const btnIn = (el: HTMLElement, text: string) => [...el.querySelectorAll('button')].find(b => b.textContent?.includes(text))
-function startDrag(card: HTMLElement) {
-  const payload: Record<string, unknown> = {}
-  const dt = { setData: (_t: string, v: string) => Object.assign(payload, JSON.parse(v)), effectAllowed: '' }
+/**
+ * ドラッグを始め、ドラッグのデータ（一時トークン）を受け取る。resolve: true なら見積エディタのドロップと同じ手順で
+ * トークンを確かめて登録する値を得る（トークンは使い切る）
+ */
+function startDrag(card: HTMLElement, { resolve = true } = {}) {
+  const data: Record<string, string> = {}
+  const dt = { setData: (t: string, v: string) => { data[t] = v }, effectAllowed: '' }
   const ev = new Event('dragstart', { bubbles: true, cancelable: true }) as Event & { dataTransfer: unknown }
   ev.dataTransfer = dt
   act(() => { (card.querySelector('[draggable]') as HTMLElement).dispatchEvent(ev) })
-  return { payload, cancelled: ev.defaultPrevented }
+  const token = data[IMPORT_DRAG_TYPE] as string | undefined
+  const r = token && resolve ? resolveImportDrop({ getData: t => data[t] ?? '' }, 'p1') : null
+  return { token, data, cancelled: ev.defaultPrevented, item: r?.ok ? r.item : undefined, result: r }
 }
 
 describe('画像全体の警告（別途・値引き・照合不能）は一括追加の確認に入る', () => {
@@ -294,13 +297,16 @@ describe('要確認の行は、個別追加・ドラッグでも確認なしに�
     await readImages([img('p1.jpg')])
     const first = startDrag(cards()[1])
     expect(first.cancelled).toBe(true)
-    expect(first.payload._importId).toBeUndefined()
+    expect(first.token).toBeUndefined()
     const box = cards()[1].querySelector('[data-testid=row-confirm]') as HTMLElement
     click(btnIn(box, '確認済みにする'))
     expect(imports).toHaveLength(0)
     const second = startDrag(cards()[1])
     expect(second.cancelled).toBe(false)
-    expect(second.payload).toMatchObject({ name: '配管部材', cost_price: 15000 })
+    // ドラッグのデータはトークンだけ（品名・金額を出さない）。登録する値はトークンから得る
+    expect(Object.keys(second.data)).toEqual([IMPORT_DRAG_TYPE])
+    expect(second.token).not.toContain('配管部材')
+    expect(second.item).toMatchObject({ name: '配管部材', cost_price: 15000 })
   })
 
   it('個別の「追加」: 画像全体に警告がある画像の行は、照合済みの行でも初回は確認する。確認後は同じ画像の行は 1 回で追加できる', async () => {
@@ -575,10 +581,7 @@ describe('画像変更・画面終了の後に古い結果が戻らない', () =
   it('画像変更の後に届いたドラッグの追加完了通知でも、件数・結果画面が戻らない', async () => {
     extractReply = OK
     await readImages([img('p1.jpg')])
-    const id: { _importId?: string } = {}
-    const ev = new Event('dragstart', { bubbles: true, cancelable: true }) as Event & { dataTransfer: unknown }
-    ev.dataTransfer = { setData: (_t: string, v: string) => Object.assign(id, JSON.parse(v)), effectAllowed: '' }
-    act(() => { (cards()[0].querySelector('[draggable]') as HTMLElement).dispatchEvent(ev) })
+    const id = { _importId: startDrag(cards()[0]).item?._importId }
     click(button('画像を変更'))
     act(() => { window.dispatchEvent(new CustomEvent('genba:import-item-moved', { detail: { importId: id._importId } })) })
     await settle()
@@ -656,5 +659,90 @@ describe('エラー・再試行で候補が重複しない', () => {
     release(); await settle()
     expect(cards()).toHaveLength(3)
     expect(prep.max).toBe(1)
+  })
+})
+
+// ── 別ウィンドウ（右画面）から見積エディタへのドラッグ ──────────────────────────
+describe('右画面の表から見積エディタへドラッグ', () => {
+  const OK = (name: string) => json({ files: [fileResult(name, [GOOD, BAD])], items: [GOOD, BAD], failures: [] })
+  const wideRender = () => act(() => root.render(<EstimateImportTab projectId="p1" wide />))
+
+  it('右画面は上に原本・下に横長の表（品名・数量・単位・原価単価・金額・確認状態）', async () => {
+    extractReply = OK
+    await readImages([img('a.jpg')])
+    wideRender()
+    const layout = container.querySelector('[data-testid=estimate-wide-review-layout]') as HTMLElement
+    const header = container.querySelector('[data-testid=ocr-wide-header]') as HTMLElement
+    expect(header.textContent).toMatch(/品名.*数量.*単位.*原価単価.*原本の金額.*確認状態/)
+    // 原本が表より前（上）にある
+    const viewer = layout.querySelector('[data-testid=estimate-source-viewer]')!
+    expect(viewer.compareDocumentPosition(header) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const statuses = cards().map(c => c.querySelector('[data-testid=ocr-review-status]')?.textContent)
+    expect(statuses).toEqual(['照合OK', '要確認'])
+    // 1 画面に戻すと表の見出しは出ない（コンパクト表示）
+    act(() => root.render(<EstimateImportTab projectId="p1" />))
+    expect(container.querySelector('[data-testid=ocr-wide-header]')).toBeNull()
+  })
+
+  it('右画面でもドラッグできる（データはトークンだけ）。要確認の行は確認するまでドラッグを始めない', async () => {
+    extractReply = OK
+    await readImages([img('a.jpg')])
+    wideRender()
+    const [good, bad] = cards()
+    expect((good.querySelector('[data-testid=ocr-drag-handle]') as HTMLElement).getAttribute('draggable')).toBe('true')
+    const d1 = startDrag(good)
+    expect(d1.cancelled).toBe(false)
+    expect(Object.keys(d1.data)).toEqual([IMPORT_DRAG_TYPE])
+    expect(d1.item).toMatchObject({ name: '洗面化粧台 LX-750', quantity: 1, cost_price: 60000 })
+    const d2 = startDrag(bad)
+    expect(d2.cancelled).toBe(true)
+    expect(d2.token).toBeUndefined()
+    expect(cards()[1].querySelector('[data-testid=row-confirm]')).not.toBeNull()
+    expect(imports).toHaveLength(0)
+  })
+
+  it('ドラッグ中に同じ明細を「追加」ボタンで送っていたら、ドロップは受け付けない（二重登録しない）', async () => {
+    extractReply = OK
+    let release!: () => void
+    importReply = () => new Promise(r => { release = () => r(json({ created: 1 })) })
+    await readImages([img('a.jpg')])
+    wideRender()
+    const d = startDrag(cards()[0], { resolve: false })
+    click(addBtnOf(cards()[0])); await flush()
+    const r = resolveImportDrop({ getData: t => d.data[t] ?? '' }, 'p1')
+    expect(r).toMatchObject({ ok: false, reason: 'この明細は追加中です' })
+    release(); await flush()
+    expect(imports).toHaveLength(1)
+  })
+
+  it('ドラッグ中に画像を変更したら、その明細のドロップは受け付けない', async () => {
+    extractReply = OK
+    await readImages([img('a.jpg')])
+    const d = startDrag(cards()[0], { resolve: false })
+    click(button('画像を変更'))
+    const r = resolveImportDrop({ getData: t => d.data[t] ?? '' }, 'p1')
+    expect(r.ok).toBe(false)
+  })
+
+  it('ドラッグを終えた（キャンセルした）トークンでは登録できない', async () => {
+    extractReply = OK
+    await readImages([img('a.jpg')])
+    const d = startDrag(cards()[0], { resolve: false })
+    act(() => { (cards()[0].querySelector('[draggable]') as HTMLElement).dispatchEvent(new Event('dragend', { bubbles: true })) })
+    expect(resolveImportDrop({ getData: t => d.data[t] ?? '' }, 'p1').ok).toBe(false)
+  })
+
+  it('見積エディタが受け付けなかった理由は、取り込みパネルのその明細に出し、明細は残す', async () => {
+    extractReply = OK
+    await readImages([img('a.jpg')])
+    wideRender()
+    const d = startDrag(cards()[0], { resolve: false })
+    // 別の案件の見積エディタへのドロップ（EstimateTab の handleImportDrop と同じ通知）
+    const r = resolveImportDrop({ getData: t => d.data[t] ?? '' }, 'other-project')
+    expect(r.ok).toBe(false)
+    if (!r.ok) act(() => { window.dispatchEvent(new CustomEvent('genba:import-item-failed', { detail: { importId: r.importId, error: r.reason } })) })
+    expect(container.textContent).toContain('別の案件の取り込み明細です')
+    expect(cards()).toHaveLength(2)
+    expect(imports).toHaveLength(0)
   })
 })

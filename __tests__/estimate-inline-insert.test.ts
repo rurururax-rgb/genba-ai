@@ -120,7 +120,9 @@ describe('見積エディタ：並び替え（@hello-pangea/dnd）は残す', ()
     for (const s of [
       'async function persistReorder(', "'/api/estimate-items/reorder'", 'stableRenderClone',
       'draggingIdRef', 'selectedIdsRef', 'dndMouseYRef', 'function handleDragEnd(',
-      'droppableId="group-list" type="GROUP"', 'data-row-id={item.id}', 'application/genba-import-item',
+      'droppableId="group-list" type="GROUP"', 'data-row-id={item.id}',
+      // 取り込みパネルからのドロップ（ドラッグの種類は lib/estimate/import-drag.ts に移した）
+      'isImportDrag(e.dataTransfer)', 'handleImportDrop(e.dataTransfer',
     ]) {
       expect(src, s).toContain(s)
     }

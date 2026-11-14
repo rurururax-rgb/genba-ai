@@ -26,6 +26,7 @@ import { ItemPricingPopover, MarginCell, fmtMarginPct, fmtMarkup } from './ItemP
 import { ProjectMarkupDialog } from './ProjectMarkupDialog'
 import { ItemMemoPopover, LockIcon } from './ItemMemoPopover'
 import { DetachableEstimateImportPanel } from './DetachableEstimateImportPanel'
+import { isImportDrag, onImportDragEnd, resolveImportDrop, type ImportDragItem } from '@/lib/estimate/import-drag'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -1852,6 +1853,24 @@ function RevDiffModal({ rev, currentItems, fmt, onClose, fontFamily }: {
 
 // ── EstimateTab ───────────────────────────────────────────
 
+
+/**
+ * 取り込み明細のドラッグ中に、挿入される位置を緑の線で示す。
+ * 高さを持たせない（線を出しても明細の位置がずれず、ドロップ位置が揺れない）
+ */
+function ImportDropLine({ edge }: { edge: 'top' | 'bottom' }) {
+  return (
+    <div data-testid="import-drop-line" data-edge={edge} aria-hidden="true"
+      style={{ position: 'relative', height: 0, zIndex: 6, pointerEvents: 'none' }}>
+      <div style={{ position: 'absolute', left: 6, right: 6, top: -2, height: 4, borderRadius: 2, background: '#16a34a', boxShadow: '0 0 0 2px rgba(22, 163, 74, 0.18)' }} />
+      <div style={{ position: 'absolute', left: 0, top: -6, width: 12, height: 12, borderRadius: '50%', background: '#16a34a', border: '2px solid #fff' }} />
+      <span style={{ position: 'absolute', left: 18, top: edge === 'top' ? -20 : 4, padding: '1px 8px', borderRadius: 10, background: '#16a34a', color: '#fff', fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap' }}>
+        ここに追加
+      </span>
+    </div>
+  )
+}
+
 export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   projectId: string
   /** ラグズ建築専用の legacy 帳票（請求書）への導線を出すか。既定は false */
@@ -1914,6 +1933,9 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   const [activeGroupTab, setActiveGroupTab] = useState<string | null>(null)
   const [dragOverGroupId, setDragOverGroupId] = useState<string | null>(null)
   const [importDragTarget, setImportDragTarget] = useState<{ afterItemId: string | null; groupId: string } | null>(null)
+  /** 取り込み明細のドロップを受け付けなかった理由（取り込みパネル側に出せないときだけ、見積エディタに出す） */
+  const [importDropNotice, setImportDropNotice] = useState<string | null>(null)
+  const importDropNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [dragHoverTabId, setDragHoverTabId] = useState<string | 'all' | null>(null)
   const dragTabTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showSummaryDetail, setShowSummaryDetail] = useState(false)
@@ -2162,24 +2184,35 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       })
     }
 
+    let lastOverAt = 0
     function onDragOver(e: DragEvent) {
-      if (!e.dataTransfer?.types.includes('application/genba-import-item')) return
+      if (!isImportDrag(e.dataTransfer)) return
       latestY = e.clientY
+      lastOverAt = performance.now()
       if (!isDraggingImport) { isDraggingImport = true; scheduleScroll() }
     }
     function onDragEnd() {
       isDraggingImport = false
       if (rafId) { cancelAnimationFrame(rafId); rafId = null }
     }
+    // 別ウィンドウで始めたドラッグは、このウィンドウに dragend が届かない。
+    // ドラッグ終了の通知・このウィンドウの外へ出たとき・dragover が途切れたときにも止める
+    function onDragLeaveWindow(e: DragEvent) { if (e.relatedTarget == null) onDragEnd() }
+    const offImportEnd = onImportDragEnd(onDragEnd)
+    const idleTimer = setInterval(() => { if (isDraggingImport && performance.now() - lastOverAt > 400) onDragEnd() }, 200)
 
     window.addEventListener('dragover', onDragOver)
     window.addEventListener('dragend',  onDragEnd)
     window.addEventListener('drop',     onDragEnd)
+    window.addEventListener('dragleave', onDragLeaveWindow)
     importDragScrollRafRef.current = null
     return () => {
       window.removeEventListener('dragover', onDragOver)
       window.removeEventListener('dragend',  onDragEnd)
       window.removeEventListener('drop',     onDragEnd)
+      window.removeEventListener('dragleave', onDragLeaveWindow)
+      offImportEnd()
+      clearInterval(idleTimer)
       if (rafId) cancelAnimationFrame(rafId)
     }
   }, [])
@@ -2457,27 +2490,46 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
 
   const importDropsInFlight = useRef<Set<string>>(new Set())
 
+  // ドラッグが見積エディタの外で終わったら、挿入位置の表示を消す（別ウィンドウで始めたドラッグも）
+  useEffect(() => onImportDragEnd(() => { setImportDragTarget(null); setDragOverGroupId(null); setDragHoverTabId(null) }), [])
+
+  function showImportDropNotice(msg: string) {
+    setImportDropNotice(msg)
+    if (importDropNoticeTimer.current) clearTimeout(importDropNoticeTimer.current)
+    importDropNoticeTimer.current = setTimeout(() => setImportDropNotice(null), 6000)
+  }
+
+  /**
+   * 取り込み明細のドロップ。ドラッグのデータ（一時トークン）を確かめてから、既存の登録処理に渡す。
+   * 受け付けないときは理由を取り込みパネル（その明細）に出す。明細が分からなければ見積エディタに出す
+   */
+  async function handleImportDrop(dt: DataTransfer, groupId: string, afterItemId?: string | null) {
+    const r = resolveImportDrop(dt, projectId)
+    if (!r.ok) {
+      if (r.importId) window.dispatchEvent(new CustomEvent('genba:import-item-failed', { detail: { importId: r.importId, error: r.reason } }))
+      else showImportDropNotice(r.reason)
+      return
+    }
+    await handleDropImportItem(r.item, groupId, afterItemId)
+  }
+
   async function handleDropImportItem(
-    row: { name: string; quantity: number; unit: string; cost_price: number | null; vendor_name: string; memo: string; _importId?: string },
+    row: ImportDragItem,
     groupId: string,
     afterItemId?: string | null
   ) {
-    // afterItemId が渡された場合はそこに挿入する sort_order を計算する
+    // afterItemId が渡された場合は、その位置に入る sort_order を決める（「この位置に行を追加」と同じ planInsert）。
+    // 隣り合う行の sort_order に空きがない（1, 2, 3 …）ときは、先に工種内を振り直して空ける
+    // （以前は中間値を丸めて隣の行と同じ値になり、指定した位置の 1 行後ろに入ることがあった）
     let insertSortOrder: number | undefined
+    let renumber: { id: string; sort_order: number }[] = []
     if (afterItemId !== undefined) {
       const gItems = itemsForGroup(groupId)
-      if (afterItemId === null) {
-        // グループの先頭に挿入
-        insertSortOrder = (gItems[0]?.sort_order ?? 1000) - 500
-      } else {
-        const idx = gItems.findIndex(i => i.id === afterItemId)
-        if (idx >= 0) {
-          const curr = gItems[idx]
-          const next = gItems[idx + 1]
-          insertSortOrder = next
-            ? Math.round((curr.sort_order + next.sort_order) / 2)
-            : curr.sort_order + 1000
-        }
+      const insertIndex = afterItemId === null ? 0 : gItems.findIndex(i => i.id === afterItemId) + 1
+      if (afterItemId === null || insertIndex > 0) {
+        const plan = planInsert(gItems, insertIndex)
+        insertSortOrder = plan.sortOrder
+        renumber = plan.renumber
       }
     }
 
@@ -2489,6 +2541,16 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       window.dispatchEvent(new CustomEvent('genba:import-item-adding', { detail: { importId } }))
     }
     try {
+      if (renumber.length > 0) {
+        try {
+          await persistReorder([], renumber.map(r => ({ id: r.id, sort_order: r.sort_order, group_id: groupId })))
+        } catch {
+          if (importId) window.dispatchEvent(new CustomEvent('genba:import-item-failed', { detail: { importId, error: 'この位置に入れるための並び替えを保存できませんでした。明細は追加されていません。もう一度お試しください' } }))
+          return
+        }
+        const next = new Map(renumber.map(r => [r.id, r.sort_order]))
+        setItems(prev => prev.map(i => next.has(i.id) ? { ...i, sort_order: next.get(i.id)! } : i))
+      }
       const res = await fetch('/api/estimate-items/import', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3207,7 +3269,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                   key={tabKey}
                   onClick={() => setActiveGroupTab(tab.id)}
                   onDragOver={e => {
-                    if (!e.dataTransfer.types.includes('application/genba-import-item')) return
+                    if (!isImportDrag(e.dataTransfer)) return
                     e.preventDefault()
                     if (dragHoverTabId === tabKey) return
                     setDragHoverTabId(tabKey)
@@ -3366,9 +3428,10 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                   transition: 'border-color 0.12s, box-shadow 0.12s',
                                 }}
                                 onDragOver={e => {
-                                  if (!e.dataTransfer.types.includes('application/genba-import-item')) return
+                                  if (!isImportDrag(e.dataTransfer)) return
                                   e.preventDefault()
-                                  setDragOverGroupId(group.id)
+                                  e.dataTransfer.dropEffect = 'copy'
+                                  if (dragOverGroupId !== group.id) setDragOverGroupId(group.id)
                                 }}
                                 onDragLeave={e => {
                                   if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
@@ -3377,13 +3440,12 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                   }
                                 }}
                                 onDrop={async e => {
+                                  if (!isImportDrag(e.dataTransfer)) return
                                   e.preventDefault()
                                   const afterItemId = importDragTarget?.groupId === group.id ? importDragTarget.afterItemId : undefined
                                   setDragOverGroupId(null)
                                   setImportDragTarget(null)
-                                  const raw = e.dataTransfer.getData('application/genba-import-item')
-                                  if (!raw) return
-                                  await handleDropImportItem(JSON.parse(raw) as { name: string; quantity: number; unit: string; cost_price: number | null; vendor_name: string; memo: string }, group.id, afterItemId)
+                                  await handleImportDrop(e.dataTransfer, group.id, afterItemId)
                                 }}
                               >
                               <GroupHeader
@@ -3422,29 +3484,21 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                           {(ip, is) => (
                                             <div ref={ip.innerRef} {...ip.draggableProps} style={ip.draggableProps.style}
                                               onDragOver={e => {
-                                                if (!e.dataTransfer.types.includes('application/genba-import-item')) return
+                                                if (!isImportDrag(e.dataTransfer)) return
                                                 e.preventDefault()
                                                 e.stopPropagation()
+                                                e.dataTransfer.dropEffect = 'copy'
+                                                if (dragOverGroupId !== group.id) setDragOverGroupId(group.id)
                                                 const rect = e.currentTarget.getBoundingClientRect()
                                                 const mid  = rect.top + rect.height / 2
-                                                if (e.clientY < mid) {
-                                                  setImportDragTarget({ afterItemId: idx === 0 ? null : gItems[idx - 1].id, groupId: group.id })
-                                                } else {
-                                                  setImportDragTarget({ afterItemId: item.id, groupId: group.id })
+                                                const afterItemId = e.clientY < mid ? (idx === 0 ? null : gItems[idx - 1].id) : item.id
+                                                // dragover は連続して届くので、位置が変わったときだけ描き直す
+                                                if (importDragTarget?.groupId !== group.id || importDragTarget.afterItemId !== afterItemId) {
+                                                  setImportDragTarget({ afterItemId, groupId: group.id })
                                                 }
                                               }}
                                             >
-                                              {showIndicatorBefore && !is.isDragging && (
-                                                <div style={{
-                                                  height: 28, margin: '2px 8px',
-                                                  borderRadius: 4,
-                                                  border: '2px dashed #16a34a',
-                                                  background: '#dcfce7',
-                                                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                  fontSize: 11, color: '#16a34a', fontWeight: 600, letterSpacing: '0.04em',
-                                                  pointerEvents: 'none',
-                                                }}>ここに追加</div>
-                                              )}
+                                              {showIndicatorBefore && !is.isDragging && <ImportDropLine edge="top" />}
                                               <div className="est-row-wrap" style={{ position: 'relative', paddingBottom: nextPb ? 30 : 0 }}>
                                                 {/* 行間 ＋：この行の上端 = index idx（先頭行なら先頭）。最終行だけ下端（= 末尾）も持つ。
                                                     移動中は同じ行間が「ここへ移動」になる（この行の前 / 末尾） */}
@@ -3492,17 +3546,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                                   </div>
                                                 )}
                                               </div>
-                                              {showIndicatorAfter && !is.isDragging && (
-                                                <div style={{
-                                                  height: 28, margin: '2px 8px',
-                                                  borderRadius: 4,
-                                                  border: '2px dashed #16a34a',
-                                                  background: '#dcfce7',
-                                                  display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                  fontSize: 11, color: '#16a34a', fontWeight: 600, letterSpacing: '0.04em',
-                                                  pointerEvents: 'none',
-                                                }}>ここに追加</div>
-                                              )}
+                                              {showIndicatorAfter && !is.isDragging && <ImportDropLine edge="bottom" />}
                                             </div>
                                           )}
                                         </Draggable>
@@ -3637,6 +3681,12 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       </div>
 
       {/* ── 取込パネル。単一Reactコンポーネントを右モニターへ移動できる ── */}
+      {importDropNotice && (
+        <div role="alert" data-testid="import-drop-notice"
+          style={{ position: 'fixed', left: '50%', bottom: 24, transform: 'translateX(-50%)', zIndex: 60, maxWidth: 'min(560px, calc(100vw - 32px))', padding: '10px 14px', borderRadius: 8, background: '#FEF2F2', border: '1px solid #FECACA', color: '#991B1B', fontSize: 13, boxShadow: '0 4px 16px rgba(0,0,0,0.12)' }}>
+          {importDropNotice}
+        </div>
+      )}
       {showImportModal && (
         <DetachableEstimateImportPanel projectId={projectId} onClose={() => setShowImportModal(false)} />
       )}

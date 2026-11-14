@@ -7,6 +7,7 @@ import {
   type EstimateOcrFile, type EstimateOcrItem, type OcrMessage,
 } from '@/lib/estimate/ocr-extraction'
 import { checkEstimateImageFile, formatMegabytes, prepareEstimateImage, type PreparedImage } from '@/lib/estimate/ocr-image'
+import { IMPORT_DRAG_TYPE, endImportDrag, startImportDrag } from '@/lib/estimate/import-drag'
 import { EstimateSourceViewer } from './EstimateSourceViewer'
 
 // ── 型定義 ────────────────────────────────────────────────
@@ -203,6 +204,24 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
     const rowWarns = r.acked ? [] : warnTexts(r.messages)
     const fileWarns = ackedFiles.has(r.fileKey) ? [] : fileWarnsOf(r.fileKey)
     return rowWarns.length || fileWarns.length ? { rowWarns, fileName: r.fileName, fileWarns } : null
+  }
+
+  /** ドロップ時の確認に使う最新の判定（見積エディタ側のドロップは、ドラッグ開始より後に起きる） */
+  const pendingOfRef = useRef(pendingOf)
+  useEffect(() => { pendingOfRef.current = pendingOf })
+
+  /**
+   * 見積エディタへドロップされたとき、この候補を今も追加してよいか。追加できなければ理由を返す。
+   * （ドラッグのデータにはトークンだけを入れ、ここで取り込み候補の状態を確かめる）
+   */
+  function dropCheckOf(id: string) {
+    return (): string | null => {
+      const r = rowsRef.current.find(x => x.id === id)
+      if (!r) return 'この明細は取り込み候補にありません（画像を変更したか、すでに追加しています）'
+      if (inFlightRef.current.has(id)) return 'この明細は追加中です'
+      if (pendingOfRef.current(r)) return '原本と照らして確認してから追加してください'
+      return null
+    }
   }
 
   /** 人が確認した行と、その取り込み元の画像を確認済みにする */
@@ -527,15 +546,17 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
           to   { opacity: 1; transform: translateY(0); }
         }
         .ei-card { animation: ei-fadein 0.18s ease-out; }
-        .ei-wide-review { display: grid; grid-template-columns: minmax(0, 44fr) minmax(0, 56fr); gap: 18px; align-items: start; }
-        .ei-wide-source { position: sticky; top: 0; align-self: start; min-width: 0; }
-        .ei-wide-candidates { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
-        @media (max-width: 1000px) { .ei-wide-review { grid-template-columns: minmax(0, 1fr); } .ei-wide-source { position: static; } }
-        @media (max-width: 650px) { .ei-wide-numbers { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; } }
+        /* 別ウィンドウ: 上に原本（画像の枠の中でスクロール）、下に読み取り結果の表（表の枠の中でスクロール）。
+           原本を画面上部に固定すると表の行が下に隠れるので、固定せず、表に残りの高さを持たせる */
+        .ei-wide-review { display: flex; flex-direction: column; gap: 12px; }
+        .ei-wide-source { min-width: 0; }
+        .ei-wide-source [data-testid=estimate-source-viewer] { position: static !important; }
+        .ei-wide-candidates { min-width: 0; display: flex; flex-direction: column; gap: 12px; max-height: max(320px, calc(64dvh - 150px)); overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
+        @media (max-width: 900px) { .ei-wide-row { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; } }
       `}</style>
 
-      {/* ── タイトル ── */}
-      <div style={s.titleWrap}>
+      {/* ── タイトル（別ウィンドウで結果を表示中は、原本と表に場所を譲る）── */}
+      {!(wide && showResults) && <div style={s.titleWrap}>
         <div style={s.titleIcon}>
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
             stroke={G.dark} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -549,7 +570,7 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
           <h2 style={s.title}>見積書の取り込み（画像AI解析）</h2>
           <p style={s.subtitle}>取引先から受領した見積書の画像をアップロードすると、資材データを自動で読み取ります。</p>
         </div>
-      </div>
+      </div>}
 
       {/* ── アップロードエリア ── */}
       {!showResults && (
@@ -687,8 +708,8 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
         <div className={wide ? 'ei-wide-candidates' : undefined}>
       {wide && showResults && (
         <div role="note" style={{ ...s.infoBanner, background: '#F7FAF8', color: G.textSec, fontSize: 12 }}>
-          左の見積エディタはそのまま広く使えます。右画面の「追加」は、現在は案件の未分類に登録します。
-          工種や挿入位置を指定したい場合は、1画面モードでドラッグしてください。
+          明細の左端（⠿）をつかんで、左の見積エディタの工種・明細の間へドラッグすると、その位置に追加できます。
+          「追加」ボタンは案件の未分類に追加します。要確認の明細は、原本と照らして確認してからドラッグできます。
         </div>
       )}
       {/* ── 抽出結果（カード一覧）── */}
@@ -779,8 +800,9 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
             </div>
           )}
 
-          {/* カードリスト */}
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+          {/* カードリスト（別ウィンドウでは見積エディタに近い横長の表） */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }} data-testid={wide ? 'ocr-wide-table' : undefined}>
+            {wide && rows.length > 0 && <WideHeader />}
             {rows.map(row => (
               <ItemCard
                 key={row.id}
@@ -792,6 +814,8 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
                 onAck={() => acknowledge([row])}
                 onChange={patch => updateRow(row.id, patch)}
                 wide={wide}
+                projectId={projectId}
+                dropCheck={dropCheckOf(row.id)}
                 onShowSource={() => { setSelectedSourceKey(row.fileKey); setOpenSourceRequest(n => n + 1) }}
               />
             ))}
@@ -812,7 +836,7 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
 
 // ── ItemCard ──────────────────────────────────────────────
 
-function ItemCard({ row, removing, adding, pending, onAdd, onAck, onChange, onShowSource, wide }: {
+function ItemCard({ row, removing, adding, pending, onAdd, onAck, onChange, onShowSource, wide, projectId, dropCheck }: {
   row: CandidateRow
   removing: boolean
   adding: boolean
@@ -824,8 +848,12 @@ function ItemCard({ row, removing, adding, pending, onAdd, onAck, onChange, onSh
   onChange: (patch: Partial<Pick<CandidateRow, 'name' | 'quantity' | 'unit' | 'cost_price'>>) => void
   onShowSource: () => void
   wide: boolean
+  projectId: string
+  /** 見積エディタへドロップされたときに、今も追加してよいか確かめる */
+  dropCheck: () => string | null
 }) {
   const [dragOver, setDragOver] = useState(false)
+  const dragTokenRef = useRef<string | null>(null)
   const [editing, setEditing] = useState(false)
   const [asking, setAsking] = useState(false)
   const showConfirm = asking && pending != null
@@ -854,23 +882,34 @@ function ItemCard({ row, removing, adding, pending, onAdd, onAck, onChange, onSh
     >
       {/* ドラッグハンドル */}
       <div
-        draggable={!wide && !adding && !editing && row.name.trim() !== ''}
+        data-testid="ocr-drag-handle"
+        draggable={!adding && !editing && row.name.trim() !== ''}
         onDragStart={e => {
-          // 別ウィンドウ間のドラッグは保証できない。1画面だけ既存操作を提供する。
-          if (wide) { e.preventDefault(); return }
           // 要確認の行・警告のある画像の行は、確認するまでドラッグで見積に入れさせない
           if (pending) { e.preventDefault(); setAsking(true); return }
+          // ドラッグのデータにはトークンだけを入れる（品名・金額はブラウザのドラッグデータに出さない）。
+          // 1 画面でも別ウィンドウでも同じ。登録する値と確認は lib/estimate/import-drag.ts が持つ
+          const token = startImportDrag({
+            projectId,
+            item: {
+              _importId: row.id,
+              name: row.name, quantity: row.quantity, unit: row.unit,
+              cost_price: row.cost_price, vendor_name: row.vendor_name, memo: row.memo,
+            },
+            check: dropCheck,
+          })
+          dragTokenRef.current = token
           e.dataTransfer.effectAllowed = 'copy'
-          e.dataTransfer.setData('application/genba-import-item', JSON.stringify({
-            _importId: row.id,
-            name: row.name, quantity: row.quantity, unit: row.unit,
-            cost_price: row.cost_price, vendor_name: row.vendor_name, memo: row.memo,
-          }))
+          e.dataTransfer.setData(IMPORT_DRAG_TYPE, token)
         }}
-        onDragEnd={() => setDragOver(false)}
+        onDragEnd={() => {
+          setDragOver(false)
+          if (dragTokenRef.current) endImportDrag(dragTokenRef.current)
+          dragTokenRef.current = null
+        }}
         style={{
           width: 32, flexShrink: 0,
-          display: wide ? 'none' : 'flex', alignItems: 'center', justifyContent: 'center',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
           cursor: adding ? 'not-allowed' : 'grab',
           color: G.textTer,
           userSelect: 'none',
@@ -889,8 +928,8 @@ function ItemCard({ row, removing, adding, pending, onAdd, onAck, onChange, onSh
 
       {/* メイン情報 */}
       <div style={{ flex: 1, padding: wide ? '14px 16px' : '10px 12px', minWidth: 0 }}>
-        {/* 名称 */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: wide ? 12 : 5, flexWrap: wide ? 'wrap' : 'nowrap' }}>
+        {/* 名称（1 画面） */}
+        {!wide && <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5, flexWrap: 'nowrap' }}>
           <div style={{
             flex: 1, minWidth: 0,
             fontSize: wide ? 16 : 14, fontWeight: 700, color: G.textPri,
@@ -907,24 +946,34 @@ function ItemCard({ row, removing, adding, pending, onAdd, onAck, onChange, onSh
           >
             {editing ? '閉じる' : '修正'}
           </button>
-        </div>
+        </div>}
 
         {/* 広い右モニターでは、見積エディタ同様、金額を列で見比べられる表示にする */}
         {wide && (
           <>
-            <div data-testid="ocr-wide-fields" className="ei-wide-numbers" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 0.75fr) minmax(0, 0.6fr) minmax(0, 1fr) minmax(0, 1.1fr)', gap: 8 }}>
-              <WideNumber label="数量" value={fmt(row.quantity)} />
-              <WideNumber label="単位" value={row.unit} />
-              <WideNumber label="原価単価" value={row.cost_price == null ? '未読取' : `¥${fmt(row.cost_price)}`} highlight={row.cost_price == null ? 'warning' : 'normal'} />
-              <WideNumber label="原本の金額" value={row.amount == null ? '記載なし' : `¥${fmt(row.amount)}`} />
-            </div>
-            {(row.list_price != null || row.vendor_name || row.memo) && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginTop: 9, color: G.textSec, fontSize: 12 }}>
-                {row.list_price != null && <span>定価 ¥{fmt(row.list_price)}{row.rate != null ? ` / 掛率 ${Math.round(row.rate * 1000) / 10}%` : ''}</span>}
-                {row.vendor_name && <span>業者：{row.vendor_name}</span>}
-                {row.memo && <span title="社内メモとして取り込みます">社内メモ：{row.memo}</span>}
+            <div data-testid="ocr-wide-fields" className="ei-wide-row" style={{ display: 'grid', gridTemplateColumns: WIDE_COLS, gap: 10, alignItems: 'center' }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: G.textPri, overflowWrap: 'anywhere' }}>{row.name || '（品名なし）'}</div>
+                {(row.list_price != null || row.vendor_name || row.memo) && (
+                  <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 3, color: G.textSec, fontSize: 11 }}>
+                    {row.list_price != null && <span>定価 ¥{fmt(row.list_price)}{row.rate != null ? ` × ${Math.round(row.rate * 1000) / 10}%` : ''}</span>}
+                    {row.vendor_name && <span>業者：{row.vendor_name}</span>}
+                    {row.memo && <span title="社内メモとして取り込みます（お客様には表示されません）">社内メモ：{row.memo}</span>}
+                  </div>
+                )}
               </div>
-            )}
+              <WideCell label="数量" value={fmt(row.quantity)} />
+              <WideCell label="単位" value={row.unit} />
+              <WideCell label="原価単価" value={row.cost_price == null ? '未読取' : `¥${fmt(row.cost_price)}`} warn={row.cost_price == null} />
+              <WideCell label="原本の金額" value={row.amount == null ? '記載なし' : `¥${fmt(row.amount)}`} />
+              <ReviewStatus pending={pending != null} flagged={flagged} />
+              <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                <button type="button" style={s.editBtn} onClick={onShowSource} title="この明細の原本画像を表示">原本を見る</button>
+                <button type="button" style={s.editBtn} onClick={() => setEditing(v => !v)} disabled={adding} aria-expanded={editing}>
+                  {editing ? '閉じる' : '修正'}
+                </button>
+              </div>
+            </div>
           </>
         )}
         {/* 1画面では従来のコンパクトな表示をそのまま維持 */}
@@ -1100,12 +1149,46 @@ function ItemCard({ row, removing, adding, pending, onAdd, onAck, onChange, onSh
   )
 }
 
-function WideNumber({ label, value, highlight = 'normal' }: { label: string; value: string; highlight?: 'normal' | 'warning' }) {
+/** 別ウィンドウの表の列（品名・数量・単位・原価単価・原本の金額・確認状態・操作）。見出しと行で同じ幅にする */
+const WIDE_COLS = 'minmax(0, 2.6fr) minmax(56px, 0.55fr) minmax(44px, 0.45fr) minmax(96px, 0.95fr) minmax(96px, 0.95fr) 84px 168px'
+
+/** 表の見出し（左のドラッグ用の余白 32px・右の追加ボタン 78px と揃える） */
+function WideHeader() {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 0, background: highlight === 'warning' ? '#FFFBEB' : '#F7FAF8', padding: '9px 10px', borderRadius: 6 }}>
-      <span style={{ color: G.textSec, fontSize: 11 }}>{label}</span>
-      <strong style={{ color: highlight === 'warning' ? WARN.text : G.textPri, fontSize: 15, fontVariantNumeric: 'tabular-nums', overflowWrap: 'anywhere' }}>{value}</strong>
+    <div data-testid="ocr-wide-header" style={{ display: 'flex', alignItems: 'center', background: '#EEF4F0', border: `1px solid ${G.borderLight}`, borderRadius: 8, marginBottom: 6, fontSize: 11, fontWeight: 700, color: G.textSec }}>
+      <div style={{ width: 32 + 4, flexShrink: 0 }} />
+      <div style={{ flex: 1, minWidth: 0, display: 'grid', gridTemplateColumns: WIDE_COLS, gap: 10, padding: '7px 16px' }}>
+        <span>品名</span><span style={{ textAlign: 'right' }}>数量</span><span>単位</span>
+        <span style={{ textAlign: 'right' }}>原価単価</span><span style={{ textAlign: 'right' }}>原本の金額</span>
+        <span>確認状態</span><span style={{ textAlign: 'right' }}>操作</span>
+      </div>
+      <div style={{ width: 78, flexShrink: 0, textAlign: 'center' }}>追加</div>
     </div>
+  )
+}
+
+/** 表の数値セル（列の見出しは WideHeader。読み上げ用に項目名を持つ） */
+function WideCell({ label, value, warn = false }: { label: string; value: string; warn?: boolean }) {
+  const numeric = label !== '単位'
+  return (
+    <div aria-label={`${label} ${value}`} title={label} style={{ minWidth: 0, textAlign: numeric ? 'right' : 'left', fontSize: 14, fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: warn ? WARN.text : G.textPri, overflowWrap: 'anywhere' }}>
+      <span style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }}>{label}</span>
+      {value}
+    </div>
+  )
+}
+
+/** 確認状態: 要確認（確認しないと追加・ドラッグできない）／確認済み／照合OK */
+function ReviewStatus({ pending, flagged }: { pending: boolean; flagged: boolean }) {
+  const st = pending
+    ? { label: '要確認', color: WARN.text, bg: WARN.bg, border: WARN.border }
+    : flagged
+      ? { label: '確認済み', color: '#1E5C3A', bg: '#E3F4EA', border: '#A8D5B5' }
+      : { label: '照合OK', color: '#1E5C3A', bg: '#E3F4EA', border: '#A8D5B5' }
+  return (
+    <span data-testid="ocr-review-status" style={{ justifySelf: 'start', padding: '2px 8px', borderRadius: 4, fontSize: 12, fontWeight: 700, color: st.color, background: st.bg, border: `1px solid ${st.border}`, whiteSpace: 'nowrap' }}>
+      {st.label}
+    </span>
   )
 }
 

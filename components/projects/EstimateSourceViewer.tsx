@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState, type CSSProperties } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 
 export type EstimateSourcePage = {
@@ -36,7 +36,7 @@ function ImageViewport({ page, zoom, expanded, wide }: { page: EstimateSourcePag
     <div
       data-testid={expanded ? 'source-image-large' : 'source-image-inline'}
       style={{
-        height: expanded ? 'calc(100dvh - 160px)' : wide ? 'clamp(360px, 68dvh, 920px)' : 'clamp(210px, 34dvh, 380px)',
+        height: expanded ? 'calc(100dvh - 160px)' : wide ? 'clamp(220px, 36dvh, 560px)' : 'clamp(210px, 34dvh, 380px)',
         overflow: 'auto',
         background: '#F2F5F3',
         borderRadius: 6,
@@ -62,24 +62,38 @@ function ImageViewport({ page, zoom, expanded, wide }: { page: EstimateSourcePag
  */
 export function EstimateSourceViewer({ pages, selectedKey, onSelect, wide = false, openRequest = 0 }: Props) {
   const wrapperRef = useRef<HTMLElement>(null)
-  const [zoomIndex, setZoomIndex] = useState(0)
+  const [zoom, setZoom] = useState<{ key: string | undefined; index: number }>({ key: undefined, index: 0 })
   const [expanded, setExpanded] = useState(false)
+  const [seenOpenRequest, setSeenOpenRequest] = useState(openRequest)
+  /** 拡大表示を出す文書（別ウィンドウへ移したときは、その別ウィンドウの文書） */
+  const [portalDoc, setPortalDoc] = useState<Document | null>(null)
   const active = pages.find(p => p.key === selectedKey) ?? pages[0]
 
-  useEffect(() => { setZoomIndex(0) }, [active?.key])
+  // 画像を切り替えたら拡大率を 100% に戻す（state を画像ごとに持つ）
+  const zoomIndex = zoom.key === active?.key ? zoom.index : 0
+  const setZoomIndex = (f: (i: number) => number) => setZoom({ key: active?.key, index: f(zoomIndex) })
 
-  // A source button must visibly open the original even if the same page was selected.
-  useEffect(() => { if (openRequest > 0) setExpanded(true) }, [openRequest])
+  // 明細の「原本を見る」は、同じ画像が選ばれていても拡大表示を開く
+  if (openRequest !== seenOpenRequest) {
+    setSeenOpenRequest(openRequest)
+    if (openRequest > 0) setExpanded(true)
+  }
+
+  // 拡大表示は、このビューアが今置かれている文書（1 画面 or 別ウィンドウ）に出す
+  useLayoutEffect(() => {
+    if (expanded) setPortalDoc(wrapperRef.current?.ownerDocument ?? document)
+  }, [expanded])
 
   useEffect(() => {
-    if (!expanded) return
+    if (!expanded || !portalDoc) return
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setExpanded(false)
     }
-    const doc = wrapperRef.current?.ownerDocument ?? document
-    doc.addEventListener('keydown', onKeyDown)
-    return () => doc.removeEventListener('keydown', onKeyDown)
-  }, [expanded])
+    // フォーカスが文書のどこにあっても受け取れるよう、その文書のウィンドウで待つ
+    const target = portalDoc.defaultView ?? window
+    target.addEventListener('keydown', onKeyDown)
+    return () => target.removeEventListener('keydown', onKeyDown)
+  }, [expanded, portalDoc])
 
   if (!active) return null
 
@@ -133,7 +147,7 @@ export function EstimateSourceViewer({ pages, selectedKey, onSelect, wide = fals
         {tools}
       </div>
 
-      {expanded && createPortal(
+      {expanded && portalDoc && createPortal(
         <div role="presentation" onClick={e => { if (e.target === e.currentTarget) setExpanded(false) }}
           style={{ position: 'fixed', inset: 0, zIndex: 10000, background: 'rgba(15, 28, 20, .8)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 12 }}>
           <section role="dialog" aria-modal="true" aria-label="見積書原本の拡大表示"
@@ -149,7 +163,7 @@ export function EstimateSourceViewer({ pages, selectedKey, onSelect, wide = fals
             <ImageViewport page={active} zoom={ZOOMS[zoomIndex]} expanded wide={wide} />
           </section>
         </div>,
-        wrapperRef.current?.ownerDocument.body ?? document.body,
+        portalDoc.body,
       )}
     </section>
   )
