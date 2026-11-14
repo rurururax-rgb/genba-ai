@@ -10,6 +10,9 @@
  * - 409（確認後に金額・明細が変わった）は新しい金額を表示し、利用者が確認するまで追加しない
  * - 404（コピー元が使えない）は該当の明細を選択から外し、検索し直してもらう
  * - 備考・社内メモは検索結果で中身を確認できないため、この画面ではコピーしない
+ * - 選べるのは検索をまたいで最大 50 件（コピー API の上限）
+ * - 選んでいた追加先の工種が消えたら、勝手に「その他」へ変えず、選び直すまで追加させない
+ * - 読み込み直し（onReload）が失敗したら閉じない。追加済みなら「追加済み・画面更新に失敗」と分けて案内し、もう一度は追加させない
  * - 古い検索の応答は捨てる（後から届いても結果を上書きしない）
  * - 成功するまで見積に行を足して見せない。成功後は親の reload で DB から読み直す
  */
@@ -28,9 +31,12 @@ import {
   type PastEstimateHit,
   type PriceTone,
 } from '@/lib/estimate/past-copy-client'
+import { PAST_COPY_MAX_ITEMS } from '@/lib/estimate/past-copy'
 
 const FONT = "'Inter', 'Hiragino Kaku Gothic ProN', 'Meiryo UI', Meiryo, sans-serif"
 const SEARCH_DEBOUNCE_MS = 350
+/** 追加先の工種が消えたときに select に出す、選べない項目の値 */
+const MISSING_GROUP = '__missing_group__'
 
 type Hit = PastEstimateHit & { copy_preview: PastCopyPreview }
 
@@ -42,7 +48,14 @@ const TONE: Record<PriceTone, { bg: string; fg: string }> = {
 }
 
 type Notice = { tone: 'info' | 'warn' | 'error'; text: string }
-type Phase = 'editing' | 'copying' | 'unknown' | 'reloading'
+/**
+ * editing   : 選択・追加できる
+ * copying   : 追加の通信中
+ * reloading : 見積の読み込み直し中
+ * unknown   : 追加できたか不明（読み込み直して確かめるまで追加させない）
+ * added     : 追加済みだが、見積の読み込み直しに失敗した（もう一度は追加させない）
+ */
+type Phase = 'editing' | 'copying' | 'unknown' | 'reloading' | 'added'
 
 const NOTICE_STYLE: Record<Notice['tone'], { bg: string; fg: string; border: string }> = {
   info:  { bg: '#EAF3DE', fg: '#3B6D11', border: '#C9DDB4' },
@@ -57,8 +70,8 @@ export function PastEstimatePicker({
   /** 追加先に選べる工種（この案件の有効な工種）。null（その他）は常に選べる */
   groups: Array<{ id: string; label: string }>
   defaultGroupId: string | null
-  /** 見積明細を DB から読み直す（成功後・結果不明時） */
-  onReload: () => Promise<unknown>
+  /** 見積明細を DB から読み直す（成功後・結果不明時）。明細を取得できなければ false（または reject） */
+  onReload: () => Promise<boolean>
   onClose: () => void
 }) {
   const [query, setQuery] = useState('')
@@ -72,11 +85,23 @@ export function PastEstimatePicker({
   const [selected, setSelected] = useState<Hit[]>([])
   /** 409 で金額が変わり、利用者の確認待ちの明細 */
   const [needsReview, setNeedsReview] = useState<Set<string>>(new Set())
-  const [chosenGroupId, setTargetGroupId] = useState<string | null>(defaultGroupId)
-  // 選んだ工種が消えたら（別タブで削除など）「その他」として扱う
-  const targetGroupId = chosenGroupId && groups.some(g => g.id === chosenGroupId) ? chosenGroupId : null
+  // 追加先の工種（null = その他）。消えたときの案内に名前を出すため、選んだ時点の名前も持つ。
+  // 開いた時点で既定の工種が無ければ「その他」から始める
+  const [target, setTarget] = useState<{ id: string; label: string } | null>(() => {
+    const g = defaultGroupId ? groups.find(x => x.id === defaultGroupId) : undefined
+    return g ? { id: g.id, label: g.label } : null
+  })
+  const targetGroupId = target?.id ?? null
+  // 一度選べた工種があとから消えた（別タブで削除など）。勝手に「その他」へ変えず、選び直してもらう
+  const groupMissing = target != null && !groups.some(g => g.id === target.id)
+  function chooseGroup(id: string | null) {
+    const g = id ? groups.find(x => x.id === id) : undefined
+    setTarget(g ? { id: g.id, label: g.label } : null)
+  }
   const [phase, setPhase] = useState<Phase>('editing')
   const [notice, setNotice] = useState<Notice | null>(null)
+  /** 結果不明・追加済みの後の読み込み直し中（その間も「読み込み直し」の画面を出し続ける） */
+  const [retrying, setRetrying] = useState(false)
 
   const searchSeq = useRef(0)
   /** 最後に検索した語（Enter で検索した直後に、入力待ちの検索が同じ語でもう一度走らないように） */
@@ -123,11 +148,19 @@ export function PastEstimatePicker({
   }, [query, runSearch])
 
   const selectedIds = useMemo(() => new Set(selected.map(s => s.id)), [selected])
+  const atLimit = selected.length >= PAST_COPY_MAX_ITEMS
 
   function toggle(hit: Hit) {
     if (busy) return
+    const isSelected = selectedIds.has(hit.id)
+    if (!isSelected && atLimit) {
+      setNotice({ tone: 'warn', text: `一度に追加できるのは ${PAST_COPY_MAX_ITEMS} 件までです。選択を外すと、別の明細を選べます。` })
+      return
+    }
     setNotice(null)
-    setSelected(prev => (prev.some(s => s.id === hit.id) ? prev.filter(s => s.id !== hit.id) : [...prev, hit]))
+    setSelected(prev => (prev.some(s => s.id === hit.id)
+      ? prev.filter(s => s.id !== hit.id)
+      : prev.length >= PAST_COPY_MAX_ITEMS ? prev : [...prev, hit]))
     setNeedsReview(prev => { if (!prev.has(hit.id)) return prev; const n = new Set(prev); n.delete(hit.id); return n })
   }
 
@@ -138,13 +171,24 @@ export function PastEstimatePicker({
     setNeedsReview(prev => { if (!prev.has(id)) return prev; const n = new Set(prev); n.delete(id); return n })
   }
 
-  const targetLabel = targetGroupId ? groups.find(g => g.id === targetGroupId)?.label || '（名称なし）' : 'その他'
+  const targetLabel = target
+    ? (groups.find(g => g.id === target.id)?.label ?? target.label) || '（名称なし）'
+    : 'その他'
   const total = selected.reduce((sum, s) => {
     const p = s.copy_preview.new_selling_price
     return p == null ? sum : sum + Math.round((s.quantity ?? 1) * p)
   }, 0)
   const unsetCount = selected.filter(s => s.copy_preview.new_selling_price == null).length
-  const canCopy = phase === 'editing' && selected.length > 0 && needsReview.size === 0
+  const canCopy = phase === 'editing' && selected.length > 0 && needsReview.size === 0 && !groupMissing
+
+  /** 親の reload。false・reject は失敗 */
+  async function reloadEstimate(): Promise<boolean> {
+    try {
+      return (await onReload()) !== false
+    } catch {
+      return false
+    }
+  }
 
   async function submit() {
     if (!canCopy || copyingRef.current) return
@@ -158,13 +202,15 @@ export function PastEstimatePicker({
         items: selected.map(s => ({ source_item_id: s.id, fingerprint: s.copy_preview.fingerprint })),
       })
       switch (outcome.kind) {
-        case 'success':
+        case 'success': {
           keepLocked = true
           setPhase('reloading')
           setNotice({ tone: 'info', text: `${outcome.count}件を「${targetLabel}」に追加しました。見積を読み込み直しています…` })
-          await onReload()
-          onClose()
+          if (await reloadEstimate()) { onClose(); return }
+          setPhase('added')
+          setNotice({ tone: 'warn', text: `${outcome.count}件は追加済みです。ただし見積の画面を更新できませんでした。「見積を読み込み直す」を押してください（もう一度追加すると二重になります）。` })
           return
+        }
         case 'changed': {
           // 新しい金額だけでなく、いまの原価・数量なども表示に反映する（古い原価と新しい売価を並べない）
           const byId = new Map(outcome.changed.map(c => [c.source_item_id, c]))
@@ -200,11 +246,18 @@ export function PastEstimatePicker({
     }
   }
 
-  async function reloadAfterUnknown() {
-    if (phase !== 'unknown') return
-    setPhase('reloading')
-    await onReload()
-    onClose()
+  /** 結果不明・追加済みの後の読み込み直し。失敗したら閉じず、同じ状態のまま再試行できるようにする */
+  async function retryReload() {
+    if (phase !== 'unknown' && phase !== 'added') return
+    const from = phase
+    setPhase('reloading'); setRetrying(true)
+    const ok = await reloadEstimate()
+    setRetrying(false)
+    if (ok) { onClose(); return }
+    setPhase(from)
+    setNotice(from === 'added'
+      ? { tone: 'error', text: '追加は完了していますが、見積の読み込み直しに失敗しました。通信を確認して、もう一度「見積を読み込み直す」を押してください（もう一度追加しないでください）。' }
+      : { tone: 'error', text: '見積の読み込み直しに失敗したため、追加できたか確かめられませんでした。通信を確認して、もう一度読み込み直してください（もう一度追加しないでください）。' })
   }
 
   function requestClose() {
@@ -274,15 +327,19 @@ export function PastEstimatePicker({
               selectedIds={selectedIds}
               needsReview={needsReview}
               disabled={busy}
+              atLimit={atLimit}
               onToggle={toggle}
             />
           </section>
 
           <section aria-label="選択中の明細" className="flex min-h-0 flex-col border-t border-[#E4E8E5] bg-[#F8FAF8] md:border-l md:border-t-0">
             <div className="flex items-center justify-between px-4 pb-1 pt-3">
-              <span className="text-[13px] font-bold">選択中 {selected.length} 件</span>
+              <span className="text-[13px] font-bold">選択中 {selected.length} 件<span className="ml-1 text-[11px] font-normal text-[#7A9185]">（最大 {PAST_COPY_MAX_ITEMS} 件）</span></span>
               {selected.length > 0 && <span className="text-[11px] text-[#7A9185]">この順に追加します</span>}
             </div>
+            {atLimit && (
+              <p className="m-0 px-4 pb-1 text-[11px] font-semibold text-[#92400E]">上限の {PAST_COPY_MAX_ITEMS} 件に達しました。外すと別の明細を選べます。</p>
+            )}
             <ol className="m-0 min-h-[56px] list-none space-y-1.5 px-3 pb-2 md:flex-1 md:overflow-auto">
               {selected.length === 0 && (
                 <li className="px-1 py-3 text-xs text-[#7A9185]">左の検索結果から追加したい明細を選んでください。</li>
@@ -311,14 +368,21 @@ export function PastEstimatePicker({
               <label className="block text-[11px] font-semibold uppercase tracking-[0.04em] text-[#47564E]" htmlFor="past-estimate-target">追加先の工種</label>
               <select
                 id="past-estimate-target"
-                value={targetGroupId ?? ''}
+                value={groupMissing ? MISSING_GROUP : (targetGroupId ?? '')}
                 disabled={busy}
-                onChange={e => setTargetGroupId(e.target.value || null)}
+                aria-invalid={groupMissing}
+                onChange={e => { if (e.target.value !== MISSING_GROUP) chooseGroup(e.target.value || null) }}
                 className="h-11 w-full cursor-pointer rounded-[8px] border border-[#D5DED8] bg-white px-[10px] text-sm text-[#1A2E24] outline-none hover:border-[#AFC4B5] focus:border-[#2B5E40] focus:shadow-[0_0_0_3px_rgba(43,94,64,0.14)] disabled:cursor-not-allowed disabled:border-[#E4E8EE] disabled:bg-[#F3F4F6] disabled:text-[#9CA3AF]"
               >
+                {groupMissing && <option value={MISSING_GROUP} disabled>（見つからない工種）選び直してください</option>}
                 {groups.map(g => <option key={g.id} value={g.id}>{g.label || '（名称なし）'}</option>)}
                 <option value="">その他（未分類）</option>
               </select>
+              {groupMissing && (
+                <p role="alert" className="m-0 text-[11px] font-semibold text-[#B91C1C]">
+                  追加先の工種「{targetLabel}」が見つかりません（削除された可能性があります）。追加先を選び直してください。
+                </p>
+              )}
               <p className="m-0 text-[11px] text-[#7A9185]">選んだ工種の末尾に追加します。既存の行の並びは変わりません。</p>
               {selected.length > 0 && (
                 <div className="flex items-baseline justify-between text-xs">
@@ -345,10 +409,17 @@ export function PastEstimatePicker({
             </div>
           )}
           <div className="flex flex-col-reverse gap-2 sm:flex-row sm:items-center sm:justify-end">
-            {phase === 'unknown' ? (
-              <Button type="button" variant="primary" className="w-full sm:w-auto" onClick={() => void reloadAfterUnknown()}>
-                見積明細を読み込み直して確認する
-              </Button>
+            {phase === 'unknown' || phase === 'added' || retrying ? (
+              <>
+                {phase === 'added' && (
+                  <Button type="button" variant="secondary" className="w-full sm:w-auto" onClick={requestClose}>
+                    閉じる
+                  </Button>
+                )}
+                <Button type="button" variant="primary" className="w-full sm:w-auto" disabled={phase === 'reloading'} onClick={() => void retryReload()}>
+                  {phase === 'reloading' ? '読み込み直しています…' : phase === 'added' ? '見積を読み込み直す' : '見積明細を読み込み直して確認する'}
+                </Button>
+              </>
             ) : (
               <>
                 <Button type="button" variant="secondary" className="w-full sm:w-auto" onClick={requestClose} disabled={phase === 'copying' || phase === 'reloading'}>
@@ -363,6 +434,7 @@ export function PastEstimatePicker({
                   {phase === 'copying' ? '追加しています…'
                     : phase === 'reloading' ? '読み込み直しています…'
                     : selected.length === 0 ? '明細を選んでください'
+                    : groupMissing ? '追加先の工種を選び直してください'
                     : `選んだ ${selected.length} 件を「${targetLabel}」に追加`}
                 </Button>
               </>
@@ -385,7 +457,7 @@ function PriceBadge({ preview }: { preview: PastCopyPreview }) {
 }
 
 function SearchResults({
-  results, searching, searchError, searchedQuery, hasMore, selectedIds, needsReview, disabled, onToggle,
+  results, searching, searchError, searchedQuery, hasMore, selectedIds, needsReview, disabled, atLimit, onToggle,
 }: {
   results: Hit[]
   searching: boolean
@@ -395,6 +467,8 @@ function SearchResults({
   selectedIds: Set<string>
   needsReview: Set<string>
   disabled: boolean
+  /** 選択が上限に達している（未選択の明細は選べない。選択済みは外せる） */
+  atLimit: boolean
   onToggle: (hit: Hit) => void
 }) {
   if (searchError) return <p role="alert" className="m-0 px-5 py-6 text-[13px] text-[#B91C1C]">{searchError}</p>
@@ -414,13 +488,13 @@ function SearchResults({
           return (
             <li key={hit.id}>
               <label
-                className={`flex min-h-[44px] cursor-pointer items-start gap-3 px-4 py-2.5 sm:px-5 ${checked ? 'bg-[#F3F7F4]' : 'hover:bg-[#F8FAF8]'} ${disabled ? 'cursor-not-allowed' : ''}`}
+                className={`flex min-h-[44px] cursor-pointer items-start gap-3 px-4 py-2.5 sm:px-5 ${checked ? 'bg-[#F3F7F4]' : 'hover:bg-[#F8FAF8]'} ${disabled || (atLimit && !checked) ? 'cursor-not-allowed' : ''}`}
               >
                 <input
                   type="checkbox"
                   className="mt-1 h-5 w-5 shrink-0 accent-[#2B5E40]"
                   checked={checked}
-                  disabled={disabled}
+                  disabled={disabled || (atLimit && !checked)}
                   onChange={() => onToggle(hit)}
                   aria-label={`${hit.name}（${hit.project.name}）を選ぶ`}
                 />
@@ -431,6 +505,9 @@ function SearchResults({
                   </div>
                   <div className="mt-0.5 truncate text-[11px] text-[#7A9185]">
                     {hit.project.name}・{formatDate(hit.created_at)}・{hit.group?.label || 'その他'}
+                  </div>
+                  <div className="mt-0.5 truncate text-[11px] text-[#47564E]" data-testid="past-hit-vendor">
+                    業者 {hit.vendor_name || '—'}・分類 {hit.category || '—'}
                   </div>
                   <dl className="m-0 mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 text-xs tabular-nums sm:grid-cols-4">
                     <Field label="数量">{hit.quantity ?? 1} {hit.unit ?? '式'}</Field>

@@ -23,6 +23,8 @@ export type PastCopyChangedItem = {
   cost_price: number | null
   selling_price: number | null
   selling_price_mode: 'auto' | 'manual'
+  vendor_name: string | null
+  category: string | null
 }
 export type PastCopyChange = { source_item_id: string; copy_preview: PastCopyPreview; item?: PastCopyChangedItem }
 

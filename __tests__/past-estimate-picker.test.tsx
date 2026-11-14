@@ -57,7 +57,7 @@ beforeEach(() => {
   posts = []
   searchReply = async q => json({ items: q.includes('床') ? [FLOOR] : [AUTO, MANUAL0, NOCOST], has_more: false })
   copyReply = async () => json({ inserted_count: posts.at(-1)?.items ? (posts.at(-1)!.items as unknown[]).length : 0 }, 201)
-  onReload = vi.fn(async () => undefined)
+  onReload = vi.fn(async () => true)
   onClose = vi.fn()
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     if (url.startsWith('/api/estimate-items/search-past')) {
@@ -87,7 +87,7 @@ async function render(props: Partial<React.ComponentProps<typeof PastEstimatePic
         projectId={P}
         groups={[{ id: G1, label: '解体' }, { id: G2, label: '住宅設備' }]}
         defaultGroupId={G1}
-        onReload={onReload as unknown as () => Promise<unknown>}
+        onReload={onReload as unknown as () => Promise<boolean>}
         onClose={onClose as unknown as () => void}
         {...props}
       />,
@@ -119,7 +119,7 @@ function buttonByText(label: string | RegExp): HTMLButtonElement {
 }
 const checkbox = (name: string) => document.querySelector(`input[type="checkbox"][aria-label^="${name}"]`) as HTMLInputElement
 const click = (el: Element) => act(async () => { (el as HTMLElement).click() })
-const copyButton = () => buttonByText(/件を「|明細を選んでください|追加しています|読み込み直しています/)
+const copyButton = () => buttonByText(/件を「|明細を選んでください|追加しています|読み込み直しています|工種を選び直してください/)
 const selectedNames = () => [...document.querySelectorAll('section[aria-label="選択中の明細"] li .truncate')].map(e => e.textContent)
 
 describe('検索', () => {
@@ -284,10 +284,45 @@ describe('追加', () => {
     expect((document.getElementById('past-estimate-target') as HTMLSelectElement).value).toBe('')
   })
 
-  it('開いている間に追加先の工種が消えたら「その他」に送る', async () => {
+  it('選んでいた工種が消えたら勝手に「その他」へ変えず、警告して選び直すまで追加させない', async () => {
     await selectThree()
-    await render({ groups: [{ id: G2, label: '住宅設備' }] })   // G1（既定）が無くなった
-    expect((document.getElementById('past-estimate-target') as HTMLSelectElement).value).toBe('')
+    await render({ groups: [{ id: G2, label: '住宅設備' }] })   // G1（解体・既定）が無くなった
+    const sel = document.getElementById('past-estimate-target') as HTMLSelectElement
+    expect(sel.value).not.toBe('')                              // 「その他」にはならない
+    expect(text()).toContain('追加先の工種「解体」が見つかりません')
+    expect(copyButton().disabled).toBe(true)
+    expect(copyButton().textContent).toBe('追加先の工種を選び直してください')
+    await click(copyButton())
+    await act(async () => { copyButton().dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })) })
+    expect(posts).toHaveLength(0)
+
+    // 選び直すと追加できる
+    await act(async () => { sel.value = G2; sel.dispatchEvent(new Event('change', { bubbles: true })) })
+    expect(text()).not.toContain('が見つかりません')
+    expect(copyButton().disabled).toBe(false)
+    await click(copyButton())
+    await flush()
+    expect(posts[0].group_id).toBe(G2)
+  })
+
+  it('選んでいた工種が消えたあと「その他」を選び直せば null で追加できる', async () => {
+    await selectThree()
+    await render({ groups: [] })
+    const sel = document.getElementById('past-estimate-target') as HTMLSelectElement
+    expect(copyButton().disabled).toBe(true)
+    await act(async () => { sel.value = ''; sel.dispatchEvent(new Event('change', { bubbles: true })) })
+    await click(copyButton())
+    await flush()
+    expect(posts[0].group_id).toBeNull()
+  })
+
+  it('最初から「その他」を選んでいれば、工種が変わっても通常どおり追加できる', async () => {
+    await render({ defaultGroupId: null })
+    await typeAndSearch('キッチン')
+    await click(checkbox('システムキッチン交換'))
+    await render({ defaultGroupId: null, groups: [{ id: G2, label: '住宅設備' }] })   // G1 が消えた
+    expect(text()).not.toContain('が見つかりません')
+    expect(copyButton().disabled).toBe(false)
     await click(copyButton())
     await flush()
     expect(posts[0].group_id).toBeNull()
@@ -323,7 +358,7 @@ describe('追加', () => {
   it('409: 新しい金額を表示し、確認するまで追加できない。確認後は新しい fingerprint で送る', async () => {
     const newPreview = { ...AUTO.copy_preview, new_selling_price: 156000, difference: 11000, fingerprint: 'v1-99999999999999' }
     copyReply = async () => (posts.length === 1
-      ? json({ error: 'changed', changed: [{ source_item_id: AUTO.id, copy_preview: newPreview, item: { name: AUTO.name, quantity: 2, unit: '台', cost_price: 120000, selling_price: 145000, selling_price_mode: 'auto' } }] }, 409)
+      ? json({ error: 'changed', changed: [{ source_item_id: AUTO.id, copy_preview: newPreview, item: { name: AUTO.name, quantity: 2, unit: '台', cost_price: 120000, selling_price: 145000, selling_price_mode: 'auto', vendor_name: '新しい架空業者', category: '住宅設備機器' } }] }, 409)
       : json({ inserted_count: 3 }, 201))
     await selectThree()
     await click(copyButton())
@@ -335,6 +370,9 @@ describe('追加', () => {
     const autoRow = checkbox('システムキッチン交換').closest('label')!.textContent!
     expect(autoRow).toContain('¥120,000')
     expect(autoRow).not.toContain('¥100,000')
+    // 業者名・分類の変更も確認できる（古い値と新しい値を混ぜない）
+    expect(autoRow).toContain('業者 新しい架空業者・分類 住宅設備機器')
+    expect(autoRow).not.toContain('架空設備')
     expect(onReload).not.toHaveBeenCalled()
     expect(copyButton().disabled).toBe(true)
 
@@ -399,10 +437,128 @@ describe('追加', () => {
     await act(async () => {
       root.render(
         <PastEstimatePicker key="other" projectId={'00000000-0000-4000-8000-000000000013'} groups={[]} defaultGroupId={null}
-          onReload={onReload as unknown as () => Promise<unknown>} onClose={onClose as unknown as () => void} />,
+          onReload={onReload as unknown as () => Promise<boolean>} onClose={onClose as unknown as () => void} />,
       )
     })
     expect(selectedNames()).toEqual([])
     expect(text()).not.toContain('システムキッチン交換')
+  })
+})
+
+describe('選択の上限（50 件）', () => {
+  const many = (prefix: string, from: number, n: number) =>
+    Array.from({ length: n }, (_, i) => hit(from + i, `${prefix}${String(i + 1).padStart(2, '0')}`))
+
+  it('検索をまたいで 50 件まで。51 件目は選べず知らせる。外せばまた選べる', async () => {
+    const A = many('明細A', 100, 30)
+    const B = many('明細B', 200, 21)
+    searchReply = async q => json({ items: q === 'A' ? A : B, has_more: false })
+    await render()
+    await typeAndSearch('A')
+    for (const h of A) await click(checkbox(h.name))
+    await typeAndSearch('B')
+    for (const h of B.slice(0, 20)) await click(checkbox(h.name))
+    expect(selectedNames()).toHaveLength(50)
+    expect(text()).toContain('上限の 50 件に達しました')
+
+    // 51 件目: チェックできない
+    const last = checkbox(B[20].name)
+    expect(last.disabled).toBe(true)
+    await click(last)
+    expect(selectedNames()).toHaveLength(50)
+    // 選択済みのものは外せる
+    expect(checkbox(B[0].name).disabled).toBe(false)
+    await click(checkbox(B[0].name))
+    expect(selectedNames()).toHaveLength(49)
+    expect(checkbox(B[20].name).disabled).toBe(false)
+    await click(checkbox(B[20].name))
+    expect(selectedNames()).toHaveLength(50)
+
+    await click(copyButton())
+    await flush()
+    expect((posts[0].items as unknown[]).length).toBe(50)
+  })
+
+  it('49 件・50 件の境界', async () => {
+    const A = many('明細A', 100, 50)
+    searchReply = async () => json({ items: A, has_more: false })
+    await render()
+    await typeAndSearch('A')
+    for (const h of A.slice(0, 49)) await click(checkbox(h.name))
+    expect(text()).not.toContain('上限の 50 件に達しました')
+    expect(checkbox(A[49].name).disabled).toBe(false)
+    await click(checkbox(A[49].name))
+    expect(selectedNames()).toHaveLength(50)
+    expect(text()).toContain('上限の 50 件に達しました')
+  })
+})
+
+describe('読み込み直しの失敗', () => {
+  async function selectOne() {
+    await render()
+    await typeAndSearch('キッチン')
+    await click(checkbox('システムキッチン交換'))
+  }
+
+  it.each([
+    ['false を返す', async () => false],
+    ['reject する', async () => { throw new Error('reload failed') }],
+  ])('コピー成功後の reload が%s → 「追加済み・画面更新に失敗」。閉じず、もう一度は追加させない。再試行で閉じる', async (_label, failing) => {
+    onReload.mockImplementation(failing)
+    await selectOne()
+    await click(copyButton())
+    await flush()
+    expect(posts).toHaveLength(1)
+    expect(onClose).not.toHaveBeenCalled()
+    expect(text()).toContain('1件は追加済みです')
+    expect([...document.querySelectorAll('button')].some(b => /件を「/.test(b.textContent ?? ''))).toBe(false)
+    expect(checkbox('システムキッチン交換').disabled).toBe(true)
+
+    // 再試行も失敗 → まだ閉じない
+    await click(buttonByText('見積を読み込み直す'))
+    await flush()
+    expect(onClose).not.toHaveBeenCalled()
+    expect(text()).toContain('追加は完了していますが、見積の読み込み直しに失敗しました')
+
+    // 再試行が成功 → 閉じる。POST は 1 回のまま
+    onReload.mockImplementation(async () => true)
+    await click(buttonByText('見積を読み込み直す'))
+    await flush()
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(posts).toHaveLength(1)
+  })
+
+  it('追加済みのあとは「閉じる」で閉じられる', async () => {
+    onReload.mockImplementation(async () => false)
+    await selectOne()
+    await click(copyButton())
+    await flush()
+    await click(buttonByText(/^閉じる$/))
+    expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  it('結果不明のあとの reload も失敗 → 閉じず、再コピーさせず、再試行できる', async () => {
+    copyReply = async () => json({ error: 'x' }, 500)
+    onReload.mockImplementation(async () => false)
+    await selectOne()
+    await click(copyButton())
+    await flush()
+    await click(buttonByText('見積明細を読み込み直して確認する'))
+    await flush()
+    expect(onClose).not.toHaveBeenCalled()
+    expect(text()).toContain('見積の読み込み直しに失敗したため、追加できたか確かめられませんでした')
+    expect([...document.querySelectorAll('button')].some(b => /件を「/.test(b.textContent ?? ''))).toBe(false)
+    expect(posts).toHaveLength(1)
+
+    onReload.mockImplementation(async () => { throw new Error('again') })
+    await click(buttonByText('見積明細を読み込み直して確認する'))
+    await flush()
+    expect(onClose).not.toHaveBeenCalled()
+
+    onReload.mockImplementation(async () => true)
+    await click(buttonByText('見積明細を読み込み直して確認する'))
+    await flush()
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(posts).toHaveLength(1)
   })
 })

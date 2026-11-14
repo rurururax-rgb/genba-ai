@@ -130,6 +130,7 @@ export async function POST(req: NextRequest) {
       item: {
         name: s.name, quantity: s.quantity, unit: s.unit, cost_price: s.cost_price,
         selling_price: s.selling_price, selling_price_mode: s.selling_price_mode === 'manual' ? 'manual' : 'auto',
+        vendor_name: s.vendor_name ?? null, category: s.category ?? null,
       },
     }]
   })

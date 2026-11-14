@@ -109,7 +109,10 @@ export function handlePastEstimateFixture(
       return fp === fingerprint ? [] : [{
         source_item_id: sourceItemId,
         copy_preview: { ...planPastItemPrice(it, s.project.markup_rate), fingerprint: fp },
-        item: { name: it.name, quantity: it.quantity, unit: it.unit, cost_price: it.cost_price, selling_price: it.selling_price, selling_price_mode: it.selling_price_mode },
+        item: {
+          name: it.name, quantity: it.quantity, unit: it.unit, cost_price: it.cost_price, selling_price: it.selling_price,
+          selling_price_mode: it.selling_price_mode, vendor_name: it.vendor_name ?? null, category: it.category ?? null,
+        },
       }]
     })
     if (changed.length) return json({ error: '確認後に明細の内容または案件の掛け率が変わりました。', changed }, 409)

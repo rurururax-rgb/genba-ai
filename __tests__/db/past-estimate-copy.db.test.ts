@@ -329,7 +329,10 @@ describe('プレビュー後の変更（fingerprint）', () => {
     expect(changed.map(c => c.source_item_id)).toEqual([S_AUTO])
     expect(changed[0].copy_preview).toMatchObject({ basis: 'auto_recalculated', new_selling_price: 156000 })
     // 確認画面用に、いまのコピー元の値を返す（備考・社内メモは含めない）
-    expect(changed[0].item).toEqual({ name: 'コピー元 システムキッチン', quantity: 2, unit: '台', cost_price: 120000, selling_price: 145000, selling_price_mode: 'auto' })
+    expect(changed[0].item).toEqual({
+      name: 'コピー元 システムキッチン', quantity: 2, unit: '台', cost_price: 120000, selling_price: 145000, selling_price_mode: 'auto',
+      vendor_name: '〇〇設備', category: '住宅設備',
+    })
     expect(JSON.stringify(res.body)).not.toMatch(/他のお客様向け備考|仕入見積/)
     expect(await snapshot()).toBe(before)
 
@@ -337,6 +340,24 @@ describe('プレビュー後の変更（fingerprint）', () => {
     const retry = await request({ ...body, items: [{ source_item_id: S_MANUAL0, fingerprint: fps.get(S_MANUAL0)! }, { source_item_id: S_AUTO, fingerprint: changed[0].copy_preview.fingerprint as string }] })
     expect(retry.status).toBe(201)
     expect((await copiedRows()).map(r => r.selling_price)).toEqual([0, 156000])
+  })
+
+  it('業者名・分類だけが変わっても 409 で、最新の業者名・分類を返す（備考・社内メモは返さない）', async () => {
+    const fps = await fingerprints()
+    await admin.query(`UPDATE estimate_items SET vendor_name = '別の業者', category = '内装' WHERE id = $1`, [S_MANUAL0])
+    try {
+      const before = await snapshot()
+      const res = await request({ project_id: P_TARGET, group_id: G_TARGET, items: [{ source_item_id: S_MANUAL0, fingerprint: fps.get(S_MANUAL0)! }] })
+      expect(res.status).toBe(409)
+      const changed = res.body.changed as Array<{ item: Json; copy_preview: Json }>
+      expect(changed[0].item).toMatchObject({ vendor_name: '別の業者', category: '内装' })
+      expect(changed[0].copy_preview).toMatchObject({ basis: 'manual_kept', new_selling_price: 0 })   // 金額は変わらない
+      expect(changed[0].item).not.toHaveProperty('memo')
+      expect(changed[0].item).not.toHaveProperty('internal_memo')
+      expect(await snapshot()).toBe(before)
+    } finally {
+      await admin.query(`UPDATE estimate_items SET vendor_name = '〇〇設備', category = '住宅設備' WHERE id = $1`, [S_MANUAL0])
+    }
   })
 
   it('コピー先の掛け率がプレビュー後に変わったら 409（auto 行の売価が変わるため）', async () => {

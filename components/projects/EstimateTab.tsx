@@ -2001,7 +2001,9 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       .eq('project_id', projectId).is('deleted_at', null).order('sort_order')
   }, [projectId, supabase])
 
-  const reload = useCallback(() => {
+  // 明細を DB から読み直す。明細が取れたら true、取れなければ（エラー・例外）false で解決する（reject しない）。
+  // 既存の呼び出し元は戻り値を使わない。過去見積から追加は false を「画面更新の失敗」として扱う
+  const reload = useCallback((): Promise<boolean> => {
     if (!hasLoadedRef.current) setLoading(true)
     return Promise.all([
       supabase.from('estimate_groups').select('id,label,display_mode,sort_order')
@@ -2016,7 +2018,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
         console.error('[EstimateTab] items query failed:', iErr.message)
         hasLoadedRef.current = true
         setLoading(false)
-        return
+        return false
       }
       if (gErr) console.error('[EstimateTab] groups query failed:', gErr.message)
       // 案件標準（projects.markup_rate）の取得失敗を握りつぶさない。失敗時は直前の値を保持する
@@ -2032,6 +2034,13 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       setItemsLoaded(true)
       hasLoadedRef.current = true
       setLoading(false)
+      return true
+    }).catch((err: unknown) => {
+      // 通信例外など。データは消さず、読み込み中の表示だけ解除する（明細取得エラーと同じ扱い）
+      console.error('[EstimateTab] reload failed:', err)
+      hasLoadedRef.current = true
+      setLoading(false)
+      return false
     })
   }, [projectId, supabase]) // eslint-disable-line react-hooks/exhaustive-deps
 
