@@ -64,6 +64,10 @@ export function DetachableEstimateImportPanel({ projectId, onClose }: Props) {
       popup.document.documentElement.className = document.documentElement.className
       popup.document.body.className = document.body.className
       popup.document.body.style.margin = '0'
+      // 別ウィンドウの高さいっぱいを使う（html / body / 入れ物の高さを決め、スクロールは中の原本と表に任せる）
+      popup.document.documentElement.style.height = '100%'
+      popup.document.body.style.height = '100%'
+      popup.document.body.style.overflow = 'hidden'
       popup.document.body.style.background = '#F8FAF9'
       document.querySelectorAll('style,link[rel="stylesheet"]').forEach(el => {
         popup.document.head.appendChild(el.cloneNode(true))
@@ -131,7 +135,10 @@ export function DetachableEstimateImportPanel({ projectId, onClose }: Props) {
                 style={{ border: '1px solid #D4DDD6', borderRadius: 6, background: '#fff', padding: '5px 9px', cursor: 'pointer' }}>×</button>
             </div>
           </div>
-          <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+          {/* 1 画面はこの枠でスクロール。別ウィンドウは高さだけ渡し、中（原本・表）がそれぞれスクロールする */}
+          <div data-testid="estimate-import-scroll" style={detached
+            ? { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }
+            : { flex: 1, overflowY: 'auto', minHeight: 0 }}>
             <EstimateImportTab projectId={projectId} wide={detached} />
           </div>
         </>,

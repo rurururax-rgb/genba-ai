@@ -522,7 +522,12 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
     .filter(x => x.st.state === 'done' || x.st.state === 'failed')
 
   return (
-    <div data-testid={wide ? 'estimate-import-wide' : 'estimate-import-compact'} style={{ ...s.root, ...(wide ? { padding: '18px 22px 32px', gap: 14 } : {}) }}>
+    <div data-testid={wide ? 'estimate-import-wide' : 'estimate-import-compact'} style={{
+      ...s.root,
+      // 別ウィンドウ: 親から渡された高さに収め、残りの高さを読み取り結果の表に渡す。
+      // 小さなウィンドウで収まらないときだけ、この枠がスクロールする（ボタンを隠さない）
+      ...(wide ? { flex: 1, minHeight: 0, overflowY: 'auto', padding: '12px 16px', gap: 10 } : {}),
+    }}>
       <style>{`
         @keyframes ei-spin { to { transform: rotate(360deg); } }
         .ei-spin { animation: ei-spin 1s linear infinite; }
@@ -546,13 +551,22 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
           to   { opacity: 1; transform: translateY(0); }
         }
         .ei-card { animation: ei-fadein 0.18s ease-out; }
-        /* 別ウィンドウ: 上に原本（画像の枠の中でスクロール）、下に読み取り結果の表（表の枠の中でスクロール）。
-           原本を画面上部に固定すると表の行が下に隠れるので、固定せず、表に残りの高さを持たせる */
-        .ei-wide-review { display: flex; flex-direction: column; gap: 12px; }
-        .ei-wide-source { min-width: 0; }
-        .ei-wide-source [data-testid=estimate-source-viewer] { position: static !important; }
-        .ei-wide-candidates { min-width: 0; display: flex; flex-direction: column; gap: 12px; max-height: max(320px, calc(64dvh - 150px)); overflow-y: auto; overscroll-behavior: contain; padding-right: 4px; }
-        @media (max-width: 900px) { .ei-wide-row { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; } }
+        /* 別ウィンドウ: 上に原本（画像の枠の中でスクロール）、下に読み取り結果（残りの高さを使い、その中でスクロール）。
+           高さは html → body → 入れ物 → この画面 → ここ と決まっているので、表の枠が下端で切れない */
+        .ei-wide-review { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+        .ei-wide-fill { flex: 1 1 auto; min-height: 0; }
+        .ei-wide-source { flex: 0 0 auto; min-width: 0; --ei-source-h: clamp(200px, 40dvh, 680px); }
+        /* 背の低いウィンドウでは原本を少し小さくして、表に高さを残す */
+        @media (max-height: 760px) { .ei-wide-source { --ei-source-h: clamp(130px, 28dvh, 300px); } .ei-wide-candidates { min-height: 180px !important; } }
+        .ei-wide-source [data-testid=estimate-source-viewer] { position: static !important; border-radius: 8px; }
+        .ei-wide-candidates { flex: 1 1 auto; min-height: 240px; min-width: 0; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; overscroll-behavior: contain; padding: 0 4px 16px 0; scroll-padding-top: 44px; scroll-padding-bottom: 16px; }
+        .ei-wide-candidates [data-testid=ocr-wide-header] { position: sticky; top: 0; z-index: 2; }
+        /* 幅の狭いウィンドウ: 列の見出しを隠し、各セルに項目名を出して 3 列に折り返す（見出しと列がずれないように） */
+        @media (max-width: 720px) {
+          .ei-wide-row { grid-template-columns: repeat(3, minmax(0, 1fr)) !important; }
+          [data-testid=ocr-wide-header] { display: none !important; }
+          .ei-cell-label { position: static !important; width: auto !important; height: auto !important; overflow: visible !important; clip: auto !important; display: block; font-size: 10px; font-weight: 500; color: ${G.textSec}; }
+        }
       `}</style>
 
       {/* ── タイトル（別ウィンドウで結果を表示中は、原本と表に場所を譲る）── */}
@@ -691,7 +705,7 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
       {error && <div style={s.errorBox} role="alert">{error}</div>}
 
       {/* ── 表示だけを切り替える。同じ候補データ・保存ロジックを1画面と2画面で使う ── */}
-      <div className={wide ? 'ei-wide-review' : undefined} data-testid={wide ? 'estimate-wide-review-layout' : undefined}>
+      <div className={wide ? `ei-wide-review${showResults ? ' ei-wide-fill' : ''}` : undefined} data-testid={wide ? 'estimate-wide-review-layout' : undefined}>
         <div className={wide ? 'ei-wide-source' : undefined}>
       {/* ── 原本表示（選択後から取り込み完了まで保持。送信前の元画像を表示）── */}
       {files.length > 0 && (
@@ -705,7 +719,7 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
       )}
 
         </div>
-        <div className={wide ? 'ei-wide-candidates' : undefined}>
+        <div className={wide && showResults ? 'ei-wide-candidates' : undefined} data-testid={wide && showResults ? 'ocr-wide-candidates' : undefined}>
       {wide && showResults && (
         <div role="note" style={{ ...s.infoBanner, background: '#F7FAF8', color: G.textSec, fontSize: 12 }}>
           明細の左端（⠿）をつかんで、左の見積エディタの工種・明細の間へドラッグすると、その位置に追加できます。
@@ -1171,8 +1185,8 @@ function WideHeader() {
 function WideCell({ label, value, warn = false }: { label: string; value: string; warn?: boolean }) {
   const numeric = label !== '単位'
   return (
-    <div aria-label={`${label} ${value}`} title={label} style={{ minWidth: 0, textAlign: numeric ? 'right' : 'left', fontSize: 14, fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: warn ? WARN.text : G.textPri, overflowWrap: 'anywhere' }}>
-      <span style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }}>{label}</span>
+    <div aria-label={`${label} ${value}`} title={label} style={{ position: 'relative', minWidth: 0, textAlign: numeric ? 'right' : 'left', fontSize: 14, fontWeight: 600, fontVariantNumeric: 'tabular-nums', color: warn ? WARN.text : G.textPri, overflowWrap: 'anywhere' }}>
+      <span className="ei-cell-label" style={{ position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0 0 0 0)' }}>{label}</span>
       {value}
     </div>
   )

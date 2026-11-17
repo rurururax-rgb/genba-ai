@@ -36,7 +36,7 @@ function ImageViewport({ page, zoom, expanded, wide }: { page: EstimateSourcePag
     <div
       data-testid={expanded ? 'source-image-large' : 'source-image-inline'}
       style={{
-        height: expanded ? 'calc(100dvh - 160px)' : wide ? 'clamp(220px, 36dvh, 560px)' : 'clamp(210px, 34dvh, 380px)',
+        height: expanded ? 'calc(100dvh - 160px)' : wide ? 'var(--ei-source-h, clamp(200px, 40dvh, 680px))' : 'clamp(210px, 34dvh, 380px)',
         overflow: 'auto',
         background: '#F2F5F3',
         borderRadius: 6,

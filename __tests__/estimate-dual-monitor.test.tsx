@@ -65,4 +65,22 @@ describe('別ウィンドウの取り込みパネル', () => {
     expect(panel?.getAttribute('data-wide')).toBe('false')
     expect(popupWindow.close).toHaveBeenCalled()
   })
+
+  it('別ウィンドウでは高さをウィンドウいっぱいに決め、外側ではスクロールしない（中の表がスクロールする）。1 画面に戻すと従来どおり', () => {
+    const popup = document.implementation.createHTMLDocument('popup')
+    const popupWindow = { document: popup, closed: false, focus: vi.fn(), close: vi.fn(), addEventListener: vi.fn() }
+    vi.stubGlobal('open', vi.fn(() => popupWindow))
+    const scrollBox = () => document.querySelector('[data-testid=estimate-import-scroll]') as HTMLElement ?? popup.querySelector('[data-testid=estimate-import-scroll]') as HTMLElement
+    expect(scrollBox().style.overflowY).toBe('auto')
+    click(mountNode, '別ウィンドウで開く')
+    expect(popup.documentElement.style.height).toBe('100%')
+    expect(popup.body.style.height).toBe('100%')
+    expect(popup.body.style.overflow).toBe('hidden')
+    const box = popup.querySelector('[data-testid=estimate-import-scroll]') as HTMLElement
+    expect(box.style.overflow).toBe('hidden')
+    expect(box.style.display).toBe('flex')
+    expect(box.style.minHeight).toBe('0')
+    click(popup.body, '1画面に戻す')
+    expect((mountNode.querySelector('[data-testid=estimate-import-scroll]') as HTMLElement).style.overflowY).toBe('auto')
+  })
 })
