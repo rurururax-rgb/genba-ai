@@ -33,6 +33,32 @@ const ROW_H  = 24
 // 列幅（合計 ≈ 812px。テーブルは width:100% で引き伸ばされる）
 // 種別(cat)は狭め・名称(name)は広め。ヘッダーは colSpan=2 で統合して「名称」1つ表示
 const COL = { no: 28, cat: 90, name: 190, qty: 44, unit: 36, price: 78, amount: 88, retail: 72, note: 186 }
+const COL_SUM = Object.values(COL).reduce((s, w) => s + w, 0)
+
+// ── ページ寸法（A4 横・画面表示） ──────────────────────────────────────
+// 全ページ（表紙・総括表・明細）を同じ大きさにする。印刷時は @media print で 297mm × 210mm
+const PAGE_W = 1050
+const PAGE_H = 741                  // 1050 × 210/297
+const TABLE_W = PAGE_W - 40         // 左右の余白 20px ずつ
+// 1 ページの表本体（tbody）に使える高さ: 上下余白 32・タイトル 31・見出し行 26・会社名 22・罫線 2 を除き、8px の余裕を残す
+const BODY_H = PAGE_H - 32 - 31 - 26 - 22 - 2 - 8
+const EMPTY_ROW_H = ROW_H           // 文字のない行
+const TEXT_ROW_H  = ROW_H + 5       // 文字のある行（行の高さ 24 + 上下余白 4 + 罫線 1）
+
+// ── 行の高さの見積もり（改ページ位置を決めるため。多めに見積もる） ─────────────
+// 全角は 1 文字 = 1em、半角は 0.6em として、列の内側の幅で何行に折り返すかを数える
+function textWidthEm(s: string): number {
+  let w = 0
+  for (const ch of s) w += (ch.codePointAt(0) ?? 0) < 0x2000 ? 0.6 : 1
+  return w
+}
+function lineCount(text: string | null | undefined, colWidth: number, fontSize: number): number {
+  const inner = colWidth * TABLE_W / COL_SUM - 13   // 左右の余白 12 + 罫線 1
+  return Math.max(1, Math.ceil(textWidthEm((text ?? '').trim()) * fontSize / inner))
+}
+function wrapRowHeight(lines: number, fontSize: number): number {
+  return Math.max(TEXT_ROW_H, Math.ceil(lines * fontSize * 1.5) + 11)   // 行の高さ 1.5・上下余白 10・罫線 1
+}
 
 // ── ユーティリティ ─────────────────────────────────────────────────────
 
@@ -50,6 +76,20 @@ function unitPrice(v: number | null | undefined): string {
 function isSection(s: string | null)  { return /^【.*】/.test((s ?? '').trim()) }
 function isWarning(s: string | null)  { return /^※/.test((s ?? '').trim()) }
 function isBlank(s: string | null)    { return !(s ?? '').trim() }
+
+/** 明細 1 行の高さの見積もり（描画は下の明細ページと同じ分岐） */
+function itemRowHeight(item: Item): number {
+  const rt = item.row_type ?? 'item'
+  const wide = COL_SUM - COL.no   // colSpan=8 の行
+  if (rt === 'header' || isSection(item.name)) return wrapRowHeight(lineCount(item.name, wide, 11.5), 11.5)
+  if (rt === 'note' || isWarning(item.name))   return wrapRowHeight(lineCount(item.name, wide, 10), 10)
+  if (isBlank(item.name)) return EMPTY_ROW_H
+  return Math.max(
+    wrapRowHeight(lineCount(item.category, COL.cat, 11.5), 11.5),
+    wrapRowHeight(lineCount(item.name, COL.name, 11.5), 11.5),
+    wrapRowHeight(lineCount(item.memo, COL.note, 10), 10),
+  )
+}
 
 // ── 共通スタイル ───────────────────────────────────────────────────────
 
@@ -215,39 +255,60 @@ export function EstimateDocument({ projectId, project, company, groups, items }:
     project_memo?: string | null
   }
 
-  // 総括表の空行数（最低 12 行確保）
-  const summaryFiller = Math.max(0, 12 - grouped.length)
-  // 明細ページの空行数（最低 20 データ行 = グループヘッダー1行 + 最低 19 行）
-  const DETAIL_MIN = 19
+  // 総括表: 1 ページに収まる工種数で分ける。最後のページだけ「区切りの空行 + 合計」を置き、残りは空行で埋める
+  const SUMMARY_TAIL_H = EMPTY_ROW_H + TEXT_ROW_H
+  const summaryPerPage  = Math.floor(BODY_H / TEXT_ROW_H)
+  const summaryLastCap  = Math.floor((BODY_H - SUMMARY_TAIL_H) / TEXT_ROW_H)
+  const summaryPages: GroupData[][] = []
+  {
+    const rest = [...grouped]
+    while (rest.length > summaryLastCap) summaryPages.push(rest.splice(0, Math.min(summaryPerPage, rest.length - 1)))
+    summaryPages.push(rest)
+  }
 
-  // 明細ページをチャンクに分割（グループが19行超の場合は複数ページに分割）
+  // 明細: 行の高さの見積もりで 1 ページに収まるところで改ページし、各ページの残りを空行で埋める
+  // （グループ見出し行と小計行の 2 行分を除いた高さに収める。1 行だけでページを超える場合はその行だけでページにする）
+  const DETAIL_BODY_H = BODY_H - TEXT_ROW_H * 2
   type PageInfo = {
     group: GroupData
     chunk: Item[]
     chunkIndex: number
-    isLastChunk: boolean
     isLastPage: boolean
     pageNumber: number
     chunkSubtotal: number
+    filler: number
   }
-  let pageCounter = 2
+  let pageCounter = summaryPages.length + 1
   const detailPages: PageInfo[] = []
   for (let gi = 0; gi < grouped.length; gi++) {
     const g = grouped[gi]
-    const numChunks = Math.max(1, Math.ceil(g.items.length / DETAIL_MIN))
-    for (let ci = 0; ci < numChunks; ci++) {
-      const chunk = g.items.slice(ci * DETAIL_MIN, (ci + 1) * DETAIL_MIN)
-      const isLastChunk = ci === numChunks - 1
-      const isLastPage  = isLastChunk && gi === grouped.length - 1
-      const chunkSubtotal = chunk.reduce((s, i) => s + (i.amount ?? 0), 0)
-      detailPages.push({ group: g, chunk, chunkIndex: ci, isLastChunk, isLastPage, pageNumber: pageCounter, chunkSubtotal })
-      pageCounter++
+    const chunks: Array<{ items: Item[]; height: number }> = [{ items: [], height: 0 }]
+    for (const item of g.items) {
+      const h = itemRowHeight(item)
+      let cur = chunks[chunks.length - 1]
+      if (cur.items.length > 0 && cur.height + h > DETAIL_BODY_H) {
+        cur = { items: [], height: 0 }
+        chunks.push(cur)
+      }
+      cur.items.push(item)
+      cur.height += h
     }
+    chunks.forEach((c, ci) => {
+      detailPages.push({
+        group: g, chunk: c.items, chunkIndex: ci,
+        isLastPage: ci === chunks.length - 1 && gi === grouped.length - 1,
+        pageNumber: pageCounter++,
+        chunkSubtotal: c.items.reduce((s, i) => s + (i.amount ?? 0), 0),
+        filler: Math.max(0, Math.floor((DETAIL_BODY_H - c.height) / EMPTY_ROW_H)),
+      })
+    })
   }
 
+  // すべてのページを同じ A4 横の大きさにする（中身が少なくても短くしない）
   const pageStyle: React.CSSProperties = {
     background: '#fff',
-    width: 1050,
+    width: PAGE_W,
+    minHeight: PAGE_H,
     margin: '0 auto 32px',
     padding: '18px 20px 14px',
     boxShadow: '0 2px 10px rgba(0,0,0,0.14)',
@@ -297,7 +358,9 @@ export function EstimateDocument({ projectId, project, company, groups, items }:
             margin: 0 !important;
             width: 100% !important;
             padding: 10mm 12mm !important;
+            min-height: 210mm !important;
           }
+          .doc-cover { height: 210mm !important; }
           .page-break {
             page-break-after: always;
             break-after: page;
@@ -340,13 +403,13 @@ export function EstimateDocument({ projectId, project, company, groups, items }:
             L10=担当者, L13=工期, H57=税込合計金額
         ───────────────────────────────────────────────────── */}
         {/*
-          A4 横向き比率: 1050px幅 → 高さ = 1050 × (210/297) = 741px
+          A4 横向き比率: 1050px幅 → 高さ = 1050 × (210/297) = 741px（PAGE_H）
           Excel 見積表紙と同じ行構成で verticalに配置する
         */}
-        <div className="doc-page page-break" style={{
+        <div className="doc-page doc-cover page-break" style={{
           ...pageStyle,
           padding: '18px 22px 14px',
-          height: 741,
+          height: PAGE_H,
           boxSizing: 'border-box',
           display: 'flex',
           flexDirection: 'column',
@@ -533,55 +596,62 @@ export function EstimateDocument({ projectId, project, company, groups, items }:
         </div>
 
         {/* ─────────────────────────────────────────────────────
-            Page 1: 総括表
+            Page 1: 総括表（工種が多いときは 1, 2, … と複数ページ）
         ───────────────────────────────────────────────────── */}
-        <div className="doc-page page-break" style={pageStyle}>
-          <Title page={1} />
-          <table style={{ width: '100%', borderCollapse: 'collapse', border: BOR, tableLayout: 'fixed' }}>
-            <ColGroup />
-            <THead />
-            <tbody>
-              {/* グループ一覧行 */}
-              {grouped.map(g => (
-                <tr key={g.id ?? '_ug'}>
-                  <td style={{ ...td0, textAlign: 'center' }}>{g.no}</td>
-                  <td colSpan={2} style={{ ...td0, textAlign: 'left' }}>{g.label}</td>
-                  <td style={{ ...td0, textAlign: 'right' }}>1</td>
-                  <td style={{ ...td0, textAlign: 'center' }}>式</td>
-                  <td style={td0}></td>
-                  <td style={{ ...td0, textAlign: 'right' }}>{n(g.subtotal)}</td>
-                  <td style={td0}></td>
-                  <td style={td0}></td>
-                </tr>
-              ))}
-
-              {/* 空行フィラー */}
-              {Array.from({ length: summaryFiller }).map((_, i) => (
-                <EmptyRow key={`sf${i}`} />
-              ))}
-              <EmptyRow key="sep" />
-
-              {/* 小計合計（全グループ小計の合算） */}
-              <tr>
-                <td style={td0}></td>
-                <td colSpan={2} style={{ ...td0, textAlign: 'center', fontWeight: 700, fontSize: 13 }}>合　　　計</td>
-                <td style={{ ...td0, textAlign: 'right' }}>1</td>
-                <td style={{ ...td0, textAlign: 'center' }}>式</td>
-                <td style={td0}></td>
-                <td style={{ ...td0, textAlign: 'right', fontWeight: 700, fontSize: 13 }}>{n(subtotalAll)}</td>
-                <td style={td0}></td>
-                <td style={td0}></td>
-              </tr>
-            </tbody>
-          </table>
-          <CompanyName name={companyName} />
-        </div>
+        {summaryPages.map((pageGroups, si) => {
+          const isLastSummary = si === summaryPages.length - 1
+          const summaryFiller = Math.max(0, Math.floor(
+            (BODY_H - pageGroups.length * TEXT_ROW_H - (isLastSummary ? SUMMARY_TAIL_H : 0)) / EMPTY_ROW_H))
+          return (
+            <div key={`summary-${si}`} className="doc-page page-break" style={pageStyle}>
+              <Title page={si + 1} />
+              <table style={{ width: '100%', borderCollapse: 'collapse', border: BOR, tableLayout: 'fixed' }}>
+                <ColGroup />
+                <THead />
+                <tbody>
+                  {/* グループ一覧行 */}
+                  {pageGroups.map(g => (
+                    <tr key={g.id ?? '_ug'}>
+                      <td style={{ ...td0, textAlign: 'center' }}>{g.no}</td>
+                      <td colSpan={2} style={{ ...td0, textAlign: 'left' }}>{g.label}</td>
+                      <td style={{ ...td0, textAlign: 'right' }}>1</td>
+                      <td style={{ ...td0, textAlign: 'center' }}>式</td>
+                      <td style={td0}></td>
+                      <td style={{ ...td0, textAlign: 'right' }}>{n(g.subtotal)}</td>
+                      <td style={td0}></td>
+                      <td style={td0}></td>
+                    </tr>
+                  ))}
+    
+                  {/* 空行フィラー */}
+                  {Array.from({ length: summaryFiller }).map((_, i) => (
+                    <EmptyRow key={`sf${i}`} />
+                  ))}
+    
+                  {/* 小計合計（全グループ小計の合算）。最後の総括表ページだけ */}
+                  {isLastSummary && <EmptyRow key="sep" />}
+                  {isLastSummary && <tr>
+                    <td style={td0}></td>
+                    <td colSpan={2} style={{ ...td0, textAlign: 'center', fontWeight: 700, fontSize: 13 }}>合　　　計</td>
+                    <td style={{ ...td0, textAlign: 'right' }}>1</td>
+                    <td style={{ ...td0, textAlign: 'center' }}>式</td>
+                    <td style={td0}></td>
+                    <td style={{ ...td0, textAlign: 'right', fontWeight: 700, fontSize: 13 }}>{n(subtotalAll)}</td>
+                    <td style={td0}></td>
+                    <td style={td0}></td>
+                  </tr>}
+                </tbody>
+              </table>
+              <CompanyName name={companyName} />
+            </div>
+          )
+        })}
 
         {/* ─────────────────────────────────────────────────────
             Pages 2+: 工種別明細
         ───────────────────────────────────────────────────── */}
         {detailPages.map(pg => {
-          const filler = pg.isLastChunk ? Math.max(0, DETAIL_MIN - pg.chunk.length) : 0
+          const filler = pg.filler
           const subtotalAmount = pg.chunkSubtotal
           return (
             <div
@@ -676,7 +746,7 @@ export function EstimateDocument({ projectId, project, company, groups, items }:
                     )
                   })}
 
-                  {/* 空行フィラー（最後のチャンクのみ） */}
+                  {/* 空行フィラー（ページの下まで） */}
                   {Array.from({ length: filler }).map((_, i) => (
                     <EmptyRow key={`df${i}`} />
                   ))}
