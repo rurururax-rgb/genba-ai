@@ -9,6 +9,11 @@ type Props = {
   onClose: () => void
 }
 
+/** 1 画面の枠の下の余白（sticky の top と同じ） */
+const INLINE_GAP = 12
+/** 1 画面の枠の最小の高さ。これより低い画面では、外側（案件画面）のスクロールで下端を出す */
+const MIN_INLINE_HEIGHT = 240
+
 /**
  * One OCR panel, two display locations. We move the SAME portal container
  * across same-origin windows. Candidate / confirmation / in-flight state
@@ -25,11 +30,47 @@ export function DetachableEstimateImportPanel({ projectId, onClose }: Props) {
     node.style.display = 'flex'
     node.style.flexDirection = 'column'
     node.style.height = '100%'
+    // 1 画面では枠（dock）の flex 子。min-height: 0 が無いと内容の高さ以下に縮まず、枠の外（overflow: hidden）で切れて
+    // 中の枠（estimate-import-scroll）がスクロールしない。別ウィンドウ（body 直下）では height: 100% が効き、この 2 つは影響しない
+    node.style.flex = '1 1 auto'
+    node.style.minHeight = '0'
     node.style.minWidth = '0'
     return node
   })
   const [detached, setDetached] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
+
+  // 1 画面: 枠の下端を表示範囲の下端（-12px）に合わせる。枠の上端は案件ヘッダー・ツールバーの下にあり、スクロールで
+  // sticky の位置まで上がるので、上端から測る（100dvh 固定だと、上端がずれた分だけ下がはみ出す）。拡大率・高さの変更にも追従
+  useEffect(() => {
+    if (detached) return
+    const dock = inlineRef.current
+    if (!dock) return
+    let frame = 0
+    const fit = () => {
+      frame = 0
+      const viewport = window.visualViewport?.height ?? window.innerHeight
+      const top = Math.max(0, dock.getBoundingClientRect().top)
+      dock.style.maxHeight = `${Math.max(MIN_INLINE_HEIGHT, Math.floor(viewport - top - INLINE_GAP))}px`
+    }
+    const schedule = () => { if (!frame) frame = requestAnimationFrame(fit) }
+    fit()
+    // 案件画面のスクロールは main の中で起きるので、捕捉フェーズで受ける（パネル内のスクロールも来るが計算は軽い）
+    document.addEventListener('scroll', schedule, { capture: true, passive: true })
+    window.addEventListener('resize', schedule)
+    window.visualViewport?.addEventListener('resize', schedule)
+    const ro = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(schedule)
+    // 上のツールバーの折り返しなどで枠の上端が動いたとき（祖先の大きさが変わる）にも測り直す
+    for (let el = dock.parentElement; el && el !== document.body; el = el.parentElement) ro?.observe(el)
+    return () => {
+      if (frame) cancelAnimationFrame(frame)
+      document.removeEventListener('scroll', schedule, { capture: true })
+      window.removeEventListener('resize', schedule)
+      window.visualViewport?.removeEventListener('resize', schedule)
+      ro?.disconnect()
+      dock.style.maxHeight = ''
+    }
+  }, [detached])
 
   useEffect(() => {
     const node = host
@@ -108,9 +149,10 @@ export function DetachableEstimateImportPanel({ projectId, onClose }: Props) {
           background: '#fff',
           overflow: 'hidden',
           position: 'sticky',
-          top: 12,
+          top: INLINE_GAP,
           alignSelf: 'flex-start',
-          maxHeight: 'calc(100dvh - 24px)',
+          // 初回描画の目安。実際の値は上の fit() が枠の上端から計算して上書きする
+          maxHeight: `calc(100dvh - ${INLINE_GAP * 2}px)`,
           minWidth: 0,
         }}
       />
@@ -138,7 +180,7 @@ export function DetachableEstimateImportPanel({ projectId, onClose }: Props) {
           {/* 1 画面はこの枠でスクロール。別ウィンドウは高さだけ渡し、中（原本・表）がそれぞれスクロールする */}
           <div data-testid="estimate-import-scroll" style={detached
             ? { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }
-            : { flex: 1, overflowY: 'auto', minHeight: 0 }}>
+            : { flex: 1, overflowY: 'auto', minHeight: 0, overscrollBehavior: 'contain' }}>
             <EstimateImportTab projectId={projectId} wide={detached} />
           </div>
         </>,
