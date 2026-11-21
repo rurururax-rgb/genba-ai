@@ -18,6 +18,7 @@ import { getClient } from '@/lib/supabase/client'
 import { resolveNumericCommit } from '@/lib/input/numeric-input'
 import { jsonInit, writeRequest } from '@/lib/api/write-request'
 import { PastEstimatePicker } from './PastEstimatePicker'
+import { MaterialMasterPicker } from './MaterialMasterPicker'
 import { calculateSellingPrice, DEFAULT_MARKUP_RATE, getEffectiveMarkupRate, getItemPricingState, markupToMarginRate, normalizeMarkupOverride, resolveSellingPrice, type SellingPriceMode } from '@/lib/estimate/pricing'
 import { calculateEstimateTotals, liveAmount } from '@/lib/estimate/totals'
 import { planInsert } from '@/lib/estimate/insert-plan'
@@ -1931,6 +1932,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   const [showRevConfirm, setShowRevConfirm] = useState(false)
   const [revLabel,      setRevLabel]      = useState('')
   const [showPastPicker, setShowPastPicker] = useState(false)
+  const [showMasterPicker, setShowMasterPicker] = useState(false)
   const [showImportModal, setShowImportModal] = useState(false)
   const [activeGroupTab, setActiveGroupTab] = useState<string | null>(null)
   const [dragOverGroupId, setDragOverGroupId] = useState<string | null>(null)
@@ -2024,7 +2026,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   }, [projectId, supabase])
 
   // 明細を DB から読み直す。明細が取れたら true、取れなければ（エラー・例外）false で解決する（reject しない）。
-  // 既存の呼び出し元は戻り値を使わない。過去見積から追加は false を「画面更新の失敗」として扱う
+  // 既存の呼び出し元は戻り値を使わない。過去見積・資材マスターから追加は false を「画面更新の失敗」として扱う
   const reload = useCallback((): Promise<boolean> => {
     if (!hasLoadedRef.current) setLoading(true)
     return Promise.all([
@@ -3019,6 +3021,29 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
               defaultGroupId={activeGroupTab}
               onReload={reload}
               onClose={() => setShowPastPicker(false)}
+            />
+          )}
+          <button
+            onClick={() => setShowMasterPicker(true)}
+            className="est-tb-btn"
+            style={{ ...st.tbBtn, display: 'inline-flex', alignItems: 'center', gap: 5 }}
+            disabled={moving}
+            title="自社の資材マスターから商品を選んで、この見積に追加する"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"/>
+              <polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>
+            </svg>
+            資材マスターから追加
+          </button>
+          {showMasterPicker && (
+            <MaterialMasterPicker
+              key={projectId}
+              projectId={projectId}
+              groups={visibleGroups.map(g => ({ id: g.id, label: g.label }))}
+              defaultGroupId={activeGroupTab}
+              onReload={reload}
+              onClose={() => setShowMasterPicker(false)}
             />
           )}
           <div style={{ width: 1, height: 18, background: C.divider }} />
