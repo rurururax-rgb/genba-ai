@@ -746,3 +746,68 @@ describe('右画面の表から見積エディタへドラッグ', () => {
     expect(imports).toHaveLength(0)
   })
 })
+
+describe('追加の結果が分からないとき（通信が途切れた）', () => {
+  const changed: Array<Record<string, unknown>> = []
+  const onChanged = (e: Event) => changed.push((e as CustomEvent).detail)
+  beforeEach(() => { changed.length = 0; window.addEventListener('genba:data-changed', onChanged) })
+  afterEach(() => window.removeEventListener('genba:data-changed', onChanged))
+
+  it('応答が届かない → 失敗・再試行可とは扱わず、見積を読み直させ、候補は確認するまで追加させない', async () => {
+    importReply = () => Promise.reject(new TypeError('Failed to fetch'))
+    await readImages([img('p1.jpg')])
+    click(addBtnOf(cards()[0]))
+    await flush()
+    expect(imports).toHaveLength(1)
+    expect(container.textContent).toContain('保存できたか確認できませんでした')
+    // 見積エディタに読み直させる（保存された明細は付けない）
+    expect(changed).toEqual([{ target_table: 'estimate_items', project_id: 'p1' }])
+    // 候補は残り、要確認になる。確認するまで送らない
+    expect(cards()).toHaveLength(2)
+    expect(cards()[0].dataset.needsReview).toBe('true')
+    click(addBtnOf(cards()[0]))
+    await flush()
+    expect(imports).toHaveLength(1)
+    const box = cards()[0].querySelector('[data-testid=row-confirm]') as HTMLElement
+    expect(box.textContent).toContain('同じ明細が入っていないか')
+    // 人が見積を確かめて「確認したので追加する」を押したら送る
+    importReply = async () => json({ created: 1 })
+    click(btnIn(box, '確認したので追加する'))
+    await flush()
+    expect(imports).toHaveLength(2)
+  })
+
+  it('本文のない 504 も同じく確認を促す', async () => {
+    importReply = async () => new Response('An error occurred with your deployment', { status: 504 })
+    await readImages([img('p1.jpg')])
+    click(addBtnOf(cards()[0]))
+    await flush()
+    expect(cards()[0].dataset.needsReview).toBe('true')
+    expect(changed).toHaveLength(1)
+  })
+
+  it('サーバーが断った（4xx・エラー本文つきの 500）ときは、従来どおりの失敗（要確認にしない・読み直させない）', async () => {
+    importReply = async () => json({ error: 'Project not found' }, 404)
+    await readImages([img('p1.jpg')])
+    click(addBtnOf(cards()[0]))
+    await flush()
+    expect(container.textContent).toContain('Project not found')
+    expect(cards()[0].dataset.needsReview).toBe('false')
+    expect(changed).toEqual([])
+    importReply = async () => json({ error: 'insert failed' }, 500)
+    click(addBtnOf(cards()[0]))
+    await flush()
+    expect(container.textContent).toContain('insert failed')
+    expect(cards()[0].dataset.needsReview).toBe('false')
+  })
+
+  it('見積エディタへのドラッグで結果が分からなかった通知（uncertain）を受けたら、その候補を要確認にする', async () => {
+    await readImages([img('p1.jpg')])
+    const importId = startDrag(cards()[0]).item!._importId
+    act(() => { window.dispatchEvent(new CustomEvent('genba:import-item-adding', { detail: { importId } })) })
+    act(() => { window.dispatchEvent(new CustomEvent('genba:import-item-failed', { detail: { importId, error: '通信が途切れ、保存できたか確認できませんでした', uncertain: true } })) })
+    expect(cards()[0].dataset.needsReview).toBe('true')
+    // 確認するまでドラッグでも渡さない
+    expect(startDrag(cards()[0]).item).toBeFalsy()
+  })
+})

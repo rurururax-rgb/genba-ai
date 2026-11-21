@@ -93,7 +93,7 @@ describe('見積エディタ：行間 ＋（InsertGap）', () => {
   })
 
   it('空グループは同じメニューで先頭（index 0）に追加', () => {
-    expect(src).toContain('<EmptyGroupAdd disabled={addingRow} onPick={t => handleAddRowAt(group.id, 0, t)} />')
+    expect(src).toContain('<EmptyGroupAdd disabled={addingRow || dropSaving} onPick={t => handleAddRowAt(group.id, 0, t)} />')
   })
 
   it('タッチ端末（hover: none）では ＋ を常に薄く表示し、押せる大きさにする', () => {

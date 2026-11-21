@@ -55,7 +55,8 @@ describe('移動の状態：EstimateTab との配線', () => {
 
   it('移動中は行・工種のドラッグを無効にする', () => {
     expect(src).toContain('<Draggable key={group.id} draggableId={`group-${group.id}`} index={gi} isDragDisabled={moving}>')
-    expect(src.match(/<Draggable key=\{item\.id\} draggableId=\{`item-\$\{item\.id\}`\} index=\{idx\} isDragDisabled=\{moving\}>/g)).toHaveLength(2)
+    // 明細の行は、取り込み明細の保存中（dropSaving）も動かさない
+    expect(src.match(/<Draggable key=\{item\.id\} draggableId=\{`item-\$\{item\.id\}`\} index=\{idx\} isDragDisabled=\{moving \|\| dropSaving\}>/g)).toHaveLength(2)
   })
 
   it('移動中は行間 ＋ の代わりに「ここへ移動」（同じ行間・同じ groupId / 行 id を使う）', () => {

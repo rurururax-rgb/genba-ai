@@ -28,6 +28,8 @@ import { ProjectMarkupDialog } from './ProjectMarkupDialog'
 import { ItemMemoPopover, LockIcon } from './ItemMemoPopover'
 import { DetachableEstimateImportPanel } from './DetachableEstimateImportPanel'
 import { isImportDrag, onImportDragEnd, resolveImportDrop, type ImportDragItem } from '@/lib/estimate/import-drag'
+import { mergeSavedItems, pendingSlots, savedItemsFrom, type PendingDrop } from '@/lib/estimate/pending-drops'
+import { classifyImportResponse, findSavedImport, type ImportSignature } from '@/lib/estimate/import-result'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -1859,6 +1861,30 @@ function RevDiffModal({ rev, currentItems, fmt, onClose, fontFamily }: {
  * 取り込み明細のドラッグ中に、挿入される位置を緑の線で示す。
  * 高さを持たせない（線を出しても明細の位置がずれず、ドロップ位置が揺れない）
  */
+/** 取り込みの結果が分からなかったとき、DB を読み直して確かめる 2 回目までの待ち時間（遅れて保存されることがある） */
+const UNKNOWN_RECHECK_MS = 1500
+/** 確かめるための読み直し 1 回の待ち時間の上限（通信できないと Supabase の読み込みは再試行を続けるため） */
+const UNKNOWN_LOOKUP_TIMEOUT_MS = 3000
+
+/** 取り込み明細をドロップした直後の仮の行。保存が終わるまで編集・移動できず、合計にも入れない */
+function PendingImportRow({ drop }: { drop: PendingDrop }) {
+  return (
+    <div data-pending-row={drop.tempId} aria-busy="true" title="保存中です。保存が終わると見積の明細になります"
+      style={{
+        display: 'flex', alignItems: 'center', gap: 16, height: ROW_H, padding: '0 16px 0 56px',
+        borderBottom: '1px solid #EEF0F5', borderLeft: `3px solid ${C.accentTint}`, background: `${C.accentLight}80`,
+        fontFamily: FONT, fontSize: 13, color: C.textSub, pointerEvents: 'none', userSelect: 'none',
+      }}>
+      <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{drop.name}</span>
+      <span style={{ color: C.textMuted }}>{drop.quantity} {drop.unit}</span>
+      <span style={{ color: C.textMuted }}>原価 {drop.cost_price != null ? `¥${drop.cost_price.toLocaleString('ja-JP')}` : '未入力'}</span>
+      <span style={{ padding: '2px 10px', borderRadius: 10, background: drop.checking ? C.orange : C.accent, color: '#fff', fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap' }}>
+        {drop.checking ? '保存を確認中…' : '保存中…'}
+      </span>
+    </div>
+  )
+}
+
 function ImportDropLine({ edge }: { edge: 'top' | 'bottom' }) {
   return (
     <div data-testid="import-drop-line" data-edge={edge} aria-hidden="true"
@@ -1934,10 +1960,32 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   const [showImportModal, setShowImportModal] = useState(false)
   const [activeGroupTab, setActiveGroupTab] = useState<string | null>(null)
   const [dragOverGroupId, setDragOverGroupId] = useState<string | null>(null)
-  const [importDragTarget, setImportDragTarget] = useState<{ afterItemId: string | null; groupId: string } | null>(null)
+  const [importDragTarget, setImportDragTargetState] = useState<{ afterItemId: string | null; groupId: string } | null>(null)
+  // drop は最後の dragover の直後に届くことがあり、state がまだ描画に反映されていない。drop では ref の値を使う
+  const importDragTargetRef = useRef<{ afterItemId: string | null; groupId: string } | null>(null)
+  const setImportDragTarget = useCallback((v: { afterItemId: string | null; groupId: string } | null) => {
+    importDragTargetRef.current = v
+    setImportDragTargetState(v)
+  }, [])
   /** 取り込み明細のドロップを受け付けなかった理由（取り込みパネル側に出せないときだけ、見積エディタに出す） */
   const [importDropNotice, setImportDropNotice] = useState<string | null>(null)
   const importDropNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** ドロップして保存中の取り込み明細（仮の行）。items には入れない */
+  const [pendingDrops, setPendingDrops] = useState<PendingDrop[]>([])
+  const dropSaving = pendingDrops.length > 0
+  const dropSavingRef = useRef(false)
+  dropSavingRef.current = dropSaving
+  /** ドロップの保存は 1 件ずつ順に行う（並び順をドロップした順に決める） */
+  const dropChainRef = useRef<Promise<void>>(Promise.resolve())
+  const pendingSeqRef = useRef(0)
+  const mountedRef = useRef(true)
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false } }, [])
+  /** 登録の結果だと分かっている明細の ID（結果が分からなかった登録の照合で、ほかの登録の明細と取り違えない） */
+  const attributedIdsRef = useRef<Set<string>>(new Set())
+  /** 結果が分からなかったドロップ（取り込み候補 ID → 送る前に見えていた明細・送った中身）。同じ候補をもう一度ドロップしたら先に照合する */
+  const unknownDropsRef = useRef<Map<string, { knownIds: Set<string>; sig: ImportSignature }>>(new Map())
+  /** この見積エディタが出した genba:data-changed か（自分の変更では読み直さない） */
+  const changeOriginRef = useRef(`estimate-tab-${Math.random().toString(36).slice(2)}`)
   const [dragHoverTabId, setDragHoverTabId] = useState<string | 'all' | null>(null)
   const dragTabTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [showSummaryDetail, setShowSummaryDetail] = useState(false)
@@ -2070,12 +2118,22 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
 
   useEffect(() => {
     const handler = (e: Event) => {
-      const detail = (e as CustomEvent<{ target_table: string }>).detail
-      if (detail?.target_table === 'estimate_items') reload()
+      const detail = (e as CustomEvent<{ target_table: string; origin?: string; project_id?: string; items?: unknown }>).detail
+      if (detail?.target_table !== 'estimate_items') return
+      // この見積エディタ自身の変更は、保存結果を反映済みなので読み直さない
+      if (detail.origin && detail.origin === changeOriginRef.current) return
+      // 取り込みパネルの追加など、保存された明細が付いているときはそれを反映する（全件を読み直さない）
+      const saved = detail.project_id === projectId && Array.isArray(detail.items) ? savedItemsFrom<EstimateItem>(detail, detail.items.length) : null
+      if (saved && saved.length > 0) {
+        saved.forEach(i => attributedIdsRef.current.add(i.id))
+        setItems(prev => mergeSavedItems(prev, saved))
+        return
+      }
+      reload()
     }
     window.addEventListener('genba:data-changed', handler)
     return () => window.removeEventListener('genba:data-changed', handler)
-  }, [reload])
+  }, [reload, projectId])
 
   const loadRevisions = useCallback(async () => {
     const res = await fetch(`/api/estimate-revisions?project_id=${projectId}`)
@@ -2361,6 +2419,8 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
 
   function handleDragEnd(result: DropResult) {
     const { source, destination, type, draggableId } = result
+    // 取り込み明細の保存中は明細を動かさない（並び順がぶつかる）。行のドラッグも止めている
+    if (dropSavingRef.current && type !== 'GROUP') { setSelectedIds(new Set()); return }
     if (!destination) { setSelectedIds(new Set()); return }
 
     if (type === 'GROUP') {
@@ -2462,7 +2522,8 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   // 行間の ＋ から行を追加する。groupId（null = 未分類「その他」）と、そのグループ内の表示順での挿入位置だけで決める。
   // 前後に整数の空きがなければ先に既存の /reorder でグループを振り直し、失敗したら行は追加しない。
   async function handleAddRowAt(groupId: string | null, insertIndex: number, rowType: RowType = 'item') {
-    if (addingRow) return
+    // 取り込み明細の保存中は並び順がぶつかるので、行を追加しない（＋ も押せない）
+    if (addingRow || dropSavingRef.current) return
     setAddingRow(true)
     try {
       const scope = groupId ? itemsForGroup(groupId) : ungroupedItems
@@ -2502,7 +2563,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   const importDropsInFlight = useRef<Set<string>>(new Set())
 
   // ドラッグが見積エディタの外で終わったら、挿入位置の表示を消す（別ウィンドウで始めたドラッグも）
-  useEffect(() => onImportDragEnd(() => { setImportDragTarget(null); setDragOverGroupId(null); setDragHoverTabId(null) }), [])
+  useEffect(() => onImportDragEnd(() => { setImportDragTarget(null); setDragOverGroupId(null); setDragHoverTabId(null) }), [setImportDragTarget])
 
   function showImportDropNotice(msg: string) {
     setImportDropNotice(msg)
@@ -2524,26 +2585,16 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
     await handleDropImportItem(r.item, groupId, afterItemId)
   }
 
+  /**
+   * 取り込み明細のドロップ。すぐに仮の行（保存中）を出し、保存は 1 件ずつ順に行う。
+   * 保存できたら、登録 API が返した明細（売価・金額・並び順は DB の値）で仮の行を置き換える（全件は読み直さない）。
+   * 保存できなければ仮の行を消し、取り込みパネルの候補は残す（理由はパネルに出す）
+   */
   async function handleDropImportItem(
     row: ImportDragItem,
     groupId: string,
     afterItemId?: string | null
   ) {
-    // afterItemId が渡された場合は、その位置に入る sort_order を決める（「この位置に行を追加」と同じ planInsert）。
-    // 隣り合う行の sort_order に空きがない（1, 2, 3 …）ときは、先に工種内を振り直して空ける
-    // （以前は中間値を丸めて隣の行と同じ値になり、指定した位置の 1 行後ろに入ることがあった）
-    let insertSortOrder: number | undefined
-    let renumber: { id: string; sort_order: number }[] = []
-    if (afterItemId !== undefined) {
-      const gItems = itemsForGroup(groupId)
-      const insertIndex = afterItemId === null ? 0 : gItems.findIndex(i => i.id === afterItemId) + 1
-      if (afterItemId === null || insertIndex > 0) {
-        const plan = planInsert(gItems, insertIndex)
-        insertSortOrder = plan.sortOrder
-        renumber = plan.renumber
-      }
-    }
-
     // 同じ取り込み候補の連続ドロップで二重に追加しない（取り込みタブにも送信中を伝え、追加ボタンを止める）
     const importId = row._importId
     if (importId) {
@@ -2551,17 +2602,106 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       importDropsInFlight.current.add(importId)
       window.dispatchEvent(new CustomEvent('genba:import-item-adding', { detail: { importId } }))
     }
+    const drop: PendingDrop = {
+      tempId: `pending-${++pendingSeqRef.current}`, importId, groupId, afterItemId,
+      name: row.name, quantity: row.quantity, unit: row.unit, cost_price: row.cost_price,
+    }
+    setPendingDrops(prev => [...prev, drop])
+    const run = dropChainRef.current.then(() => saveImportDrop(row, drop))
+    dropChainRef.current = run.catch(() => {})
+    await run
+  }
+
+  /**
+   * DB の明細を読み直して画面に出し、結果が分からなかった登録が入っているか探す。
+   * 'found' = 入っていた / 'not_found' = 見つからない / 'unverifiable' = 読み直せない（通信できない・画面を閉じた）
+   */
+  async function lookUpUnknownImport(knownIds: Set<string>, sig: ImportSignature, waits: number[]): Promise<{ result: 'found' | 'not_found' | 'unverifiable'; id?: string }> {
+    let verified = false
+    for (const wait of waits) {
+      if (wait) await new Promise(r => setTimeout(r, wait))
+      if (!mountedRef.current) return { result: 'unverifiable' }
+      const r = await Promise.race([
+        loadItems().catch(() => null),
+        new Promise<null>(resolve => setTimeout(() => resolve(null), UNKNOWN_LOOKUP_TIMEOUT_MS)),
+      ])
+      if (!r || r.error || !r.data) continue
+      verified = true
+      const list = r.data as EstimateItem[]
+      itemsRef.current = list
+      setItems(list)
+      const hit = findSavedImport(list, knownIds, attributedIdsRef.current, sig)
+      if (hit) return { result: 'found', id: hit.id }
+    }
+    return { result: verified ? 'not_found' : 'unverifiable' }
+  }
+
+  async function saveImportDrop(row: ImportDragItem, drop: PendingDrop) {
+    const { importId, groupId, afterItemId } = drop
+    const fail = (error: string, uncertain = false) => {
+      if (importId) window.dispatchEvent(new CustomEvent('genba:import-item-failed', { detail: { importId, error, ...(uncertain ? { uncertain: true } : {}) } }))
+    }
+    const succeeded = () => {
+      // ほかの画面への通知は従来どおり。この見積エディタは origin で自分の変更と分かるので読み直さない
+      window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items', origin: changeOriginRef.current } }))
+      if (importId) window.dispatchEvent(new CustomEvent('genba:import-item-moved', { detail: { importId } }))
+    }
     try {
+      // 保存を待つ間に見積エディタを閉じた（画面を切り替えた）ときは、まだ送っていないものは送らない
+      if (!mountedRef.current) { fail('画面を切り替えたため、この明細は追加していません。もう一度ドラッグしてください'); return }
+
+      // 前回の追加の結果が分からなかった候補は、送る前にもう一度 DB を確かめる（遅れて保存されていたら送らない）
+      const earlier = importId ? unknownDropsRef.current.get(importId) : undefined
+      if (earlier) {
+        const { sortOrder: _ignored, ...sigWithoutOrder } = earlier.sig
+        void _ignored
+        const check = await lookUpUnknownImport(earlier.knownIds, sigWithoutOrder, [0])
+        if (check.result === 'found') {
+          attributedIdsRef.current.add(check.id!)
+          unknownDropsRef.current.delete(importId)
+          showImportDropNotice('前回の追加が保存されていました。二重に登録しないよう、もう一度は追加していません')
+          succeeded()
+          return
+        }
+        if (check.result === 'unverifiable') {
+          fail('前回の追加が保存されたか、まだ確認できません。通信が戻ってから、見積に同じ明細がないか確かめて追加してください', true)
+          return
+        }
+        unknownDropsRef.current.delete(importId)
+      }
+
+      // afterItemId が渡された場合は、その位置に入る sort_order を決める（「この位置に行を追加」と同じ planInsert）。
+      // 隣り合う行の sort_order に空きがない（1, 2, 3 …）ときは、先に工種内を振り直して空ける。
+      // 並び順は保存する直前の明細（前のドロップの保存結果を含む）で決める
+      let insertSortOrder: number | undefined
+      let renumber: { id: string; sort_order: number }[] = []
+      if (afterItemId !== undefined) {
+        const gItems = itemsRef.current.filter(i => i.group_id === groupId).sort((a, b) => a.sort_order - b.sort_order)
+        const insertIndex = afterItemId === null ? 0 : gItems.findIndex(i => i.id === afterItemId) + 1
+        if (afterItemId === null || insertIndex > 0) {
+          const plan = planInsert(gItems, insertIndex)
+          insertSortOrder = plan.sortOrder
+          renumber = plan.renumber
+        }
+      }
+
       if (renumber.length > 0) {
         try {
           await persistReorder([], renumber.map(r => ({ id: r.id, sort_order: r.sort_order, group_id: groupId })))
         } catch {
-          if (importId) window.dispatchEvent(new CustomEvent('genba:import-item-failed', { detail: { importId, error: 'この位置に入れるための並び替えを保存できませんでした。明細は追加されていません。もう一度お試しください' } }))
+          fail('この位置に入れるための並び替えを保存できませんでした。明細は追加されていません。もう一度お試しください')
+          // /reorder は途中まで保存されていることがあるので、DB の並びを読み直す
+          await reload()
           return
         }
         const next = new Map(renumber.map(r => [r.id, r.sort_order]))
-        setItems(prev => prev.map(i => next.has(i.id) ? { ...i, sort_order: next.get(i.id)! } : i))
+        const apply = (list: EstimateItem[]) => list.map(i => next.has(i.id) ? { ...i, sort_order: next.get(i.id)! } : i)
+        itemsRef.current = apply(itemsRef.current)
+        setItems(apply)
       }
+      // 送る前に見えていた明細（結果が分からなかったときの照合に使う）
+      const knownIds = new Set(itemsRef.current.map(i => i.id))
+      const sig: ImportSignature = { groupId, name: row.name, quantity: row.quantity, unit: row.unit, cost_price: row.cost_price, sortOrder: insertSortOrder }
       const res = await fetch('/api/estimate-items/import', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2570,14 +2710,38 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
           items: [{ name: row.name, quantity: row.quantity, unit: row.unit, cost_price: row.cost_price, vendor_name: row.vendor_name || null, internal_memo: row.memo || null }],
         }),
       }).catch(() => null)
-      if (res?.ok) {
-        window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items' } }))
-        if (importId) window.dispatchEvent(new CustomEvent('genba:import-item-moved', { detail: { importId } }))
-      } else if (importId) {
-        const d = res ? await res.json().catch(() => null) as { error?: string } | null : null
-        window.dispatchEvent(new CustomEvent('genba:import-item-failed', { detail: { importId, error: d?.error ?? '見積への追加に失敗しました' } }))
+      const outcome = await classifyImportResponse(res)
+
+      if (outcome.kind === 'saved') {
+        const saved = savedItemsFrom<EstimateItem>(outcome.body, 1)
+        if (saved) {
+          saved.forEach(i => attributedIdsRef.current.add(i.id))
+          itemsRef.current = mergeSavedItems(itemsRef.current, saved)
+          setItems(prev => mergeSavedItems(prev, saved))
+        } else {
+          // 保存された明細が返らなかった（古いサーバー・本文の途中で切れた）ときは従来どおり読み直す
+          await reload()
+        }
+        succeeded()
+        return
       }
+      if (outcome.kind === 'rejected') { fail(outcome.error); return }
+
+      // 結果が分からない（応答が届かない・ゲートウェイのエラー）。保存されていることがあるので、
+      // 「失敗・もう一度どうぞ」とは扱わず、DB を読み直して確かめる（遅れて保存されることがあるので少し待って 2 回）
+      setPendingDrops(prev => prev.map(p => (p.tempId === drop.tempId ? { ...p, checking: true } : p)))
+      const check = await lookUpUnknownImport(knownIds, sig, [0, UNKNOWN_RECHECK_MS])
+      if (check.result === 'found') {
+        attributedIdsRef.current.add(check.id!)
+        succeeded()
+        return
+      }
+      if (importId) unknownDropsRef.current.set(importId, { knownIds, sig })
+      fail(check.result === 'not_found'
+        ? '通信が途切れ、保存できたか確認できませんでした。見積を読み直したところ、この明細は見つかりませんでした。見積に同じ明細がないことを確かめてから、もう一度追加してください'
+        : '通信が途切れ、保存できたか確認できませんでした。二重に登録しないよう、通信が戻ってから見積に同じ明細がないか確かめて追加してください', true)
     } finally {
+      setPendingDrops(prev => prev.filter(p => p.tempId !== drop.tempId))
       if (importId) importDropsInFlight.current.delete(importId)
     }
   }
@@ -2827,6 +2991,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   // 移動先の行間を押したとき。並びは planMove（元の表示順のまま dest の位置へ）で決め、/reorder で保存する。
   // 成功しても失敗しても DB を読み直し、実際に保存された並びを表示する（/reorder は途中まで保存されうる）
   async function confirmMove(dest: MoveDestination) {
+    if (dropSavingRef.current) { alert('取り込んだ明細を保存しています。保存が終わってから移動してください。'); return }
     if (!moveIds) return
     const updates = planMove(items, moveIds, groups.map(g => g.id), dest)
     finishMove()
@@ -3420,6 +3585,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                   <div ref={provided.innerRef} {...provided.droppableProps}>
                     {displayedGroups.map((group, gi) => {
                       const gItems    = itemsForGroup(group.id)
+                      const gPending  = pendingSlots(gItems.map(i => i.id), pendingDrops, group.id)
                       const gTotal    = gItems.reduce((acc, i) => acc + liveAmount(i), 0)
                       const gCostTotal = gItems.reduce((acc, i) => acc + ((i.cost_price ?? 0) * i.quantity), 0)
                       const isOpen    = !collapsed[group.id]
@@ -3475,7 +3641,8 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                 onDrop={async e => {
                                   if (!isImportDrag(e.dataTransfer)) return
                                   e.preventDefault()
-                                  const afterItemId = importDragTarget?.groupId === group.id ? importDragTarget.afterItemId : undefined
+                                  const target = importDragTargetRef.current
+                                  const afterItemId = target?.groupId === group.id ? target.afterItemId : undefined
                                   setDragOverGroupId(null)
                                   setImportDragTarget(null)
                                   await handleImportDrop(e.dataTransfer, group.id, afterItemId)
@@ -3513,7 +3680,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                         const showIndicatorBefore = importDragTarget?.groupId === group.id && importDragTarget?.afterItemId === prevId
                                         const showIndicatorAfter  = importDragTarget?.groupId === group.id && importDragTarget?.afterItemId === item.id && idx === gItems.length - 1
                                         return (
-                                        <Draggable key={item.id} draggableId={`item-${item.id}`} index={idx} isDragDisabled={moving}>
+                                        <Draggable key={item.id} draggableId={`item-${item.id}`} index={idx} isDragDisabled={moving || dropSaving}>
                                           {(ip, is) => (
                                             <div ref={ip.innerRef} {...ip.draggableProps} style={ip.draggableProps.style}
                                               onDragOver={e => {
@@ -3526,12 +3693,15 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                                 const mid  = rect.top + rect.height / 2
                                                 const afterItemId = e.clientY < mid ? (idx === 0 ? null : gItems[idx - 1].id) : item.id
                                                 // dragover は連続して届くので、位置が変わったときだけ描き直す
-                                                if (importDragTarget?.groupId !== group.id || importDragTarget.afterItemId !== afterItemId) {
+                                                const cur = importDragTargetRef.current
+                                                if (cur?.groupId !== group.id || cur.afterItemId !== afterItemId) {
                                                   setImportDragTarget({ afterItemId, groupId: group.id })
                                                 }
                                               }}
                                             >
                                               {showIndicatorBefore && !is.isDragging && <ImportDropLine edge="top" />}
+                                              {/* 保存中の仮の行も Draggable の兄弟にせず、この行の中に置く（PageBreakRow と同じ理由） */}
+                                              {idx === 0 && gPending.head.map(d => <PendingImportRow key={d.tempId} drop={d} />)}
                                               <div className="est-row-wrap" style={{ position: 'relative', paddingBottom: nextPb ? 30 : 0 }}>
                                                 {/* 行間 ＋：この行の上端 = index idx（先頭行なら先頭）。最終行だけ下端（= 末尾）も持つ。
                                                     移動中は同じ行間が「ここへ移動」になる（この行の前 / 末尾） */}
@@ -3547,11 +3717,11 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                                 ) : (
                                                   <>
                                                     {!dndDragging && !is.isDragging && (
-                                                      <InsertGap edge="top" disabled={addingRow} label="この位置に行を追加"
+                                                      <InsertGap edge="top" disabled={addingRow || dropSaving} label="この位置に行を追加"
                                                         onPick={t => handleAddRowAt(group.id, idx, t)} />
                                                     )}
                                                     {!dndDragging && !is.isDragging && idx === gItems.length - 1 && (
-                                                      <InsertGap edge="bottom" disabled={addingRow} label="末尾に行を追加"
+                                                      <InsertGap edge="bottom" disabled={addingRow || dropSaving} label="末尾に行を追加"
                                                         onPick={t => handleAddRowAt(group.id, gItems.length, t)} />
                                                     )}
                                                   </>
@@ -3579,6 +3749,8 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                                   </div>
                                                 )}
                                               </div>
+                                              {gPending.after.get(item.id)?.map(d => <PendingImportRow key={d.tempId} drop={d} />)}
+                                              {idx === gItems.length - 1 && gPending.end.map(d => <PendingImportRow key={d.tempId} drop={d} />)}
                                               {showIndicatorAfter && !is.isDragging && <ImportDropLine edge="bottom" />}
                                             </div>
                                           )}
@@ -3586,10 +3758,11 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                         )
                                       })}
                                       {dp.placeholder}
+                                      {gItems.length === 0 && gPending.end.map(d => <PendingImportRow key={d.tempId} drop={d} />)}
                                       {gItems.length === 0 && (moving
                                         ? <MoveTargetBlock label={moveTargetLabel(group.label, null)} text="ここへ移動"
                                             onPick={() => confirmMove({ groupId: group.id, beforeId: null })} />
-                                        : <EmptyGroupAdd disabled={addingRow} onPick={t => handleAddRowAt(group.id, 0, t)} />
+                                        : <EmptyGroupAdd disabled={addingRow || dropSaving} onPick={t => handleAddRowAt(group.id, 0, t)} />
                                       )}
                                     </div>
                                   )}
@@ -3649,7 +3822,7 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                       <div ref={dp.innerRef} {...dp.droppableProps}
                         style={{ minHeight: 32, background: ds.isDraggingOver ? `${C.accent}08` : 'transparent', transition: 'background 0.12s' }}>
                         {ungroupedItems.map((item, idx) => (
-                          <Draggable key={item.id} draggableId={`item-${item.id}`} index={idx} isDragDisabled={moving}>
+                          <Draggable key={item.id} draggableId={`item-${item.id}`} index={idx} isDragDisabled={moving || dropSaving}>
                             {(ip, is) => (
                               <div ref={ip.innerRef} {...ip.draggableProps} style={ip.draggableProps.style}>
                                 <div className="est-row-wrap" style={{ position: 'relative' }}>
@@ -3665,11 +3838,11 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
                                 ) : (
                                   <>
                                     {!dndDragging && !is.isDragging && (
-                                      <InsertGap edge="top" disabled={addingRow} label="この位置に行を追加"
+                                      <InsertGap edge="top" disabled={addingRow || dropSaving} label="この位置に行を追加"
                                         onPick={t => handleAddRowAt(null, idx, t)} />
                                     )}
                                     {!dndDragging && !is.isDragging && idx === ungroupedItems.length - 1 && (
-                                      <InsertGap edge="bottom" disabled={addingRow} label="末尾に行を追加"
+                                      <InsertGap edge="bottom" disabled={addingRow || dropSaving} label="末尾に行を追加"
                                         onPick={t => handleAddRowAt(null, ungroupedItems.length, t)} />
                                     )}
                                   </>
