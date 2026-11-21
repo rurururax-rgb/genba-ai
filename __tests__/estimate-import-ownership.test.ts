@@ -23,6 +23,8 @@ const G_B1 = 'group-b1'
 
 let currentUser: string | null
 let insertSeq = 0
+/** 次の insert を失敗させる（code 無し = Supabase との通信断の再現） */
+let insertError: { message: string; code?: string } | null = null
 let tables: Record<string, Row[]>
 
 function seed() {
@@ -84,7 +86,13 @@ function from(table: string) {
     single: () => one(true),
     maybeSingle: () => one(false),
     // insert(rows).select(cols) … 登録した行（DB が付けた id を含む）を返す
+    in: (col: string, vs: unknown[]) => { filters.push(r => vs.includes(r[col])); return q },
     insert: (rows: Row[]) => {
+      if (insertError) {
+        const e = insertError; insertError = null
+        const failed = { data: null, error: e }
+        return { select: () => Promise.resolve(failed), then: (f: (v: typeof failed) => unknown) => Promise.resolve(failed).then(f) }
+      }
       const mine = new Set(visible('company_members').map(r => r.company_id))
       // RLS（WITH CHECK = USING）は company_id だけを見る
       const result = rows.some(r => !mine.has(r.company_id))
@@ -121,6 +129,7 @@ const itemCount = () => tables.estimate_items.length
 const imported = () => tables.estimate_items.filter(r => r.source === 'import')
 
 beforeEach(() => {
+  insertError = null
   currentUser = ME
   seed()
 })
@@ -254,5 +263,48 @@ describe('見積取込: 行の形が正しくなければ 400 で断り、1行�
     const r = await post({ project_id: P_A1, group_id: G_A1, items: [{ ...ITEM, cost_price: null, quantity: null }] })
     expect(r.status).toBe(200)
     expect(imported()).toEqual([expect.objectContaining({ cost_price: null, selling_price: null, quantity: 1 })])
+  })
+})
+
+describe('見積取込: エラー応答の「1 件も入っていない」の明示（not_saved）', () => {
+  it('DB が断った（コードのあるエラー）→ 500・not_saved: true', async () => {
+    insertError = { message: 'violates check constraint', code: '23514' }
+    const r = await post({ project_id: P_A1, group_id: G_A1, items: [ITEM] })
+    expect(r).toEqual({ status: 500, json: { error: 'violates check constraint', not_saved: true } })
+  })
+
+  it('Supabase との通信が途切れた（コードの無いエラー）→ コミット済みのことがあるので 503・not_saved: false', async () => {
+    insertError = { message: 'TypeError: fetch failed', code: '' }
+    const r = await post({ project_id: P_A1, group_id: G_A1, items: [ITEM] })
+    expect(r.status).toBe(503)
+    expect(r.json).toMatchObject({ not_saved: false })
+  })
+
+  it('社内メモ列が無い（42703）→ 500・not_saved: true（従来の案内のまま）', async () => {
+    insertError = { message: 'column "internal_memo" does not exist', code: '42703' }
+    const r = await post({ project_id: P_A1, group_id: G_A1, items: [ITEM] })
+    expect(r.status).toBe(500)
+    expect(r.json).toMatchObject({ error: expect.stringContaining('社内メモ欄'), not_saved: true })
+  })
+
+  it('本文が JSON でない（登録の前の例外）→ 500・not_saved: true', async () => {
+    const { POST } = await import('@/app/api/estimate-items/import/route')
+    const res = await POST(new NextRequest('http://localhost/api/estimate-items/import', { method: 'POST', body: '{' }))
+    expect(res.status).toBe(500)
+    expect(await res.json()).toMatchObject({ not_saved: true })
+  })
+
+  it('登録 ID 付きでも、Supabase との通信断は 503・not_saved: false', async () => {
+    insertError = { message: 'TypeError: fetch failed', code: '' }
+    const r = await post({ project_id: P_A1, group_id: G_A1, items: [{ ...ITEM, import_request_id: '11111111-2222-4333-8444-555555555555' }] })
+    expect(r.status).toBe(503)
+    expect(r.json).toMatchObject({ not_saved: false })
+  })
+
+  it('4xx はすべて登録前（所有確認・形式）で、1 件も入らない', async () => {
+    const before = itemCount()
+    expect((await post({ project_id: P_B1, items: [ITEM] })).status).toBe(404)
+    expect((await post({ project_id: P_A1, items: [{ ...ITEM, import_request_id: 'x' }] })).status).toBe(400)
+    expect(itemCount()).toBe(before)
   })
 })

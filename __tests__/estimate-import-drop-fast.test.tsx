@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import React, { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { IMPORT_DRAG_TYPE, resetImportDragForTest, startImportDrag } from '@/lib/estimate/import-drag'
+import { noteImportResponse, resetImportIdempotencyForTest } from '@/lib/estimate/import-result'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -78,6 +79,7 @@ beforeEach(() => {
   db.items = [row(201, 0), row(202, 1), row(203, 2)]
   calls = []; autoImport = null; events = []
   resetImportDragForTest()
+  resetImportIdempotencyForTest()
   container = document.createElement('div')
   document.body.appendChild(container)
   root = createRoot(container)
@@ -124,8 +126,8 @@ function dragEvent(type: string, token: string) {
 }
 
 /** 取り込みパネルの明細を、明細 n の直後へドロップする（jsdom は座標が 0 なので、dragover した行の直後になる） */
-async function dropAfter(n: number, importId: string, name: string, cost: number | null = 100000) {
-  const token = startImportDrag({ projectId: P, item: { _importId: importId, name, quantity: 1, unit: '台', cost_price: cost, vendor_name: '架空設備', memo: '' }, check: () => null })
+async function dropAfter(n: number, importId: string, name: string, cost: number | null = 100000, requestId?: string) {
+  const token = startImportDrag({ projectId: P, item: { _importId: importId, name, quantity: 1, unit: '台', cost_price: cost, vendor_name: '架空設備', memo: '', ...(requestId ? { import_request_id: requestId } : {}) }, check: () => null })
   await act(async () => { rowEl(n).dispatchEvent(dragEvent('dragover', token)) })
   await act(async () => { rowEl(n).dispatchEvent(dragEvent('drop', token)) })
   await flush()
@@ -164,7 +166,7 @@ describe('ドロップ直後の表示と保存', () => {
     await renderTab()
     await dropAfter(203, 'imp-1', '架空 給湯器')
     expect(pendingRows()).toHaveLength(1)
-    await act(async () => imports()[0].release(json({ error: '架空の保存エラー' }, 500)))
+    await act(async () => imports()[0].release(json({ error: '架空の保存エラー', not_saved: true }, 500)))
     await flush()
     expect(pendingRows()).toHaveLength(0)
     expect(document.querySelectorAll('[data-row-id]')).toHaveLength(3)
@@ -399,7 +401,7 @@ describe('連続保存の途中の失敗・ほかの読み直し', () => {
   it('10 件のうち 4 件目だけ失敗 → 後続は続けて保存し、並び順は崩れない。失敗した明細は入らない', async () => {
     await renderTab()
     let n = 0
-    autoImport = body => { n++; if (n === 4) return json({ error: '架空の保存エラー' }, 500); const r = insertIntoDb(body); return json({ created: 1, items: [r] }) }
+    autoImport = body => { n++; if (n === 4) return json({ error: '架空の保存エラー', not_saved: true }, 500); const r = insertIntoDb(body); return json({ created: 1, items: [r] }) }
     for (let i = 1; i <= 10; i++) await dropAfter(203, `imp-${i}`, `架空 連続${String(i).padStart(2, '0')}`)
     await flush(50)
     expect(imports()).toHaveLength(10)
@@ -435,5 +437,78 @@ describe('連続保存の途中の失敗・ほかの読み直し', () => {
     await flush(1700)
     expect(failedEvents()).toEqual([expect.objectContaining({ importId: 'imp-1', uncertain: true })])
     root = createRoot(container)
+  })
+})
+
+describe('登録 ID（import_request_id）', () => {
+  const RID = '11111111-2222-4333-8444-555555555555'
+  beforeEach(() => { seq = 300 })
+
+  it('取り込み候補の登録 ID を登録 API に送る', async () => {
+    await renderTab()
+    autoImport = body => savedReply(301, body)
+    await dropAfter(203, 'imp-1', '架空 給湯器', 100000, RID)
+    await flush()
+    expect((imports()[0].body.items as Array<Record<string, unknown>>)[0].import_request_id).toBe(RID)
+  })
+
+  it('登録 API が二重登録を防げると分かっていれば、結果が分からないとき同じ ID で 1 回だけ送り直し、保存済みの明細で確定する（照合の読み直しなし）', async () => {
+    noteImportResponse({ idempotent: true })
+    await renderTab()
+    let n = 0
+    let savedRow: ReturnType<typeof row> | null = null
+    autoImport = body => {
+      n++
+      if (n === 1) { savedRow = insertIntoDb(body); return lost() }   // 保存後に応答だけ失う
+      return json({ created: 0, replayed: 1, idempotent: true, items: [savedRow] })   // 同じ ID の再送 → 保存済みを返す
+    }
+    await dropAfter(203, 'imp-1', '架空 給湯器', 100000, RID)
+    await flush(1000)
+    expect(imports()).toHaveLength(2)
+    expect(imports().map(c => (c.body.items as Array<Record<string, unknown>>)[0].import_request_id)).toEqual([RID, RID])
+    expect(rowsNamed('架空 給湯器')).toHaveLength(1)
+    expect(movedIds()).toEqual(['imp-1'])
+    expect(failedEvents()).toEqual([])
+    expect(db.itemsCalls).toBe(1)
+  })
+
+  it('二重登録を防げるか分からない（idempotent の応答をまだ受けていない）ときは自動で送り直さず、DB で照合する', async () => {
+    await renderTab()
+    autoImport = body => { insertIntoDb(body); return lost() }
+    await dropAfter(203, 'imp-1', '架空 給湯器', 100000, RID)
+    await flush(10)
+    expect(imports()).toHaveLength(1)
+    expect(db.itemsCalls).toBe(2)
+    expect(movedIds()).toEqual(['imp-1'])
+  })
+
+  it('migration 未適用の応答（idempotent: false）を受けたら、結果が分からなくても送り直さない', async () => {
+    noteImportResponse({ idempotent: true })
+    noteImportResponse({ idempotent: false })
+    await renderTab()
+    autoImport = () => lost()
+    await dropAfter(203, 'imp-1', '架空 給湯器', 100000, RID)
+    await flush(1700)
+    expect(imports()).toHaveLength(1)
+    expect(failedEvents()).toEqual([expect.objectContaining({ uncertain: true })])
+  })
+
+  it('同じ登録 ID が違う内容で登録済み（409）→ 見積を読み直し、取り込みパネルに conflict を返す（uncertain ではない）', async () => {
+    await renderTab()
+    autoImport = () => json({ error: '前回の送信で、違う内容で登録されています', code: 'import_request_conflict', not_saved: true, import_request_id: RID }, 409)
+    await dropAfter(203, 'imp-1', '架空 給湯器', 100000, RID)
+    await flush(10)
+    expect(db.itemsCalls).toBe(2)
+    expect(failedEvents()).toEqual([{ importId: 'imp-1', error: '前回の送信で、違う内容で登録されています', conflict: true }])
+    expect(pendingRows()).toHaveLength(0)
+  })
+
+  it('結果が分からないとき not_saved の無い 503（API と DB の通信断）も「分からない」として扱う', async () => {
+    await renderTab()
+    autoImport = body => { insertIntoDb(body); return json({ error: 'データベースとの通信が途切れました', not_saved: false }, 503) }
+    await dropAfter(203, 'imp-1', '架空 給湯器', 100000, RID)
+    await flush(10)
+    expect(rowsNamed('架空 給湯器')).toHaveLength(1)
+    expect(movedIds()).toEqual(['imp-1'])
   })
 })

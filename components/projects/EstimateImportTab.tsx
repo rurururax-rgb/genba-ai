@@ -8,7 +8,10 @@ import {
 } from '@/lib/estimate/ocr-extraction'
 import { checkEstimateImageFile, formatMegabytes, prepareEstimateImage, type PreparedImage } from '@/lib/estimate/ocr-image'
 import { IMPORT_DRAG_TYPE, endImportDrag, startImportDrag } from '@/lib/estimate/import-drag'
-import { UNKNOWN_SAVE_WARNING, classifyImportResponse } from '@/lib/estimate/import-result'
+import {
+  IDEMPOTENT_RETRY_MS, IMPORT_CONFLICT_CODES, IMPORT_CONFLICT_WARNING, UNKNOWN_SAVE_WARNING,
+  classifyImportResponse, fileSha256, importRequestIdFor, isImportIdempotent, newImportRequestId,
+} from '@/lib/estimate/import-result'
 import { EstimateSourceViewer } from './EstimateSourceViewer'
 
 // ── 型定義 ────────────────────────────────────────────────
@@ -36,6 +39,13 @@ type CandidateRow = {
   memo: string
   /** 前回の追加の結果が分からなかった（通信が途切れた）。保存されていることがあるので、確認するまで追加させない */
   saveUnknown?: boolean
+  /**
+   * 登録 ID（estimate_items.import_request_id）。この候補を送るたび（ドラッグ・個別追加・一括追加・再送）に同じ値を送り、
+   * 登録 API が同じ ID の明細を 1 行だけにする。新しくするのは、登録済み（409）と分かったうえで人が別の明細として追加するときだけ
+   */
+  requestId: string
+  /** 同じ登録 ID が違う内容で登録済み・削除済み（409）。人が確認したら新しい登録 ID で送る */
+  requestConflict?: boolean
   messages: OcrMessage[]
 }
 
@@ -63,8 +73,19 @@ function withReview(r: Omit<CandidateRow, 'messages'>): CandidateRow {
     cost_price: r.cost_price, cost_from: r.cost_from,
     list_price: r.list_price, rate: r.rate, amount: r.amount,
   })
-  // 結果の分からなかった追加は「要確認」にする（「確認したので追加する」まで追加・ドラッグできない）
-  return { ...r, messages: r.saveUnknown ? [{ level: 'warn', text: UNKNOWN_SAVE_WARNING }, ...messages] : messages }
+  // 結果の分からなかった追加・登録済みと分かった追加は「要確認」にする（「確認したので追加する」まで追加・ドラッグできない）
+  const extra: OcrMessage[] = [
+    ...(r.requestConflict ? [{ level: 'warn' as const, text: IMPORT_CONFLICT_WARNING }] : []),
+    ...(r.saveUnknown && !r.requestConflict ? [{ level: 'warn' as const, text: UNKNOWN_SAVE_WARNING }] : []),
+  ]
+  return { ...r, messages: [...extra, ...messages] }
+}
+
+/** 同じ登録 ID が登録済み（409）と分かった行。確認するまで追加させない */
+function markRequestConflict(r: CandidateRow): CandidateRow {
+  const { messages: _m, ...rest } = r
+  void _m
+  return withReview({ ...rest, requestConflict: true, acked: false })
 }
 
 /** 前回の追加の結果が分からなかった行を、もう一度確認するまで追加できないようにする */
@@ -78,6 +99,7 @@ function toCandidate(item: Partial<EstimateOcrItem>, file: File): CandidateRow {
   const quantity = toOcrNumber(item.quantity)
   return withReview({
     id: uid(),
+    requestId: newImportRequestId(),
     fileName: file.name,
     fileKey: fileKey(file),
     acked: false,
@@ -102,6 +124,7 @@ const warnTexts = (m: OcrMessage[]) => m.filter(x => x.level === 'warn').map(x =
 const toImportItem = (r: CandidateRow) => ({
   name: r.name, quantity: r.quantity, unit: r.unit, cost_price: r.cost_price,
   vendor_name: r.vendor_name || null, internal_memo: r.memo || null,
+  import_request_id: r.requestId,
 })
 
 /** 応答を JSON として読む（Vercel が 413 などを JSON 以外で返す場合がある） */
@@ -236,7 +259,17 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
   /** 人が確認した行と、その取り込み元の画像を確認済みにする */
   function acknowledge(targets: CandidateRow[]) {
     const ids = new Set(targets.map(r => r.id))
-    setRows(prev => prev.map(r => (ids.has(r.id) ? { ...r, acked: true } : r)))
+    // 登録済み（409）と分かったうえでの確認は「別の明細として追加する」操作なので、新しい登録 ID にする。
+    // 結果が分からなかっただけの行は同じ ID のまま（保存済みなら登録 API が同じ明細を返し、二重に入らない）
+    const fresh = (r: CandidateRow): CandidateRow => {
+      if (!r.requestConflict) return { ...r, acked: true }
+      const { messages: _m, ...rest } = r
+      void _m
+      return withReview({ ...rest, requestConflict: false, saveUnknown: false, requestId: newImportRequestId(), acked: true })
+    }
+    // 送信は呼び出し側が targets（確認前の行）から作るので、同じ変換を rowsRef にもすぐ反映する
+    rowsRef.current = rowsRef.current.map(r => (ids.has(r.id) ? fresh(r) : r))
+    setRows(prev => prev.map(r => (ids.has(r.id) ? fresh(r) : r)))
     setAckedFiles(prev => new Set([...prev, ...targets.map(r => r.fileKey)]))
   }
 
@@ -270,9 +303,10 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
       fadeRemove(importId, runRef.current)
     }
     const failed = (e: Event) => {
-      const { importId, error: msg, uncertain } = (e as CustomEvent<{ importId: string; error?: string; uncertain?: boolean }>).detail
+      const { importId, error: msg, uncertain, conflict } = (e as CustomEvent<{ importId: string; error?: string; uncertain?: boolean; conflict?: boolean }>).detail
       markAdding([importId], false)
-      if (uncertain) setRows(prev => prev.map(r => (r.id === importId ? markSaveUnknown(r) : r)))
+      if (conflict) setRows(prev => prev.map(r => (r.id === importId ? markRequestConflict(r) : r)))
+      else if (uncertain) setRows(prev => prev.map(r => (r.id === importId ? markSaveUnknown(r) : r)))
       setError(msg || '見積への追加に失敗しました')
     }
     window.addEventListener('genba:import-item-adding', adding)
@@ -385,7 +419,11 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
       return []
     }
     const fr = fileResults[0]
-    const items = (Array.isArray(fr.items) ? fr.items : []).map(it => toCandidate(it, file)).filter(r => r.name)
+    // 登録 ID は案件・画像・行番号から決める（再読み込みして同じ画像を読み直しても同じ ID）
+    const sha = await fileSha256(file)
+    const items = (await Promise.all((Array.isArray(fr.items) ? fr.items : []).map(async (it, idx) => ({
+      ...toCandidate(it, file), requestId: await importRequestIdFor(projectId, sha, idx),
+    })))).filter(r => r.name)
     const messages = Array.isArray(fr.messages) ? fr.messages : []
     // 旧形式の応答（raw_warning）も注意書きとして出す
     const legacy = (fr as { raw_warning?: unknown }).raw_warning
@@ -466,20 +504,40 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
   }
 
   async function postImport(targets: CandidateRow[]): Promise<boolean> {
-    const res = await fetch('/api/estimate-items/import', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ project_id: projectId, items: targets.map(toImportItem) }),
-    }).catch(() => null)
-    const outcome = await classifyImportResponse(res, '追加に失敗しました。通信状態を確認してもう一度お試しください')
+    // 確認で登録 ID を新しくした行があるので、送る直前の行（rowsRef）から作る
+    const latest = targets.map(t => rowsRef.current.find(r => r.id === t.id) ?? t)
+    const body = JSON.stringify({ project_id: projectId, items: latest.map(toImportItem) })
+    const send = async () => classifyImportResponse(
+      await fetch('/api/estimate-items/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }).catch(() => null),
+      '追加に失敗しました。通信状態を確認してもう一度お試しください',
+    )
+    let outcome = await send()
+    // 結果が分からないとき、登録 API が登録 ID で二重登録を防げると分かっていれば、同じ ID で 1 回だけ送り直す
+    if (outcome.kind === 'unknown' && isImportIdempotent()) {
+      await new Promise(r => setTimeout(r, IDEMPOTENT_RETRY_MS))
+      outcome = await send()
+    }
     if (outcome.kind === 'saved') {
       // 保存された明細（DB の値）を一緒に渡す。見積エディタはそれを反映し、全件を読み直さない（無ければ読み直す）
-      const d = outcome.body as { items?: unknown } | null
+      const d = outcome.body as { items?: unknown; replayed?: unknown } | null
+      if (typeof d?.replayed === 'number' && d.replayed > 0) {
+        setNotices(prev => [...prev, `${d.replayed} 件は、この画像から登録済みの明細でした。二重には登録していません`])
+      }
       const items = Array.isArray(d?.items) && d.items.length === targets.length ? d.items : undefined
       window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items', project_id: projectId, ...(items ? { items } : {}) } }))
       return true
     }
-    if (outcome.kind === 'rejected') { setError(outcome.error); return false }
+    if (outcome.kind === 'rejected') {
+      // 同じ登録 ID が登録済み（違う内容・削除済み）。見積を読み直させ、その行は確認するまで追加させない
+      if (outcome.code && IMPORT_CONFLICT_CODES.has(outcome.code)) {
+        window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items', project_id: projectId } }))
+        const hit = latest.filter(r => r.requestId === outcome.conflictRequestId?.toLowerCase())
+        const ids = new Set((hit.length ? hit : latest).map(r => r.id))
+        setRows(prev => prev.map(r => (ids.has(r.id) ? markRequestConflict(r) : r)))
+      }
+      setError(outcome.error)
+      return false
+    }
     // 結果が分からない（通信が途切れた）: 保存されていることがあるので、見積を読み直させ、候補は確認するまで追加させない
     window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items', project_id: projectId } }))
     const ids = new Set(targets.map(t => t.id))
@@ -927,6 +985,7 @@ function ItemCard({ row, removing, adding, pending, onAdd, onAck, onChange, onSh
               _importId: row.id,
               name: row.name, quantity: row.quantity, unit: row.unit,
               cost_price: row.cost_price, vendor_name: row.vendor_name, memo: row.memo,
+              import_request_id: row.requestId,
             },
             check: dropCheck,
           })

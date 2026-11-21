@@ -46,6 +46,8 @@ let imports: Array<Record<string, unknown>>
 let extractReply: (name: string) => Response
 let importReply: () => Promise<Response>
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[45][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+const sentIds = (i: number) => (imports[i].items as Array<{ import_request_id?: string }>).map(x => x.import_request_id)
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 
@@ -97,6 +99,9 @@ const cards = () => [...container.querySelectorAll('[data-testid=ocr-candidate]'
 async function readImages(files: File[]) {
   choose(files)
   click(button('AIで読み取る'))
+  await flush()
+  // 登録 ID のための画像の SHA-256 は FileReader（次のタスク）で読むので、タイマーも進めて待つ
+  for (let i = 0; i < 5; i++) await act(async () => { await new Promise(r => setTimeout(r, 0)) })
   await flush()
 }
 
@@ -786,7 +791,7 @@ describe('追加の結果が分からないとき（通信が途切れた）', (
     expect(changed).toHaveLength(1)
   })
 
-  it('サーバーが断った（4xx・エラー本文つきの 500）ときは、従来どおりの失敗（要確認にしない・読み直させない）', async () => {
+  it('サーバーが断った（4xx・not_saved つきの 500）ときは、従来どおりの失敗（要確認にしない・読み直させない）', async () => {
     importReply = async () => json({ error: 'Project not found' }, 404)
     await readImages([img('p1.jpg')])
     click(addBtnOf(cards()[0]))
@@ -794,7 +799,7 @@ describe('追加の結果が分からないとき（通信が途切れた）', (
     expect(container.textContent).toContain('Project not found')
     expect(cards()[0].dataset.needsReview).toBe('false')
     expect(changed).toEqual([])
-    importReply = async () => json({ error: 'insert failed' }, 500)
+    importReply = async () => json({ error: 'insert failed', not_saved: true }, 500)
     click(addBtnOf(cards()[0]))
     await flush()
     expect(container.textContent).toContain('insert failed')
@@ -809,5 +814,130 @@ describe('追加の結果が分からないとき（通信が途切れた）', (
     expect(cards()[0].dataset.needsReview).toBe('true')
     // 確認するまでドラッグでも渡さない
     expect(startDrag(cards()[0]).item).toBeFalsy()
+  })
+})
+
+describe('登録 ID（import_request_id）', () => {
+  beforeEach(async () => {
+    const m = await import('@/lib/estimate/import-result')
+    m.resetImportIdempotencyForTest()
+  })
+
+  it('候補ごとに登録 ID を作り、個別追加・一括追加・ドラッグで同じ候補には同じ ID を送る', async () => {
+    importReply = async () => json({ error: 'Group not found' }, 404)   // 断られる（何も入らない）→ もう一度送れる
+    await readImages([img('p1.jpg')])
+    click(addBtnOf(cards()[0]))
+    await flush()
+    const first = sentIds(0)[0]!
+    expect(first).toMatch(UUID)
+    // 同じ候補をもう一度（個別追加）→ 同じ ID
+    click(addBtnOf(cards()[0]))
+    await flush()
+    expect(sentIds(1)).toEqual([first])
+    // ドラッグも同じ ID
+    expect(startDrag(cards()[0]).item?.import_request_id).toBe(first)
+    // 一括追加（要確認の行の確認を挟む）→ 各行に別々の ID、同じ候補は同じ ID
+    click(button('残り全件を追加'))
+    click(btnIn(container.querySelector('[data-testid=bulk-confirm]') as HTMLElement ?? container, '確認したので追加する'))
+    await flush()
+    const bulk = sentIds(imports.length - 1)
+    expect(bulk[0]).toBe(first)
+    expect(bulk[1]).toMatch(UUID)
+    expect(bulk[1]).not.toBe(first)
+  })
+
+  it('結果が分からず確認を挟んで送り直すときも、同じ登録 ID（保存済みなら API が同じ明細を返す）', async () => {
+    importReply = () => Promise.reject(new TypeError('Failed to fetch'))
+    await readImages([img('p1.jpg')])
+    click(addBtnOf(cards()[0]))
+    await flush()
+    const first = sentIds(0)[0]
+    importReply = async () => json({ created: 0, replayed: 1, idempotent: true, items: [{ id: 'x', sort_order: 1 }] })
+    click(addBtnOf(cards()[0]))
+    const box = cards()[0].querySelector('[data-testid=row-confirm]') as HTMLElement
+    click(btnIn(box, '確認したので追加する'))
+    await flush()
+    expect(sentIds(1)).toEqual([first])
+  })
+
+  it('二重登録を防げると分かっていれば（idempotent: true の応答の後）、結果が分からないとき同じ ID で 1 回だけ自動で送り直す', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      importReply = async () => json({ created: 1, idempotent: true, items: [{ id: 'a', sort_order: 1 }] })
+      await readImages([img('p1.jpg')])
+      click(addBtnOf(cards()[0]))
+      await flush()
+      let n = 0
+      importReply = async () => (++n === 1 ? Promise.reject(new TypeError('Failed to fetch')) : json({ created: 0, replayed: 1, idempotent: true, items: [{ id: 'b', sort_order: 2 }] }))
+      const bad = () => cards().find(c => c.textContent?.includes('配管部材'))!
+      click(addBtnOf(bad()))
+      click(btnIn(bad().querySelector('[data-testid=row-confirm]') as HTMLElement, '確認したので追加する'))
+      await flush()
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
+      await flush()
+      expect(imports).toHaveLength(3)
+      expect(sentIds(2)).toEqual(sentIds(1))
+      expect(container.textContent).not.toContain('保存できたか確認できませんでした')
+    } finally { vi.useRealTimers() }
+  })
+
+  it('409（同じ登録 ID が違う内容で登録済み）→ その候補を要確認にし、確認後は新しい登録 ID で送る（別の明細として追加する操作）', async () => {
+    let conflictId = ''
+    importReply = async () => json({ error: '前回の送信で、違う内容で登録されています', code: 'import_request_conflict', not_saved: true, import_request_id: conflictId }, 409)
+    await readImages([img('p1.jpg')])
+    conflictId = startDrag(cards()[0]).item!.import_request_id!
+    click(addBtnOf(cards()[0]))
+    await flush()
+    expect(cards()[0].dataset.needsReview).toBe('true')
+    expect(cards()[0].textContent).toContain('前回の送信で登録済み')
+    importReply = async () => json({ created: 1, idempotent: true, items: [{ id: 'n', sort_order: 1 }] })
+    click(addBtnOf(cards()[0]))
+    click(btnIn(cards()[0].querySelector('[data-testid=row-confirm]') as HTMLElement, '確認したので追加する'))
+    await flush()
+    expect(imports).toHaveLength(2)
+    expect(sentIds(1)[0]).toMatch(UUID)
+    expect(sentIds(1)[0]).not.toBe(conflictId)
+  })
+
+  it('見積エディタからの conflict 通知でも、その候補を要確認にする', async () => {
+    await readImages([img('p1.jpg')])
+    const importId = startDrag(cards()[0]).item!._importId
+    act(() => { window.dispatchEvent(new CustomEvent('genba:import-item-failed', { detail: { importId, error: '登録済み', conflict: true } })) })
+    expect(cards()[0].dataset.needsReview).toBe('true')
+    expect(cards()[0].textContent).toContain('前回の送信で登録済み')
+  })
+})
+
+describe('登録 ID は案件・画像・行番号で決まる（再読み込み後の読み直しでも同じ）', () => {
+  it('同じ画像を読み直すと同じ登録 ID、行が違えば別の ID', async () => {
+    await readImages([img('p1.jpg')])
+    const first = cards().map(c => startDrag(c).item?.import_request_id)
+    // 画面を作り直して（再読み込みの代わり）同じ画像を読み直す
+    act(() => root.unmount())
+    root = createRoot(container)
+    act(() => root.render(<EstimateImportTab projectId="p1" />))
+    await readImages([img('p1.jpg')])
+    const again = cards().map(c => startDrag(c).item?.import_request_id)
+    expect(first[0]).toMatch(UUID)
+    expect(again).toEqual(first)
+    expect(first[0]).not.toBe(first[1])
+  })
+
+  it('別の案件・別の画像なら別の登録 ID', async () => {
+    const { importRequestIdFor } = await import('@/lib/estimate/import-result')
+    const a = await importRequestIdFor('p1', 'aa', 0)
+    expect(await importRequestIdFor('p1', 'aa', 0)).toBe(a)
+    expect(await importRequestIdFor('p2', 'aa', 0)).not.toBe(a)
+    expect(await importRequestIdFor('p1', 'bb', 0)).not.toBe(a)
+    expect(await importRequestIdFor('p1', 'aa', 1)).not.toBe(a)
+    expect(await importRequestIdFor('p1', null, 0)).not.toBe(await importRequestIdFor('p1', null, 0))
+  })
+
+  it('同じ画像から登録済みだった（replayed）ときは、二重に登録していないことを知らせる', async () => {
+    importReply = async () => json({ created: 0, replayed: 1, idempotent: true, items: [{ id: 'x', sort_order: 1 }] })
+    await readImages([img('p1.jpg')])
+    click(addBtnOf(cards()[0]))
+    await flush()
+    expect(container.textContent).toContain('登録済みの明細でした。二重には登録していません')
   })
 })
