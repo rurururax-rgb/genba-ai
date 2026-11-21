@@ -29,6 +29,7 @@ import { ItemMemoPopover, LockIcon } from './ItemMemoPopover'
 import { DetachableEstimateImportPanel } from './DetachableEstimateImportPanel'
 import { isImportDrag, onImportDragEnd, resolveImportDrop, type ImportDragItem } from '@/lib/estimate/import-drag'
 import { mergeSavedItems, pendingSlots, savedItemsFrom, type PendingDrop } from '@/lib/estimate/pending-drops'
+import { classifyImportResponse, findSavedImport, type ImportSignature } from '@/lib/estimate/import-result'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -1860,6 +1861,11 @@ function RevDiffModal({ rev, currentItems, fmt, onClose, fontFamily }: {
  * 取り込み明細のドラッグ中に、挿入される位置を緑の線で示す。
  * 高さを持たせない（線を出しても明細の位置がずれず、ドロップ位置が揺れない）
  */
+/** 取り込みの結果が分からなかったとき、DB を読み直して確かめる 2 回目までの待ち時間（遅れて保存されることがある） */
+const UNKNOWN_RECHECK_MS = 1500
+/** 確かめるための読み直し 1 回の待ち時間の上限（通信できないと Supabase の読み込みは再試行を続けるため） */
+const UNKNOWN_LOOKUP_TIMEOUT_MS = 3000
+
 /** 取り込み明細をドロップした直後の仮の行。保存が終わるまで編集・移動できず、合計にも入れない */
 function PendingImportRow({ drop }: { drop: PendingDrop }) {
   return (
@@ -1872,8 +1878,8 @@ function PendingImportRow({ drop }: { drop: PendingDrop }) {
       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{drop.name}</span>
       <span style={{ color: C.textMuted }}>{drop.quantity} {drop.unit}</span>
       <span style={{ color: C.textMuted }}>原価 {drop.cost_price != null ? `¥${drop.cost_price.toLocaleString('ja-JP')}` : '未入力'}</span>
-      <span style={{ padding: '2px 10px', borderRadius: 10, background: C.accent, color: '#fff', fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap' }}>
-        保存中…
+      <span style={{ padding: '2px 10px', borderRadius: 10, background: drop.checking ? C.orange : C.accent, color: '#fff', fontSize: 11, fontWeight: 700, whiteSpace: 'nowrap' }}>
+        {drop.checking ? '保存を確認中…' : '保存中…'}
       </span>
     </div>
   )
@@ -1974,6 +1980,10 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
   const pendingSeqRef = useRef(0)
   const mountedRef = useRef(true)
   useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false } }, [])
+  /** 登録の結果だと分かっている明細の ID（結果が分からなかった登録の照合で、ほかの登録の明細と取り違えない） */
+  const attributedIdsRef = useRef<Set<string>>(new Set())
+  /** 結果が分からなかったドロップ（取り込み候補 ID → 送る前に見えていた明細・送った中身）。同じ候補をもう一度ドロップしたら先に照合する */
+  const unknownDropsRef = useRef<Map<string, { knownIds: Set<string>; sig: ImportSignature }>>(new Map())
   /** この見積エディタが出した genba:data-changed か（自分の変更では読み直さない） */
   const changeOriginRef = useRef(`estimate-tab-${Math.random().toString(36).slice(2)}`)
   const [dragHoverTabId, setDragHoverTabId] = useState<string | 'all' | null>(null)
@@ -2114,7 +2124,11 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       if (detail.origin && detail.origin === changeOriginRef.current) return
       // 取り込みパネルの追加など、保存された明細が付いているときはそれを反映する（全件を読み直さない）
       const saved = detail.project_id === projectId && Array.isArray(detail.items) ? savedItemsFrom<EstimateItem>(detail, detail.items.length) : null
-      if (saved && saved.length > 0) { setItems(prev => mergeSavedItems(prev, saved)); return }
+      if (saved && saved.length > 0) {
+        saved.forEach(i => attributedIdsRef.current.add(i.id))
+        setItems(prev => mergeSavedItems(prev, saved))
+        return
+      }
       reload()
     }
     window.addEventListener('genba:data-changed', handler)
@@ -2598,14 +2612,63 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
     await run
   }
 
+  /**
+   * DB の明細を読み直して画面に出し、結果が分からなかった登録が入っているか探す。
+   * 'found' = 入っていた / 'not_found' = 見つからない / 'unverifiable' = 読み直せない（通信できない・画面を閉じた）
+   */
+  async function lookUpUnknownImport(knownIds: Set<string>, sig: ImportSignature, waits: number[]): Promise<{ result: 'found' | 'not_found' | 'unverifiable'; id?: string }> {
+    let verified = false
+    for (const wait of waits) {
+      if (wait) await new Promise(r => setTimeout(r, wait))
+      if (!mountedRef.current) return { result: 'unverifiable' }
+      const r = await Promise.race([
+        loadItems().catch(() => null),
+        new Promise<null>(resolve => setTimeout(() => resolve(null), UNKNOWN_LOOKUP_TIMEOUT_MS)),
+      ])
+      if (!r || r.error || !r.data) continue
+      verified = true
+      const list = r.data as EstimateItem[]
+      itemsRef.current = list
+      setItems(list)
+      const hit = findSavedImport(list, knownIds, attributedIdsRef.current, sig)
+      if (hit) return { result: 'found', id: hit.id }
+    }
+    return { result: verified ? 'not_found' : 'unverifiable' }
+  }
+
   async function saveImportDrop(row: ImportDragItem, drop: PendingDrop) {
     const { importId, groupId, afterItemId } = drop
-    const fail = (error: string) => {
-      if (importId) window.dispatchEvent(new CustomEvent('genba:import-item-failed', { detail: { importId, error } }))
+    const fail = (error: string, uncertain = false) => {
+      if (importId) window.dispatchEvent(new CustomEvent('genba:import-item-failed', { detail: { importId, error, ...(uncertain ? { uncertain: true } : {}) } }))
+    }
+    const succeeded = () => {
+      // ほかの画面への通知は従来どおり。この見積エディタは origin で自分の変更と分かるので読み直さない
+      window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items', origin: changeOriginRef.current } }))
+      if (importId) window.dispatchEvent(new CustomEvent('genba:import-item-moved', { detail: { importId } }))
     }
     try {
       // 保存を待つ間に見積エディタを閉じた（画面を切り替えた）ときは、まだ送っていないものは送らない
       if (!mountedRef.current) { fail('画面を切り替えたため、この明細は追加していません。もう一度ドラッグしてください'); return }
+
+      // 前回の追加の結果が分からなかった候補は、送る前にもう一度 DB を確かめる（遅れて保存されていたら送らない）
+      const earlier = importId ? unknownDropsRef.current.get(importId) : undefined
+      if (earlier) {
+        const { sortOrder: _ignored, ...sigWithoutOrder } = earlier.sig
+        void _ignored
+        const check = await lookUpUnknownImport(earlier.knownIds, sigWithoutOrder, [0])
+        if (check.result === 'found') {
+          attributedIdsRef.current.add(check.id!)
+          unknownDropsRef.current.delete(importId)
+          showImportDropNotice('前回の追加が保存されていました。二重に登録しないよう、もう一度は追加していません')
+          succeeded()
+          return
+        }
+        if (check.result === 'unverifiable') {
+          fail('前回の追加が保存されたか、まだ確認できません。通信が戻ってから、見積に同じ明細がないか確かめて追加してください', true)
+          return
+        }
+        unknownDropsRef.current.delete(importId)
+      }
 
       // afterItemId が渡された場合は、その位置に入る sort_order を決める（「この位置に行を追加」と同じ planInsert）。
       // 隣り合う行の sort_order に空きがない（1, 2, 3 …）ときは、先に工種内を振り直して空ける。
@@ -2636,6 +2699,9 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
         itemsRef.current = apply(itemsRef.current)
         setItems(apply)
       }
+      // 送る前に見えていた明細（結果が分からなかったときの照合に使う）
+      const knownIds = new Set(itemsRef.current.map(i => i.id))
+      const sig: ImportSignature = { groupId, name: row.name, quantity: row.quantity, unit: row.unit, cost_price: row.cost_price, sortOrder: insertSortOrder }
       const res = await fetch('/api/estimate-items/import', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2644,22 +2710,36 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
           items: [{ name: row.name, quantity: row.quantity, unit: row.unit, cost_price: row.cost_price, vendor_name: row.vendor_name || null, internal_memo: row.memo || null }],
         }),
       }).catch(() => null)
-      if (res?.ok) {
-        const saved = savedItemsFrom<EstimateItem>(await res.json().catch(() => null), 1)
+      const outcome = await classifyImportResponse(res)
+
+      if (outcome.kind === 'saved') {
+        const saved = savedItemsFrom<EstimateItem>(outcome.body, 1)
         if (saved) {
+          saved.forEach(i => attributedIdsRef.current.add(i.id))
           itemsRef.current = mergeSavedItems(itemsRef.current, saved)
           setItems(prev => mergeSavedItems(prev, saved))
         } else {
-          // 保存された明細が返らなかった（古いサーバーなど）ときは従来どおり読み直す
+          // 保存された明細が返らなかった（古いサーバー・本文の途中で切れた）ときは従来どおり読み直す
           await reload()
         }
-        // ほかの画面への通知は従来どおり。この見積エディタは origin で自分の変更と分かるので読み直さない
-        window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items', origin: changeOriginRef.current } }))
-        if (importId) window.dispatchEvent(new CustomEvent('genba:import-item-moved', { detail: { importId } }))
-      } else {
-        const d = res ? await res.json().catch(() => null) as { error?: string } | null : null
-        fail(d?.error ?? '見積への追加に失敗しました')
+        succeeded()
+        return
       }
+      if (outcome.kind === 'rejected') { fail(outcome.error); return }
+
+      // 結果が分からない（応答が届かない・ゲートウェイのエラー）。保存されていることがあるので、
+      // 「失敗・もう一度どうぞ」とは扱わず、DB を読み直して確かめる（遅れて保存されることがあるので少し待って 2 回）
+      setPendingDrops(prev => prev.map(p => (p.tempId === drop.tempId ? { ...p, checking: true } : p)))
+      const check = await lookUpUnknownImport(knownIds, sig, [0, UNKNOWN_RECHECK_MS])
+      if (check.result === 'found') {
+        attributedIdsRef.current.add(check.id!)
+        succeeded()
+        return
+      }
+      if (importId) unknownDropsRef.current.set(importId, { knownIds, sig })
+      fail(check.result === 'not_found'
+        ? '通信が途切れ、保存できたか確認できませんでした。見積を読み直したところ、この明細は見つかりませんでした。見積に同じ明細がないことを確かめてから、もう一度追加してください'
+        : '通信が途切れ、保存できたか確認できませんでした。二重に登録しないよう、通信が戻ってから見積に同じ明細がないか確かめて追加してください', true)
     } finally {
       setPendingDrops(prev => prev.filter(p => p.tempId !== drop.tempId))
       if (importId) importDropsInFlight.current.delete(importId)

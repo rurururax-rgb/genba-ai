@@ -26,13 +26,17 @@ const row = (n: number, sort_order: number, p: Record<string, unknown> = {}) => 
   line_event_id: null, memo: null, row_type: 'item', selling_price_mode: 'auto', markup_rate_override: null, internal_memo: null, ...p,
 })
 
-const db = vi.hoisted(() => ({ itemsCalls: 0, items: [] as unknown[] }))
+const db = vi.hoisted(() => ({ itemsCalls: 0, items: [] as unknown[], itemsError: false }))
 
 vi.mock('@/lib/supabase/client', () => {
   const result = (table: string) => {
     if (table === 'estimate_groups') return { data: [{ id: '00000000-0000-4000-8000-000000000021', label: '内装', display_mode: 'detailed', sort_order: 0 }], error: null }
     if (table === 'projects') return { data: { misc_expense_override: null, rounding_discount: 0, markup_rate: 1.45 }, error: null }
-    if (table === 'estimate_items') { db.itemsCalls++; return { data: db.items, error: null } }
+    if (table === 'estimate_items') {
+      db.itemsCalls++
+      if (db.itemsError) return { data: null, error: { code: 'XX000', message: 'offline' } }
+      return { data: [...db.items], error: null }
+    }
     return { data: [], error: null }
   }
   const client = {
@@ -53,7 +57,7 @@ vi.mock('@/lib/supabase/client', () => {
 
 type Call = { url: string; body: Record<string, unknown>; release: (r: Response) => void }
 let calls: Call[]
-let autoImport: ((body: Record<string, unknown>) => Response) | null
+let autoImport: ((body: Record<string, unknown>) => Response | Promise<Response>) | null
 let events: Array<{ type: string; detail: Record<string, unknown> }>
 let container: HTMLDivElement
 let root: Root
@@ -69,6 +73,7 @@ const savedReply = (n: number, body: Record<string, unknown>, p: Record<string, 
 
 beforeEach(() => {
   db.itemsCalls = 0
+  db.itemsError = false
   // 連番の並び順（取り込み API で末尾に入った明細と同じ）。間に入れるには振り直しが要る
   db.items = [row(201, 0), row(202, 1), row(203, 2)]
   calls = []; autoImport = null; events = []
@@ -84,7 +89,7 @@ beforeEach(() => {
     if (u === '/api/estimate-items/reorder' || u === '/api/estimate-items/import') {
       const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>
       if (u === '/api/estimate-items/reorder') { calls.push({ url: u, body, release: () => {} }); return Promise.resolve(json({ ok: true })) }
-      if (autoImport) { calls.push({ url: u, body, release: () => {} }); return Promise.resolve(autoImport(body)) }
+      if (autoImport) { calls.push({ url: u, body, release: () => {} }); const f = autoImport; return Promise.resolve().then(() => f(body)) }
       return new Promise<Response>(r => calls.push({ url: u, body, release: r }))
     }
     return Promise.resolve(json({}))
@@ -167,13 +172,16 @@ describe('ドロップ直後の表示と保存', () => {
     expect(events.some(e => e.type === 'genba:import-item-moved')).toBe(false)
   })
 
-  it('通信が切れたときも仮の行を消して理由を返す', async () => {
+  it('通信が切れたときは、DB を確かめてから仮の行を消し、確認を促す（保存されたか分からないため）', async () => {
     await renderTab()
     await dropAfter(203, 'imp-1', '架空 給湯器')
     await act(async () => imports()[0].release(Promise.reject(new TypeError('Failed to fetch')) as unknown as Response))
     await flush()
+    // 確かめている間は仮の行を残す
+    expect(pendingRows()).toHaveLength(1)
+    await flush(1700)
     expect(pendingRows()).toHaveLength(0)
-    expect(events.find(e => e.type === 'genba:import-item-failed')?.detail.importId).toBe('imp-1')
+    expect(events.find(e => e.type === 'genba:import-item-failed')?.detail).toMatchObject({ importId: 'imp-1', uncertain: true })
   })
 
   it('登録 API が明細を返さない（古いサーバー）ときは、従来どおり全件を読み直す', async () => {
@@ -268,5 +276,164 @@ describe('取り込みパネルの「追加」からの通知', () => {
     await act(async () => { window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items' } })) })
     await flush()
     expect(db.itemsCalls).toBe(3)
+  })
+})
+
+/** サーバーが保存した明細（DB に入れる）。応答を返すかは各テストで決める */
+let seq = 300
+const insertIntoDb = (body: Record<string, unknown>) => {
+  const it = (body.items as Array<Record<string, unknown>>)[0]
+  const r = row(++seq, Number(body.sort_order ?? 9999), { name: it.name, quantity: it.quantity, unit: it.unit, cost_price: it.cost_price, selling_price: 145000, amount: 145000, source: 'import' })
+  db.items.push(r)
+  return r
+}
+const lost = () => Promise.reject(new TypeError('Failed to fetch'))
+const failedEvents = () => events.filter(e => e.type === 'genba:import-item-failed').map(e => e.detail)
+const movedIds = () => events.filter(e => e.type === 'genba:import-item-moved').map(e => e.detail.importId)
+const rowsNamed = (name: string) => [...document.querySelectorAll('[data-row-id]')].filter(el => el.textContent?.includes(name))
+
+describe('保存の結果が分からないとき（通信が途切れた）', () => {
+  beforeEach(() => { seq = 300 })
+
+  it('DB には保存できて応答だけ失った → DB を読み直して見つけ、保存済みとして扱う（失敗にしない・二重に登録しない）', async () => {
+    await renderTab()
+    autoImport = body => { insertIntoDb(body); return lost() }
+    await dropAfter(203, 'imp-1', '架空 給湯器')
+    await flush(10)
+    expect(imports()).toHaveLength(1)
+    expect(rowsNamed('架空 給湯器')).toHaveLength(1)
+    expect(pendingRows()).toHaveLength(0)
+    expect(failedEvents()).toEqual([])
+    expect(movedIds()).toEqual(['imp-1'])
+    expect(db.itemsCalls).toBe(2)
+  })
+
+  it('本文のない 504（保存済み）も同じく読み直して見つける', async () => {
+    await renderTab()
+    autoImport = body => { insertIntoDb(body); return new Response('An error occurred', { status: 504 }) }
+    await dropAfter(203, 'imp-1', '架空 給湯器')
+    await flush(10)
+    expect(rowsNamed('架空 給湯器')).toHaveLength(1)
+    expect(movedIds()).toEqual(['imp-1'])
+  })
+
+  it('遅れて保存された場合も、少し待った 2 回目の読み直しで見つける', async () => {
+    await renderTab()
+    autoImport = body => { setTimeout(() => insertIntoDb(body), 500); return lost() }
+    await dropAfter(203, 'imp-1', '架空 給湯器')
+    await flush(1700)
+    expect(rowsNamed('架空 給湯器')).toHaveLength(1)
+    expect(failedEvents()).toEqual([])
+    expect(movedIds()).toEqual(['imp-1'])
+  })
+
+  it('保存されていなかった → 「失敗・もう一度どうぞ」ではなく、確認を促す（uncertain）。候補は残す', async () => {
+    await renderTab()
+    autoImport = () => lost()
+    await dropAfter(203, 'imp-1', '架空 給湯器')
+    await flush(1700)
+    expect(rowsNamed('架空 給湯器')).toHaveLength(0)
+    expect(pendingRows()).toHaveLength(0)
+    expect(failedEvents()).toEqual([expect.objectContaining({ importId: 'imp-1', uncertain: true, error: expect.stringContaining('同じ明細がないこと') })])
+    expect(movedIds()).toEqual([])
+  })
+
+  it('読み直しもできない（オフライン）→ 確認を促す。通信が戻って同じ候補をドロップしたら、遅れて保存されていた明細を見つけて送らない', async () => {
+    await renderTab()
+    db.itemsError = true
+    let saved: Record<string, unknown> | null = null
+    autoImport = body => { saved = body; return lost() }
+    await dropAfter(203, 'imp-1', '架空 給湯器')
+    await flush(1700)
+    expect(failedEvents()).toEqual([expect.objectContaining({ importId: 'imp-1', uncertain: true, error: expect.stringContaining('通信が戻ってから') })])
+
+    // 実はサーバーでは保存されていた。通信が戻ってから、人が確認して同じ候補をもう一度ドロップ
+    insertIntoDb(saved!)
+    db.itemsError = false
+    autoImport = body => savedReply(999, body)
+    await dropAfter(203, 'imp-1', '架空 給湯器')
+    await flush(10)
+    expect(imports()).toHaveLength(1)
+    expect(rowsNamed('架空 給湯器')).toHaveLength(1)
+    expect(movedIds()).toEqual(['imp-1'])
+    expect(document.body.textContent).toContain('もう一度は追加していません')
+  })
+
+  it('もう一度ドロップしたとき、前回の分が保存されていなければ 1 回だけ登録する', async () => {
+    await renderTab()
+    autoImport = () => lost()
+    await dropAfter(203, 'imp-1', '架空 給湯器')
+    await flush(1700)
+    autoImport = body => { const r = insertIntoDb(body); return json({ created: 1, items: [r] }) }
+    await dropAfter(203, 'imp-1', '架空 給湯器')
+    await flush(10)
+    expect(imports()).toHaveLength(2)
+    expect(db.items.filter(i => (i as { name: string }).name === '架空 給湯器')).toHaveLength(1)
+    expect(rowsNamed('架空 給湯器')).toHaveLength(1)
+    expect(movedIds()).toEqual(['imp-1'])
+  })
+
+  it('サーバーが断った（エラー本文つき）ときは、読み直さず通常の失敗にする（uncertain なし）', async () => {
+    await renderTab()
+    autoImport = () => json({ error: 'Group not found' }, 404)
+    await dropAfter(203, 'imp-1', '架空 給湯器')
+    await flush(10)
+    expect(failedEvents()).toEqual([{ importId: 'imp-1', error: 'Group not found' }])
+    expect(db.itemsCalls).toBe(1)
+  })
+
+  it('同じ中身の明細が前からあっても、それを今回の登録と取り違えない', async () => {
+    db.items = [row(201, 0), row(202, 1), row(203, 2), row(250, 3, { name: '架空 給湯器', quantity: 1, unit: '台', cost_price: 100000, source: 'import' })]
+    await renderTab()
+    autoImport = () => lost()
+    await dropAfter(203, 'imp-1', '架空 給湯器')
+    await flush(1700)
+    expect(failedEvents()).toEqual([expect.objectContaining({ uncertain: true })])
+    expect(movedIds()).toEqual([])
+  })
+})
+
+describe('連続保存の途中の失敗・ほかの読み直し', () => {
+  beforeEach(() => { seq = 300 })
+
+  it('10 件のうち 4 件目だけ失敗 → 後続は続けて保存し、並び順は崩れない。失敗した明細は入らない', async () => {
+    await renderTab()
+    let n = 0
+    autoImport = body => { n++; if (n === 4) return json({ error: '架空の保存エラー' }, 500); const r = insertIntoDb(body); return json({ created: 1, items: [r] }) }
+    for (let i = 1; i <= 10; i++) await dropAfter(203, `imp-${i}`, `架空 連続${String(i).padStart(2, '0')}`)
+    await flush(50)
+    expect(imports()).toHaveLength(10)
+    expect(pendingRows()).toHaveLength(0)
+    const names = [...document.querySelectorAll('[data-row-id]')].map(el => el.textContent?.match(/架空 (既存\d{3}|連続\d{2})/)?.[1])
+    // 203 の直後へ続けてドロップ → 後のものほど前。4 件目は入らない
+    expect(names).toEqual(['既存201', '既存202', '既存203', '連続10', '連続09', '連続08', '連続07', '連続06', '連続05', '連続03', '連続02', '連続01'])
+    expect(failedEvents()).toEqual([{ importId: 'imp-4', error: '架空の保存エラー' }])
+    const orders = (db.items as Array<{ sort_order: number }>).map(i => i.sort_order)
+    expect(new Set(orders).size).toBe(orders.length)
+    expect(db.itemsCalls).toBe(1)
+  })
+
+  it('保存中にほかの処理で読み直しが起きて新しい明細が先に出ても、応答の反映で二重に表示しない', async () => {
+    await renderTab()
+    await dropAfter(203, 'imp-1', '架空 給湯器')
+    const saved = insertIntoDb(imports()[0].body)
+    // AI チャットなどの通知で読み直し（DB には保存済み）
+    await act(async () => { window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items' } })) })
+    await flush()
+    expect(pendingRows()).toHaveLength(1)
+    await act(async () => imports()[0].release(json({ created: 1, items: [saved] })))
+    await flush()
+    expect(rowsNamed('架空 給湯器')).toHaveLength(1)
+    expect(pendingRows()).toHaveLength(0)
+  })
+
+  it('結果の分からない保存の確認中に見積エディタを閉じても、例外を出さず候補に確認を促す', async () => {
+    await renderTab()
+    autoImport = () => lost()
+    await dropAfter(203, 'imp-1', '架空 給湯器')
+    await act(async () => root.unmount())
+    await flush(1700)
+    expect(failedEvents()).toEqual([expect.objectContaining({ importId: 'imp-1', uncertain: true })])
+    root = createRoot(container)
   })
 })

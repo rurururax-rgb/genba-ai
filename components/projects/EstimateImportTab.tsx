@@ -8,6 +8,7 @@ import {
 } from '@/lib/estimate/ocr-extraction'
 import { checkEstimateImageFile, formatMegabytes, prepareEstimateImage, type PreparedImage } from '@/lib/estimate/ocr-image'
 import { IMPORT_DRAG_TYPE, endImportDrag, startImportDrag } from '@/lib/estimate/import-drag'
+import { UNKNOWN_SAVE_WARNING, classifyImportResponse } from '@/lib/estimate/import-result'
 import { EstimateSourceViewer } from './EstimateSourceViewer'
 
 // ── 型定義 ────────────────────────────────────────────────
@@ -33,6 +34,8 @@ type CandidateRow = {
   amount: number | null
   vendor_name: string
   memo: string
+  /** 前回の追加の結果が分からなかった（通信が途切れた）。保存されていることがあるので、確認するまで追加させない */
+  saveUnknown?: boolean
   messages: OcrMessage[]
 }
 
@@ -55,14 +58,20 @@ const isAbort = (e: unknown) => (e as { name?: string } | null)?.name === 'Abort
 
 /** 行の照合をやり直す（人が数量・単価を直したときも同じ規則で検査する） */
 function withReview(r: Omit<CandidateRow, 'messages'>): CandidateRow {
-  return {
-    ...r,
-    messages: reviewEstimateItem({
-      quantity: r.quantityRead ? r.quantity : null,
-      cost_price: r.cost_price, cost_from: r.cost_from,
-      list_price: r.list_price, rate: r.rate, amount: r.amount,
-    }),
-  }
+  const messages = reviewEstimateItem({
+    quantity: r.quantityRead ? r.quantity : null,
+    cost_price: r.cost_price, cost_from: r.cost_from,
+    list_price: r.list_price, rate: r.rate, amount: r.amount,
+  })
+  // 結果の分からなかった追加は「要確認」にする（「確認したので追加する」まで追加・ドラッグできない）
+  return { ...r, messages: r.saveUnknown ? [{ level: 'warn', text: UNKNOWN_SAVE_WARNING }, ...messages] : messages }
+}
+
+/** 前回の追加の結果が分からなかった行を、もう一度確認するまで追加できないようにする */
+function markSaveUnknown(r: CandidateRow): CandidateRow {
+  const { messages: _m, ...rest } = r
+  void _m
+  return withReview({ ...rest, saveUnknown: true, acked: false })
 }
 
 function toCandidate(item: Partial<EstimateOcrItem>, file: File): CandidateRow {
@@ -261,8 +270,9 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
       fadeRemove(importId, runRef.current)
     }
     const failed = (e: Event) => {
-      const { importId, error: msg } = (e as CustomEvent<{ importId: string; error?: string }>).detail
+      const { importId, error: msg, uncertain } = (e as CustomEvent<{ importId: string; error?: string; uncertain?: boolean }>).detail
       markAdding([importId], false)
+      if (uncertain) setRows(prev => prev.map(r => (r.id === importId ? markSaveUnknown(r) : r)))
       setError(msg || '見積への追加に失敗しました')
     }
     window.addEventListener('genba:import-item-adding', adding)
@@ -461,15 +471,20 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ project_id: projectId, items: targets.map(toImportItem) }),
     }).catch(() => null)
-    if (res?.ok) {
+    const outcome = await classifyImportResponse(res, '追加に失敗しました。通信状態を確認してもう一度お試しください')
+    if (outcome.kind === 'saved') {
       // 保存された明細（DB の値）を一緒に渡す。見積エディタはそれを反映し、全件を読み直さない（無ければ読み直す）
-      const d = await readJson(res)
+      const d = outcome.body as { items?: unknown } | null
       const items = Array.isArray(d?.items) && d.items.length === targets.length ? d.items : undefined
       window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items', project_id: projectId, ...(items ? { items } : {}) } }))
       return true
     }
-    const d = res ? await readJson(res) : null
-    setError(typeof d?.error === 'string' ? d.error : '追加に失敗しました。通信状態を確認してもう一度お試しください')
+    if (outcome.kind === 'rejected') { setError(outcome.error); return false }
+    // 結果が分からない（通信が途切れた）: 保存されていることがあるので、見積を読み直させ、候補は確認するまで追加させない
+    window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items', project_id: projectId } }))
+    const ids = new Set(targets.map(t => t.id))
+    setRows(prev => prev.map(r => (ids.has(r.id) ? markSaveUnknown(r) : r)))
+    setError('通信が途切れ、保存できたか確認できませんでした。見積を読み直しています。見積に同じ明細が入っていないか確かめてから、もう一度追加してください')
     return false
   }
 

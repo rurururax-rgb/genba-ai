@@ -18,6 +18,8 @@ export type PendingDrop = {
   quantity: number
   unit: string
   cost_price: number | null
+  /** 保存の結果が分からず、DB を読み直して確かめているところ */
+  checking?: boolean
 }
 
 export type PendingSlots = {

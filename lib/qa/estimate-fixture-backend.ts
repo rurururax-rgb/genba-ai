@@ -229,7 +229,13 @@ async function handle(url: URL, method: string, init: RequestInit | undefined, a
     return json({ files: [{ fileName: 'qa.png', supplier: 'QA設備商事', document_type: '御見積書', items, subtotal: 229000, adjustments: [], excluded: [], items_total: 3, prices_include_tax: false, messages: [] }], items, failures: [] })
   }
   // 実 API と同じ規則：取込の備考は internal_memo（社内メモ）のみ。memo（お客様向け備考）には入れない
+  // 通信の途切れを再現する（QA 用）:
+  //   window.__QA_IMPORT_LOSE_RESPONSE = n … 登録は保存したうえで、応答だけを n 回失う（fetch が reject）
+  //   window.__QA_IMPORT_NETWORK_FAIL = n  … 登録の前に n 回 通信が切れる（何も保存しない）
+  //   window.__QA_IMPORT_GATEWAY_FAIL = n  … 登録は保存したうえで、本文のない 504 を n 回返す
   if (p === '/api/estimate-items/import' && method === 'POST') {
+    const qa = window as unknown as { __QA_IMPORT_LOSE_RESPONSE?: number; __QA_IMPORT_NETWORK_FAIL?: number; __QA_IMPORT_GATEWAY_FAIL?: number }
+    if ((qa.__QA_IMPORT_NETWORK_FAIL ?? 0) > 0) { qa.__QA_IMPORT_NETWORK_FAIL!--; throw new TypeError('Failed to fetch (QA: 送信前に通信が切れた)') }
     const rows = (body.items as Array<Record<string, unknown>>) ?? []
     let n = Math.max(0, ...s.items.map(i => Number(i.id.slice(-12))))
     const base = typeof body.sort_order === 'number' ? body.sort_order : Math.max(-1, ...s.items.map(i => i.sort_order)) + 1
@@ -247,6 +253,8 @@ async function handle(url: URL, method: string, init: RequestInit | undefined, a
       s.items.push(it); created.push(it)
     })
     save(s)
+    if ((qa.__QA_IMPORT_LOSE_RESPONSE ?? 0) > 0) { qa.__QA_IMPORT_LOSE_RESPONSE!--; throw new TypeError('Failed to fetch (QA: 保存後に応答が失われた)') }
+    if ((qa.__QA_IMPORT_GATEWAY_FAIL ?? 0) > 0) { qa.__QA_IMPORT_GATEWAY_FAIL!--; return new Response('An error occurred with your deployment', { status: 504 }) }
     // 実 API と同じく、登録した行（DB が確定した値）を返す
     return json({ created: rows.length, items: created })
   }
