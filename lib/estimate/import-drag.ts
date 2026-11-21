@@ -24,6 +24,8 @@ export type ImportDragItem = {
   cost_price: number | null
   vendor_name: string
   memo: string
+  /** 取り込み候補の登録 ID（再送では同じ ID。登録 API が同じ ID の明細を 1 行だけにする） */
+  import_request_id?: string
 }
 
 type Session = {

@@ -45,6 +45,8 @@ type FixtureItem = {
   row_type: 'item' | 'header' | 'note'
   selling_price_mode: 'auto' | 'manual'
   markup_rate_override: number | null
+  /** 見積書 OCR 取り込みの登録 ID（実 DB の UNIQUE (company_id, import_request_id) と同じく、同じ ID は 1 行だけ） */
+  import_request_id?: string | null
 }
 
 type FixtureState = {
@@ -52,6 +54,8 @@ type FixtureState = {
   groups:  Array<{ id: string; label: string; display_mode: string; sort_order: number }>
   items:   FixtureItem[]
   blocked: string[]
+  /** 削除した明細の登録 ID（実 DB では削除済みの行が残るので、同じ ID の再送は 409 になる） */
+  deletedRequestIds?: string[]
 }
 
 const GROUP_ID = '00000000-0000-4000-8000-00000000a001'
@@ -163,7 +167,10 @@ async function handle(url: URL, method: string, init: RequestInit | undefined, a
       save(s)
       return json(omit(it, ['group_id', 'sort_order']))
     }
-    if (method === 'DELETE') { s.items = s.items.filter(i => i.id !== it.id); save(s); return json({ ok: true }) }
+    if (method === 'DELETE') {
+      if (it.import_request_id) s.deletedRequestIds = [...(s.deletedRequestIds ?? []), it.import_request_id]
+      s.items = s.items.filter(i => i.id !== it.id); save(s); return json({ ok: true })
+    }
     return null
   }
   if (p === '/api/estimate-items/manual' && method === 'POST') {
@@ -240,7 +247,29 @@ async function handle(url: URL, method: string, init: RequestInit | undefined, a
     let n = Math.max(0, ...s.items.map(i => Number(i.id.slice(-12))))
     const base = typeof body.sort_order === 'number' ? body.sort_order : Math.max(-1, ...s.items.map(i => i.sort_order)) + 1
     const created: FixtureItem[] = []
+    // 登録 ID（実 API の lib/estimate/import-idempotency.ts と同じ規則）。
+    // window.__QA_IMPORT_NOT_IDEMPOTENT = true で、列の無い DB（migration 未適用）を再現する
+    const idempotent = !(window as unknown as { __QA_IMPORT_NOT_IDEMPOTENT?: boolean }).__QA_IMPORT_NOT_IDEMPOTENT && rows.length > 0 && rows.every(r => typeof r.import_request_id === 'string')
+    const groupId = (body.group_id as string | null) ?? GROUP_ID
+    const result: FixtureItem[] = []
+    if (idempotent) {
+      for (const r of rows) {
+        const rid = String(r.import_request_id).toLowerCase()
+        if ((s.deletedRequestIds ?? []).includes(rid)) return json({ error: 'この明細は以前に登録され、その後削除されています。', code: 'import_request_deleted', not_saved: true, import_request_id: rid }, 409)
+        const e = s.items.find(i => i.import_request_id === rid)
+        if (!e) continue
+        const cost = typeof r.cost_price === 'number' ? r.cost_price : null
+        const same = e.group_id === groupId && e.name === String(r.name ?? '').trim() && e.quantity === Number(r.quantity ?? 1) && e.unit === String(r.unit ?? '式')
+          && e.cost_price === cost && (e.vendor_name ?? null) === ((r.vendor_name as string | null) ?? null)
+          && (e.internal_memo ?? null) === (String((r.internal_memo ?? r.memo ?? '') as string).trim() || null)
+        if (!same) return json({ error: 'この明細は前回の送信で、違う内容で登録されています。見積の明細を確かめてください', code: 'import_request_conflict', not_saved: true, import_request_id: rid }, 409)
+      }
+    }
     rows.forEach((r, i) => {
+      if (idempotent) {
+        const e = s.items.find(x => x.import_request_id === String(r.import_request_id).toLowerCase())
+        if (e) { result.push(e); return }
+      }
       const cost = typeof r.cost_price === 'number' ? r.cost_price : null
       const selling = cost != null && cost > 0 ? pgRound(cost * s.project.markup_rate) : null
       const note = String((r.internal_memo ?? r.memo ?? '') as string).trim() || null
@@ -249,14 +278,17 @@ async function handle(url: URL, method: string, init: RequestInit | undefined, a
         cost_price: cost, selling_price: selling, vendor_name: (r.vendor_name as string | null) ?? null,
         group_id: (body.group_id as string | null) ?? GROUP_ID, sort_order: base + i, source: 'import',
         memo: null, internal_memo: note,
+        import_request_id: idempotent ? String(r.import_request_id).toLowerCase() : null,
       })
-      s.items.push(it); created.push(it)
+      s.items.push(it); created.push(it); result.push(it)
     })
     save(s)
     if ((qa.__QA_IMPORT_LOSE_RESPONSE ?? 0) > 0) { qa.__QA_IMPORT_LOSE_RESPONSE!--; throw new TypeError('Failed to fetch (QA: 保存後に応答が失われた)') }
     if ((qa.__QA_IMPORT_GATEWAY_FAIL ?? 0) > 0) { qa.__QA_IMPORT_GATEWAY_FAIL!--; return new Response('An error occurred with your deployment', { status: 504 }) }
     // 実 API と同じく、登録した行（DB が確定した値）を返す
-    return json({ created: rows.length, items: created })
+    return json(idempotent
+      ? { created: created.length, replayed: rows.length - created.length, idempotent: true, items: result }
+      : { created: rows.length, idempotent: false, items: created })
   }
   if (p === `/api/projects/${FIXTURE_PROJECT_ID}/apply-markup-rate` && method === 'POST') {
     const rate = Number(body.new_rate)

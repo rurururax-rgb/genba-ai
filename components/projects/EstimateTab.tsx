@@ -29,7 +29,9 @@ import { ItemMemoPopover, LockIcon } from './ItemMemoPopover'
 import { DetachableEstimateImportPanel } from './DetachableEstimateImportPanel'
 import { isImportDrag, onImportDragEnd, resolveImportDrop, type ImportDragItem } from '@/lib/estimate/import-drag'
 import { mergeSavedItems, pendingSlots, savedItemsFrom, type PendingDrop } from '@/lib/estimate/pending-drops'
-import { classifyImportResponse, findSavedImport, type ImportSignature } from '@/lib/estimate/import-result'
+import {
+  IDEMPOTENT_RETRY_MS, IMPORT_CONFLICT_CODES, classifyImportResponse, findSavedImport, isImportIdempotent, type ImportSignature,
+} from '@/lib/estimate/import-result'
 
 // ── 型定義 ────────────────────────────────────────────────
 
@@ -2638,8 +2640,8 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
 
   async function saveImportDrop(row: ImportDragItem, drop: PendingDrop) {
     const { importId, groupId, afterItemId } = drop
-    const fail = (error: string, uncertain = false) => {
-      if (importId) window.dispatchEvent(new CustomEvent('genba:import-item-failed', { detail: { importId, error, ...(uncertain ? { uncertain: true } : {}) } }))
+    const fail = (error: string, uncertain = false, conflict = false) => {
+      if (importId) window.dispatchEvent(new CustomEvent('genba:import-item-failed', { detail: { importId, error, ...(uncertain ? { uncertain: true } : {}), ...(conflict ? { conflict: true } : {}) } }))
     }
     const succeeded = () => {
       // ほかの画面への通知は従来どおり。この見積エディタは origin で自分の変更と分かるので読み直さない
@@ -2651,7 +2653,8 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       if (!mountedRef.current) { fail('画面を切り替えたため、この明細は追加していません。もう一度ドラッグしてください'); return }
 
       // 前回の追加の結果が分からなかった候補は、送る前にもう一度 DB を確かめる（遅れて保存されていたら送らない）
-      const earlier = importId ? unknownDropsRef.current.get(importId) : undefined
+      // 登録 ID 付きで、登録 API が二重登録を防げると分かっているときは、照合しなくても同じ明細が返る（送ってよい）
+      const earlier = importId && !(row.import_request_id && isImportIdempotent()) ? unknownDropsRef.current.get(importId) : undefined
       if (earlier) {
         const { sortOrder: _ignored, ...sigWithoutOrder } = earlier.sig
         void _ignored
@@ -2702,17 +2705,28 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
       // 送る前に見えていた明細（結果が分からなかったときの照合に使う）
       const knownIds = new Set(itemsRef.current.map(i => i.id))
       const sig: ImportSignature = { groupId, name: row.name, quantity: row.quantity, unit: row.unit, cost_price: row.cost_price, sortOrder: insertSortOrder }
-      const res = await fetch('/api/estimate-items/import', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          project_id: projectId, group_id: groupId,
-          ...(insertSortOrder !== undefined ? { sort_order: insertSortOrder } : {}),
-          items: [{ name: row.name, quantity: row.quantity, unit: row.unit, cost_price: row.cost_price, vendor_name: row.vendor_name || null, internal_memo: row.memo || null }],
-        }),
-      }).catch(() => null)
-      const outcome = await classifyImportResponse(res)
+      const body = JSON.stringify({
+        project_id: projectId, group_id: groupId,
+        ...(insertSortOrder !== undefined ? { sort_order: insertSortOrder } : {}),
+        items: [{
+          name: row.name, quantity: row.quantity, unit: row.unit, cost_price: row.cost_price, vendor_name: row.vendor_name || null, internal_memo: row.memo || null,
+          ...(row.import_request_id ? { import_request_id: row.import_request_id } : {}),
+        }],
+      })
+      const send = async () => classifyImportResponse(
+        await fetch('/api/estimate-items/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }).catch(() => null),
+      )
+      let outcome = await send()
+      // 結果が分からないとき、登録 API が登録 ID で二重登録を防げると分かっていれば、同じ ID で 1 回だけ送り直す
+      // （保存済みなら保存済みの明細が返る。列の無い DB には送り直さない＝二重に入るため）
+      if (outcome.kind === 'unknown' && row.import_request_id && isImportIdempotent() && mountedRef.current) {
+        await new Promise(r => setTimeout(r, IDEMPOTENT_RETRY_MS))
+        outcome = await send()
+      }
 
       if (outcome.kind === 'saved') {
+        const replayed = (outcome.body as { replayed?: unknown } | null)?.replayed
+        if (typeof replayed === 'number' && replayed > 0) showImportDropNotice('この明細は登録済みでした（前回の送信で保存されていました）。二重には登録していません')
         const saved = savedItemsFrom<EstimateItem>(outcome.body, 1)
         if (saved) {
           saved.forEach(i => attributedIdsRef.current.add(i.id))
@@ -2725,7 +2739,16 @@ export function EstimateTab({ projectId, legacyRugsDocuments = false }: {
         succeeded()
         return
       }
-      if (outcome.kind === 'rejected') { fail(outcome.error); return }
+      if (outcome.kind === 'rejected') {
+        // 同じ登録 ID が登録済み（違う内容・削除済み）。保存済みの明細が見えるよう読み直し、候補は確認するまで追加させない
+        if (outcome.code && IMPORT_CONFLICT_CODES.has(outcome.code)) {
+          await reload()
+          fail(outcome.error, false, true)
+          return
+        }
+        fail(outcome.error)
+        return
+      }
 
       // 結果が分からない（応答が届かない・ゲートウェイのエラー）。保存されていることがあるので、
       // 「失敗・もう一度どうぞ」とは扱わず、DB を読み直して確かめる（遅れて保存されることがあるので少し待って 2 回）

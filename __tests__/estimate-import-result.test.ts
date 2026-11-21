@@ -13,11 +13,19 @@ describe('結果の見分け方', () => {
     expect(await classifyImportResponse(null)).toEqual({ kind: 'unknown' })
   })
   it('4xx はサーバーが断った（登録されていない）', async () => {
-    expect(await classifyImportResponse(json({ error: 'Project not found' }, 404))).toEqual({ kind: 'rejected', error: 'Project not found' })
-    expect(await classifyImportResponse(new Response('x', { status: 401 }), '既定')).toEqual({ kind: 'rejected', error: '既定' })
+    expect(await classifyImportResponse(json({ error: 'Project not found' }, 404))).toMatchObject({ kind: 'rejected', error: 'Project not found' })
+    expect(await classifyImportResponse(new Response('x', { status: 401 }), '既定')).toMatchObject({ kind: 'rejected', error: '既定' })
   })
-  it('この API が返したエラー本文つきの 500 は断った（insert は 1 文なので登録されていない）', async () => {
-    expect(await classifyImportResponse(json({ error: 'insert failed' }, 500))).toEqual({ kind: 'rejected', error: 'insert failed' })
+  it('5xx は API が not_saved: true を付けたときだけ断った（1 件も入っていない）', async () => {
+    expect(await classifyImportResponse(json({ error: 'insert failed', not_saved: true }, 500))).toEqual({ kind: 'rejected', error: 'insert failed' })
+  })
+  it('エラー本文つきの 500 でも not_saved が無い・false なら「分からない」（API と Supabase の間の通信断はコミット済みのことがある）', async () => {
+    expect(await classifyImportResponse(json({ error: 'TypeError: fetch failed' }, 500))).toEqual({ kind: 'unknown' })
+    expect(await classifyImportResponse(json({ error: '通信が途切れました', not_saved: false }, 503))).toEqual({ kind: 'unknown' })
+  })
+  it('409（同じ登録 ID が登録済み）は断った。コードと競合した登録 ID を返す', async () => {
+    const r = await classifyImportResponse(json({ error: '登録済み', code: 'import_request_conflict', not_saved: true, import_request_id: 'abc' }, 409))
+    expect(r).toEqual({ kind: 'rejected', error: '登録済み', code: 'import_request_conflict', conflictRequestId: 'abc' })
   })
   it('本文のない 5xx（ゲートウェイ・タイムアウト）や 502/503/504 は「分からない」', async () => {
     expect(await classifyImportResponse(new Response('An error occurred', { status: 504 }))).toEqual({ kind: 'unknown' })

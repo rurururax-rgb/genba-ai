@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { getServerClient } from '@/lib/supabase/server'
 import { calculateSellingPrice, DEFAULT_MARKUP_RATE } from '@/lib/estimate/pricing'
 import { isActiveProject, isActiveGroupInProject, isSortOrder } from '@/lib/estimate/ownership'
+import { insertImportRowsIdempotent, isDefiniteDbError, validateImportRequestIds, type ImportInsertRow } from '@/lib/estimate/import-idempotency'
 
 type ImportItem = {
   name: string
@@ -14,6 +15,8 @@ type ImportItem = {
   /** @deprecated 旧クライアント互換。受け取っても社内メモとして扱う（お客様向け備考には入れない） */
   memo?: string | null
   vendor_name?: string | null
+  /** 取り込み候補 1 行の登録 ID（UUID）。再送では同じ ID を送る。全行に付けるか、全行に付けない（旧クライアント） */
+  import_request_id?: string | null
 }
 
 type RequestBody = {
@@ -61,7 +64,15 @@ function validateImportItems(items: unknown[]): string | null {
 //
 // 元見積書の備考欄には見積No.・社内管理番号・担当者メモなど、お客様に見せない情報が含まれるため、
 // 取込時の備考は必ず internal_memo（社内メモ）に保存し、memo（お客様向け備考）には書き込まない。
+//
+// 登録 ID（import_request_id）が付いていれば、同じ ID の明細はもう一度入れずに保存済みの明細を返す
+// （lib/estimate/import-idempotency.ts）。列が無い DB（migration 未適用）では従来どおり登録する。
+//
+// エラー応答の約束: 4xx はすべて 1 件も登録していない。5xx は not_saved: true のときだけ 1 件も登録していない
+// （Supabase との通信が途切れたときはコミット済みのことがあるので false）。1 件でも登録したらエラーを返さない。
 export async function POST(request: NextRequest) {
+  // INSERT を送ったか（送った後の想定外の例外は、登録されたか分からない）
+  let insertSent = false
   try {
     const body = (await request.json()) as RequestBody
     const { project_id, group_id, sort_order: requestedSortOrder, items } = body
@@ -71,6 +82,8 @@ export async function POST(request: NextRequest) {
     }
     const invalid = validateImportItems(items)
     if (invalid) return NextResponse.json({ error: invalid }, { status: 400 })
+    const requestIds = validateImportRequestIds(items)
+    if ('error' in requestIds) return NextResponse.json({ error: requestIds.error }, { status: 400 })
     if (requestedSortOrder !== undefined && !isSortOrder(requestedSortOrder)) {
       return NextResponse.json({ error: '挿入位置が正しくありません' }, { status: 400 })
     }
@@ -122,7 +135,7 @@ export async function POST(request: NextRequest) {
       baseOrder = (maxRow?.sort_order ?? -1) + 1
     }
 
-    const rows = items.map((item, i) => {
+    const rows = items.map((item, i): Omit<ImportInsertRow, 'import_request_id'> => {
       const costPrice  = item.cost_price ?? null
       const rawSelling = item.selling_price ?? null
       // 売価モード決定:
@@ -158,22 +171,47 @@ export async function POST(request: NextRequest) {
       }
     })
 
+    // ── 登録 ID 付き：同じ ID の明細は 1 行だけにする ──
+    if (requestIds.ids) {
+      const ids = requestIds.ids
+      insertSent = true
+      // Supabase クライアントの型は深く、構造的な型への代入で型推論が止まるので、使う部分の型として渡す
+      const client = supabase as unknown as Parameters<typeof insertImportRowsIdempotent>[0]
+      const r = await insertImportRowsIdempotent(client, company_id, rows.map((row, i) => ({ ...row, import_request_id: ids[i] })), RETURN_COLUMNS)
+      if (r.kind === 'ok') {
+        return NextResponse.json({ created: r.created, replayed: r.replayed, idempotent: true, items: r.items })
+      }
+      if (r.kind === 'error') {
+        if (r.status >= 500) console.error('[estimate-items/import] idempotent insert error:', r.body.error)
+        return NextResponse.json(r.body, { status: r.status })
+      }
+      // 'unavailable'（import_request_id 列が無い＝migration 未適用）。1 件も登録していないので、従来どおり登録する
+      console.warn('[estimate-items/import] import_request_id 列が無いため、登録 ID なしで登録します（migration 未適用）')
+      insertSent = false
+    }
+
+    insertSent = true
     const { data: saved, error } = await supabase.from('estimate_items').insert(rows).select(RETURN_COLUMNS)
     if (error) {
       console.error('[estimate-items/import] insert error:', error.message)
       // 42703 = undefined_column（internal_memo の migration 未適用）。備考をお客様向けへ回避させず、取込自体を止める
       if (error.code === '42703') {
-        return NextResponse.json({ error: '社内メモ欄のデータベース更新が未適用のため取り込めません。管理者に連絡してください。' }, { status: 500 })
+        return NextResponse.json({ error: '社内メモ欄のデータベース更新が未適用のため取り込めません。管理者に連絡してください。', not_saved: true }, { status: 500 })
       }
-      return NextResponse.json({ error: error.message }, { status: 500 })
+      // コードのあるエラーは DB が断った（insert は 1 文なので 1 件も入っていない）。
+      // コードのないエラーは Supabase との通信の失敗など、コミット済みのことがある
+      if (!isDefiniteDbError(error)) {
+        return NextResponse.json({ error: 'データベースとの通信が途切れました。登録されたか確かめてください', not_saved: false }, { status: 503 })
+      }
+      return NextResponse.json({ error: error.message, not_saved: true }, { status: 500 })
     }
 
     // created は従来どおり。items は DB が確定した値（ID・売価・金額・並び順など）。
     // RLS などで返らなかった場合は items を付けない（画面は従来どおり読み直す）
     const savedItems = Array.isArray(saved) && saved.length === rows.length ? saved : undefined
-    return NextResponse.json({ created: rows.length, ...(savedItems ? { items: savedItems } : {}) })
+    return NextResponse.json({ created: rows.length, idempotent: false, ...(savedItems ? { items: savedItems } : {}) })
   } catch (err) {
     console.error('[estimate-items/import] unexpected error:', err)
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+    return NextResponse.json({ error: 'Internal server error', not_saved: !insertSent }, { status: 500 })
   }
 }
