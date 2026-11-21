@@ -14,6 +14,7 @@
  *       POST  /api/estimate-items/manual    … 実APIと同じく selling_price_mode / markup_rate_override を返さない
  *       POST  /api/projects/[id]/apply-markup-rate … apply_markup_rate_change() RPC と同じ対象・ROUND
  *       POST  /api/estimate-items/reorder   … groups / items の sort_order・group_id を一括更新
+ *       POST  /api/estimate-items/import    … 実APIと同じく登録した行（items）を返す
  *       POST/PATCH/DELETE /api/estimate-groups … 工種グループの追加・名称変更・削除
  */
 
@@ -232,19 +233,22 @@ async function handle(url: URL, method: string, init: RequestInit | undefined, a
     const rows = (body.items as Array<Record<string, unknown>>) ?? []
     let n = Math.max(0, ...s.items.map(i => Number(i.id.slice(-12))))
     const base = typeof body.sort_order === 'number' ? body.sort_order : Math.max(-1, ...s.items.map(i => i.sort_order)) + 1
+    const created: FixtureItem[] = []
     rows.forEach((r, i) => {
       const cost = typeof r.cost_price === 'number' ? r.cost_price : null
       const selling = cost != null && cost > 0 ? pgRound(cost * s.project.markup_rate) : null
       const note = String((r.internal_memo ?? r.memo ?? '') as string).trim() || null
-      s.items.push(item(++n, {
+      const it = item(++n, {
         name: String(r.name ?? ''), quantity: Number(r.quantity ?? 1), unit: String(r.unit ?? '式'),
         cost_price: cost, selling_price: selling, vendor_name: (r.vendor_name as string | null) ?? null,
         group_id: (body.group_id as string | null) ?? GROUP_ID, sort_order: base + i, source: 'import',
         memo: null, internal_memo: note,
-      }))
+      })
+      s.items.push(it); created.push(it)
     })
     save(s)
-    return json({ created: rows.length })
+    // 実 API と同じく、登録した行（DB が確定した値）を返す
+    return json({ created: rows.length, items: created })
   }
   if (p === `/api/projects/${FIXTURE_PROJECT_ID}/apply-markup-rate` && method === 'POST') {
     const rate = Number(body.new_rate)

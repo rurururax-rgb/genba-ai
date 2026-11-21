@@ -23,6 +23,12 @@ type RequestBody = {
   items: ImportItem[]
 }
 
+/**
+ * 登録後に返す列（見積エディタの loadItems と同じ列）。画面はこの値で明細を表示し、全件を読み直さない。
+ * internal_memo は insert に含めているので、insert が成功していれば列は存在する
+ */
+const RETURN_COLUMNS = 'id,name,category,quantity,unit,selling_price,amount,retail_price,cost_price,vendor_name,group_id,sort_order,source,line_event_id,memo,row_type,selling_price_mode,markup_rate_override,internal_memo'
+
 /** 1 回で取り込める行数の上限（見積書 10 枚 × 明細 150 行を超えない） */
 const MAX_IMPORT_ITEMS = 1500
 
@@ -152,7 +158,7 @@ export async function POST(request: NextRequest) {
       }
     })
 
-    const { error } = await supabase.from('estimate_items').insert(rows)
+    const { data: saved, error } = await supabase.from('estimate_items').insert(rows).select(RETURN_COLUMNS)
     if (error) {
       console.error('[estimate-items/import] insert error:', error.message)
       // 42703 = undefined_column（internal_memo の migration 未適用）。備考をお客様向けへ回避させず、取込自体を止める
@@ -162,7 +168,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: error.message }, { status: 500 })
     }
 
-    return NextResponse.json({ created: rows.length })
+    // created は従来どおり。items は DB が確定した値（ID・売価・金額・並び順など）。
+    // RLS などで返らなかった場合は items を付けない（画面は従来どおり読み直す）
+    const savedItems = Array.isArray(saved) && saved.length === rows.length ? saved : undefined
+    return NextResponse.json({ created: rows.length, ...(savedItems ? { items: savedItems } : {}) })
   } catch (err) {
     console.error('[estimate-items/import] unexpected error:', err)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })

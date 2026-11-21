@@ -462,7 +462,10 @@ export function EstimateImportTab({ projectId, wide = false }: Props) {
       body: JSON.stringify({ project_id: projectId, items: targets.map(toImportItem) }),
     }).catch(() => null)
     if (res?.ok) {
-      window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items' } }))
+      // 保存された明細（DB の値）を一緒に渡す。見積エディタはそれを反映し、全件を読み直さない（無ければ読み直す）
+      const d = await readJson(res)
+      const items = Array.isArray(d?.items) && d.items.length === targets.length ? d.items : undefined
+      window.dispatchEvent(new CustomEvent('genba:data-changed', { detail: { target_table: 'estimate_items', project_id: projectId, ...(items ? { items } : {}) } }))
       return true
     }
     const d = res ? await readJson(res) : null

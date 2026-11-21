@@ -22,6 +22,7 @@ const G_A1_DELETED = 'group-a1-deleted'
 const G_B1 = 'group-b1'
 
 let currentUser: string | null
+let insertSeq = 0
 let tables: Record<string, Row[]>
 
 function seed() {
@@ -82,14 +83,18 @@ function from(table: string) {
     limit: (n: number) => { lim = n; return q },
     single: () => one(true),
     maybeSingle: () => one(false),
+    // insert(rows).select(cols) … 登録した行（DB が付けた id を含む）を返す
     insert: (rows: Row[]) => {
       const mine = new Set(visible('company_members').map(r => r.company_id))
       // RLS（WITH CHECK = USING）は company_id だけを見る
-      if (rows.some(r => !mine.has(r.company_id))) {
-        return Promise.resolve({ error: { code: '42501', message: 'new row violates row-level security policy' } })
-      }
-      tables[table].push(...rows)
-      return Promise.resolve({ error: null })
+      const result = rows.some(r => !mine.has(r.company_id))
+        ? { data: null, error: { code: '42501', message: 'new row violates row-level security policy' } }
+        : (() => {
+            const saved = rows.map(r => ({ id: `new-${++insertSeq}`, ...r }))
+            tables[table].push(...saved)
+            return { data: saved, error: null }
+          })()
+      return { select: () => Promise.resolve(result), then: (f: (v: typeof result) => unknown) => Promise.resolve(result).then(f) }
     },
   }
   return q
@@ -123,7 +128,13 @@ beforeEach(() => {
 describe('見積取込: 正常系（従来どおり保存される）', () => {
   it('自社の案件・同じ案件の工種へ取り込める（売価・社内メモ・sort_order も従来どおり）', async () => {
     const r = await post({ project_id: P_A1, group_id: G_A1, items: [ITEM, { ...ITEM, name: '解体工事', cost_price: 180000 }] })
-    expect(r).toEqual({ status: 200, json: { created: 2 } })
+    expect(r.status).toBe(200)
+    expect(r.json.created).toBe(2)
+    // 登録した行（DB が確定した値）を返す。画面はこれで表示し、全件を読み直さない
+    expect(r.json.items).toEqual([
+      expect.objectContaining({ id: expect.any(String), group_id: G_A1, name: '養生工事', selling_price: 72500, selling_price_mode: 'auto', sort_order: 5 }),
+      expect.objectContaining({ name: '解体工事', sort_order: 6 }),
+    ])
     expect(imported()).toEqual([
       expect.objectContaining({ project_id: P_A1, company_id: CO_A, group_id: G_A1, name: '養生工事', cost_price: 50000, selling_price: 72500, selling_price_mode: 'auto', internal_memo: '共用部・室内養生一式', sort_order: 5 }),
       expect.objectContaining({ group_id: G_A1, name: '解体工事', sort_order: 6 }),
@@ -133,7 +144,7 @@ describe('見積取込: 正常系（従来どおり保存される）', () => {
 
   it('group_id = null は未分類として取り込める', async () => {
     const r = await post({ project_id: P_A1, group_id: null, items: [ITEM] })
-    expect(r).toEqual({ status: 200, json: { created: 1 } })
+    expect(r).toMatchObject({ status: 200, json: { created: 1, items: [expect.objectContaining({ group_id: null })] } })
     expect(imported()).toEqual([expect.objectContaining({ project_id: P_A1, group_id: null, sort_order: 10 })])
   })
 
