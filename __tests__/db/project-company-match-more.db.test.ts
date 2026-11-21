@@ -21,6 +21,8 @@ import { applyFullSchema } from './helpers/full-schema'
 
 const MIGRATION_KI001_MATCH = '20261013000002_enforce_project_company_match.sql'
 const MIGRATION = '20261014000001_enforce_project_company_match_more_tables.sql'
+// A社・B社の両方に所属するユーザーで検証するため、1 ユーザー 1 社の制約（20261121000002）は適用しない
+const MIGRATION_ONE_COMPANY = '20261121000002_one_company_per_user.sql'
 
 type Spec = {
   tbl: string
@@ -177,7 +179,7 @@ async function tablePrivileges(c: Client) {
 async function freshDb(name: string, skip: string[] = [MIGRATION]) {
   await server.createDatabase(name)
   const c = await server.connect(name)
-  await applyFullSchema(c, { skip })
+  await applyFullSchema(c, { skip: [...skip, MIGRATION_ONE_COMPANY] })
   await seed(c)
   return c
 }
@@ -189,7 +191,7 @@ beforeAll(async () => {
   server = await startLocalPostgres()
   await server.createDatabase('pcm2')
   admin = await server.connect('pcm2')
-  await applyFullSchema(admin, { skip: [MIGRATION] })
+  await applyFullSchema(admin, { skip: [MIGRATION, MIGRATION_ONE_COMPANY] })
   await seed(admin)
   PROJECT_A = await newProject(admin, COMPANY_A)
   PROJECT_A2 = await newProject(admin, COMPANY_A)
